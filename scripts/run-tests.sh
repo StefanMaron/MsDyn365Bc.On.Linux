@@ -246,11 +246,51 @@ else
 fi
 
 CU_COUNT=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0")
+
+# If no codeunits were inserted, wait for server-side compilation
+if [ "${CU_COUNT:-0}" = "0" ]; then
+    echo "  Waiting for server-side compilation..."
+    for i in $(seq 1 30); do
+        sleep 5
+        # Re-run the insert (compilation may have completed)
+        if [ -n "$TEST_JSON" ]; then
+            while IFS='|' read -r TYPE ID NAME; do
+                [ -z "$TYPE" ] || [ "$TYPE" != "CU" ] && continue
+                if [ -n "$CODEUNIT_RANGE" ] && [[ "$CODEUNIT_RANGE" != *".."* ]] && [ "$ID" != "$CODEUNIT_RANGE" ]; then
+                    continue
+                fi
+                run_sql "
+                USE [CRONUS];
+                IF NOT EXISTS (SELECT 1 FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Test Codeunit] = $ID)
+                AND EXISTS (SELECT 1 FROM [Application Object Metadata] WHERE [Object Type] = 5 AND [Object ID] = $ID)
+                BEGIN
+                    SET IDENTITY_INSERT [$TEST_METHOD_TABLE] ON;
+                    INSERT INTO [$TEST_METHOD_TABLE]
+                    ([Test Suite],[Line No_],[Test Codeunit],[Name],[Function],[Run],[Result],[Line Type],
+                     [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
+                     [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
+                     [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
+                    VALUES (N'DEFAULT',$((i * 10000)),$ID,N'$NAME',N'',1,0,0,
+                            '1753-01-01','1753-01-01',0,N'',N'',0x,0x,0,N'',0x,
+                            NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
+                            GETUTCDATE(),'00000000-0000-0000-0000-000000000001');
+                    SET IDENTITY_INSERT [$TEST_METHOD_TABLE] OFF;
+                END
+                " > /dev/null 2>&1 || true
+            done < "$TMPLINES"
+        fi
+        CU_COUNT=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0")
+        [ "${CU_COUNT:-0}" -gt 0 ] && break
+        [ $((i % 6)) -eq 0 ] && echo "  Still waiting... ($((i*5))s)"
+    done
+fi
+
 FUNC_COUNT=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 1")
 echo "  Test codeunits: ${CU_COUNT:-0}, Test methods: ${FUNC_COUNT:-0}"
 
 if [ "${CU_COUNT:-0}" = "0" ]; then
-    echo "ERROR: No test codeunits found"
+    echo "ERROR: No test codeunits found after waiting for compilation"
+    echo "  Check that the test app is published and the codeunit exists in Application Object Metadata"
     exit 1
 fi
 
