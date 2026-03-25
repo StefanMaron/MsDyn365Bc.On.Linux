@@ -163,18 +163,43 @@ run_sql "USE [CRONUS]; DELETE FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'D
 
 # Insert codeunit + function lines
 if [ -n "$TEST_JSON" ]; then
-    # Parse SymbolReference.json to discover test codeunits and their [Test] methods
+    # Parse SymbolReference.json into a flat list: CU_ID|CU_NAME|METHOD_NAME
+    # One line per test method, codeunit lines have empty METHOD_NAME
     echo "  Parsing .app SymbolReference.json..."
+    TEST_LINES=$(echo "$TEST_JSON" | python3 -c "
+import sys, json
+data = json.loads(sys.stdin.read().lstrip('\ufeff'))
+for cu in data.get('Codeunits', []):
+    props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
+    if props.get('Subtype') != 'Test': continue
+    print(f\"CU|{cu['Id']}|{cu['Name']}\")
+    for m in cu.get('Methods', []):
+        attrs = [a.get('Name','') for a in m.get('Attributes',[])]
+        if 'Test' in attrs:
+            print(f\"FN|{cu['Id']}|{m['Name']}\")
+" 2>/dev/null || true)
+
     LINE_NO=10000
-    while IFS='|' read -r CU_ID CU_NAME; do
-        [ -z "$CU_ID" ] && continue
+    echo "$TEST_LINES" | while IFS='|' read -r TYPE ID NAME; do
+        [ -z "$TYPE" ] && continue
+
         # Apply range filter
-        if [ -n "$CODEUNIT_RANGE" ] && [[ "$CODEUNIT_RANGE" != *".."* ]] && [ "$CU_ID" != "$CODEUNIT_RANGE" ]; then
+        if [ -n "$CODEUNIT_RANGE" ] && [[ "$CODEUNIT_RANGE" != *".."* ]] && [ "$ID" != "$CODEUNIT_RANGE" ]; then
             continue
         fi
-        echo "  Codeunit $CU_ID: $CU_NAME"
 
-        # Insert codeunit-level line
+        if [ "$TYPE" = "CU" ]; then
+            echo "  Codeunit $ID: $NAME"
+            LINE_TYPE=0
+            FUNC=""
+            LEVEL=0
+        else
+            echo "    - $NAME"
+            LINE_TYPE=1
+            FUNC="$NAME"
+            LEVEL=1
+        fi
+
         run_sql "
         USE [CRONUS];
         SET IDENTITY_INSERT [$TEST_METHOD_TABLE] ON;
@@ -183,51 +208,15 @@ if [ -n "$TEST_JSON" ]; then
          [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
          [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
          [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
-        VALUES (N'DEFAULT',$LINE_NO,$CU_ID,N'$CU_NAME',N'',1,0,0,
-                '1753-01-01','1753-01-01',0,N'',N'',0x,0x,0,N'',0x,
+        VALUES (N'DEFAULT',$LINE_NO,$ID,N'$NAME',N'$FUNC',1,0,$LINE_TYPE,
+                '1753-01-01','1753-01-01',$LEVEL,N'',N'',0x,0x,0,N'',0x,
                 NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
                 GETUTCDATE(),'00000000-0000-0000-0000-000000000001');
         SET IDENTITY_INSERT [$TEST_METHOD_TABLE] OFF;
         " > /dev/null 2>&1 || true
-        LINE_NO=$((LINE_NO + 10000))
 
-        # Insert function-level lines for each [Test] method
-        while IFS='|' read -r METHOD_NAME; do
-            [ -z "$METHOD_NAME" ] && continue
-            run_sql "
-            USE [CRONUS];
-            SET IDENTITY_INSERT [$TEST_METHOD_TABLE] ON;
-            INSERT INTO [$TEST_METHOD_TABLE]
-            ([Test Suite],[Line No_],[Test Codeunit],[Name],[Function],[Run],[Result],[Line Type],
-             [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
-             [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
-             [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
-            VALUES (N'DEFAULT',$LINE_NO,$CU_ID,N'$METHOD_NAME',N'$METHOD_NAME',1,0,1,
-                    '1753-01-01','1753-01-01',1,N'',N'',0x,0x,0,N'',0x,
-                    NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
-                    GETUTCDATE(),'00000000-0000-0000-0000-000000000001');
-            SET IDENTITY_INSERT [$TEST_METHOD_TABLE] OFF;
-            " > /dev/null 2>&1 || true
-            LINE_NO=$((LINE_NO + 1))
-            echo "    - $METHOD_NAME"
-        done < <(echo "$TEST_JSON" | python3 -c "
-import sys, json
-data = json.loads(sys.stdin.read().lstrip('\ufeff'))
-for cu in data.get('Codeunits', []):
-    if cu.get('Id') == $CU_ID:
-        for m in cu.get('Methods', []):
-            attrs = [a.get('Name','') for a in m.get('Attributes',[])]
-            if 'Test' in attrs:
-                print(m['Name'])
-" 2>/dev/null)
-    done < <(echo "$TEST_JSON" | python3 -c "
-import sys, json
-data = json.loads(sys.stdin.read().lstrip('\ufeff'))
-for cu in data.get('Codeunits', []):
-    props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
-    if props.get('Subtype') == 'Test':
-        print(f\"{cu['Id']}|{cu['Name']}\")
-" 2>/dev/null)
+        LINE_NO=$((LINE_NO + 1))
+    done
 else
     # Fall back: discover test codeunits from Application Object Metadata in SQL
     echo "  Querying Application Object Metadata..."
