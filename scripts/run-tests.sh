@@ -61,10 +61,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Helper: run SQL query via stdin (avoids quoting issues with $ in table names)
+# Helper: run SQL query via environment variable (avoids all stdin/pipe conflicts)
 run_sql() {
-    echo "$1" | docker exec -i "$SQL_CONTAINER" /opt/mssql-tools18/bin/sqlcmd \
-        -S localhost -U sa -P "$SQL_PASSWORD" -C -No -i /dev/stdin 2>&1
+    docker exec -e "_Q=$1" "$SQL_CONTAINER" bash -c \
+        '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$0" -C -No -Q "$_Q"' \
+        "$SQL_PASSWORD" 2>&1
 }
 
 sql_count() {
