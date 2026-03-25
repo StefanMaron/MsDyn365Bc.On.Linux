@@ -4,8 +4,7 @@ FROM mcr.microsoft.com/dotnet/sdk:8.0 AS builder
 WORKDIR /build
 COPY src/ src/
 RUN cd src/StartupHook && dotnet publish -c Release -o /build/output/hook 2>&1 | tail -5 && \
-    echo "Hook output:" && ls /build/output/hook/*.dll | wc -l && \
-    cp src/stubs/DrawingStub/bin/Release/net8.0/System.Drawing.Common.dll /build/output/DrawingStub.dll
+    cp /build/src/stubs/DrawingStub/bin/Release/net8.0/System.Drawing.Common.dll /build/output/DrawingStub.dll
 
 # Publish MergeNetstandard as self-contained tool
 RUN cd src/tools/MergeNetstandard && dotnet publish -c Release -o /build/output/tools 2>&1 | tail -3
