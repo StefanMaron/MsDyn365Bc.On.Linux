@@ -1,9 +1,14 @@
 # Build stage: compile StartupHook + stubs + tools
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS builder
 
+# gcc needed for compiling Win32 P/Invoke stubs (kernel32_stubs.c → libwin32_stubs.so)
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /build
 COPY src/ src/
 RUN cd src/StartupHook && dotnet publish -c Release -o /build/output/hook
+
 RUN cp /build/src/stubs/DrawingStub/bin/Release/net8.0/System.Drawing.Common.dll /build/output/DrawingStub.dll
 
 # Publish MergeNetstandard as self-contained tool
