@@ -40,10 +40,16 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Setup .NET SDK
+    - name: Setup .NET SDK and AL compiler
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '8.0.x'
+
+    - name: Install AL compiler
+      run: |
+        dotnet tool install -g Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
+          --version 16.2.28.57946 2>/dev/null || true
+        echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
 
     - name: Build and start BC
       env:
