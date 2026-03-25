@@ -20,9 +20,12 @@ on:
     steps:
     - id: set
       run: |
-        VERSIONS="${{ inputs.versions || '27.0,27.5' }}"
-        JSON=$(echo "$VERSIONS" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip().split(',')))")
-        echo "matrix={\"bc_version\":$JSON}" >> $GITHUB_OUTPUT
+        VERSIONS='${{ inputs.versions }}'
+        if [ -z "$VERSIONS" ]; then
+          VERSIONS="27.0,27.5"
+        fi
+        JSON=$(echo "$VERSIONS" | python3 -c "import sys,json; print(json.dumps({'bc_version': sys.stdin.read().strip().split(',')}))")
+        echo "matrix=$JSON" >> $GITHUB_OUTPUT
 
   test:
     needs: prepare
