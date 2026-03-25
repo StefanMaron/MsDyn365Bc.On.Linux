@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>System.Drawing.Common</AssemblyName>
+    <Nullable>enable</Nullable>
+    <NoWarn>CA1416;CS0436</NoWarn>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,16 @@
+{
+  "name": "BC on Linux",
+  "image": "mcr.microsoft.com/devcontainers/dotnet:8.0",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "forwardPorts": [7049, 7048, 7052, 7085],
+  "postCreateCommand": "docker compose up -d --build",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-dynamics-smb.al"
+      ]
+    }
+  }
+}

@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <NoWarn>CA1416</NoWarn>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Cross-platform SqlClient for Linux (BC bundles Windows-only version) -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.0.5" />
+  </ItemGroup>
+
+  <!-- Force unix SqlClient into publish output (overwrite Windows version) -->
+  <Target Name="CopySqlClient" AfterTargets="Publish">
+    <Exec Command="cp $(NuGetPackageRoot)microsoft.data.sqlclient/6.0.5/runtimes/unix/lib/net8.0/Microsoft.Data.SqlClient.dll $(PublishDir)Microsoft.Data.SqlClient.dll"
+          Condition="'$(OS)' != 'Windows_NT'" />
+    <Message Text="Copied unix SqlClient to publish" Importance="high" />
+  </Target>
+
+  <!-- Exclude stub subprojects from this compilation -->
+  <ItemGroup>
+    <Compile Remove="../stubs/**" />
+    <None Remove="../stubs/**" />
+  </ItemGroup>
+
+  <!-- Compile Win32 stubs to .so for P/Invoke interception on Linux -->
+  <Target Name="CompileWin32Stubs" BeforeTargets="Publish" Condition="'$(OS)' != 'Windows_NT'">
+    <Exec Command="cc -shared -fPIC -o $(PublishDir)libwin32_stubs.so kernel32_stubs.c" />
+    <Message Text="Compiled libwin32_stubs.so" Importance="high" />
+  </Target>
+
+  <!-- Build and copy stub DLLs -->
+  <Target Name="BuildStubs" BeforeTargets="Publish">
+    <Exec Command="dotnet build ../stubs/GenevaStub/GenevaStub.csproj -c Release -v q" />
+    <Copy SourceFiles="../stubs/GenevaStub/bin/Release/net8.0/OpenTelemetry.Exporter.Geneva.dll"
+          DestinationFolder="$(PublishDir)" />
+    <Exec Command="dotnet build ../stubs/DrawingStub/DrawingStub.csproj -c Release -v q" />
+    <Copy SourceFiles="../stubs/DrawingStub/bin/Release/net8.0/System.Drawing.Common.dll"
+          DestinationFolder="$(PublishDir)" />
+    <Exec Command="dotnet build ../stubs/PerfCounterStub/PerfCounterStub.csproj -c Release -v q" />
+    <Copy SourceFiles="../stubs/PerfCounterStub/bin/Release/net8.0/System.Diagnostics.PerformanceCounter.dll"
+          DestinationFolder="$(PublishDir)" />
+    <Exec Command="dotnet build ../stubs/WindowsPrincipalStub/WindowsPrincipalStub.csproj -c Release -v q" />
+    <Copy SourceFiles="../stubs/WindowsPrincipalStub/bin/Release/net8.0/System.Security.Principal.Windows.dll"
+          DestinationFolder="$(PublishDir)" />
+    <Exec Command="dotnet build ../stubs/HttpSysStub/HttpSysStub.csproj -c Release -v q" />
+    <Copy SourceFiles="../stubs/HttpSysStub/bin/Release/net8.0/Microsoft.AspNetCore.Server.HttpSys.dll"
+          DestinationFolder="$(PublishDir)" />
+    <Message Text="Copied stub DLLs" Importance="high" />
+  </Target>
+
+</Project>

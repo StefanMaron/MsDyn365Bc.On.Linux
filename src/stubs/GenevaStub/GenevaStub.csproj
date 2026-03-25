@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>OpenTelemetry.Exporter.Geneva</AssemblyName>
+    <Version>1.9.0.62</Version>
+    <Nullable>enable</Nullable>
+    <NoWarn>CA1416</NoWarn>
+    <!-- Match the original assembly's public key token for binding redirects -->
+    <SignAssembly>false</SignAssembly>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="OpenTelemetry" Version="1.9.*" />
+    <PackageReference Include="OpenTelemetry.Api" Version="1.9.*" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.*" />
+  </ItemGroup>
+</Project>

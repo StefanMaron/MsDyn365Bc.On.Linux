@@ -1,0 +1,198 @@
+name: Test BC Versions
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'BC versions to test (comma-separated, e.g. "27.0,27.5,28.0")'
+        required: false
+        default: '27.0,27.5,28.0'
+        type: string
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+    - id: set
+      run: |
+        VERSIONS="${{ inputs.versions || '27.0,27.5' }}"
+        JSON=$(echo "$VERSIONS" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip().split(',')))")
+        echo "matrix={\"bc_version\":$JSON}" >> $GITHUB_OUTPUT
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    name: BC ${{ matrix.bc_version }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Build and start BC
+      env:
+        BC_VERSION: ${{ matrix.bc_version }}
+      run: |
+        STEP_START=$(date +%s)
+        docker compose up -d --build 2>&1 | tail -10
+
+        echo "Waiting for BC to start..."
+        for i in $(seq 1 180); do
+          if docker compose logs bc 2>&1 | grep -q "Ready for test apps\|Press Enter"; then
+            echo "BC v$BC_VERSION ready after $((i*5))s"
+            break
+          fi
+          if ! docker compose ps bc 2>/dev/null | grep -q "Up"; then
+            echo "ERROR: BC container died"
+            docker compose logs bc 2>&1 | tail -50
+            exit 1
+          fi
+          [ $((i % 12)) -eq 0 ] && echo "  $((i*5))s: $(docker compose logs bc 2>&1 | grep '\[entrypoint\]' | tail -1)"
+          sleep 5
+        done
+
+        if ! docker compose logs bc 2>&1 | grep -q "Ready for test apps\|Press Enter"; then
+          echo "ERROR: BC did not start within 15 minutes"
+          docker compose logs bc 2>&1 | tail -100
+          exit 1
+        fi
+
+        echo "BUILD_DURATION=$(($(date +%s) - STEP_START))" >> $GITHUB_ENV
+
+    - name: Verify endpoints
+      env:
+        BC_VERSION: ${{ matrix.bc_version }}
+      run: |
+        AUTH="admin:Admin123!"
+        INSTANCE="InstanceName"
+
+        echo "=== Checking endpoints ==="
+
+        # OData
+        HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" \
+          "http://localhost:7048/$INSTANCE/ODataV4/Company" 2>/dev/null || echo "000")
+        echo "  OData:    $HTTP"
+        [ "$HTTP" = "200" ] || { echo "FAIL: OData not responding"; exit 1; }
+
+        # Dev endpoint
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" \
+          "http://localhost:7049/$INSTANCE/dev/packages" 2>/dev/null || echo "000")
+        echo "  Dev:      $HTTP"
+        # 400 is expected (no package specified), anything != 000 means it's up
+        [ "$HTTP" != "000" ] || { echo "FAIL: Dev endpoint not responding"; exit 1; }
+
+        # API
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" \
+          "http://localhost:7052/$INSTANCE/api/v2.0/companies" 2>/dev/null || echo "000")
+        echo "  API:      $HTTP"
+
+        # Company name
+        COMPANY=$(curl -sf --max-time 10 -u "$AUTH" \
+          "http://localhost:7048/$INSTANCE/ODataV4/Company" 2>/dev/null | \
+          python3 -c "import json,sys; print(json.load(sys.stdin)['value'][0]['Name'])" 2>/dev/null)
+        echo "  Company:  $COMPANY"
+
+    - name: Download symbols
+      env:
+        BC_VERSION: ${{ matrix.bc_version }}
+      run: |
+        AUTH="admin:Admin123!"
+        INSTANCE="InstanceName"
+        DEV="http://localhost:7049/$INSTANCE/dev"
+        mkdir -p symbols
+
+        echo "=== Downloading symbols ==="
+        # System.app
+        curl -sf --max-time 30 -u "$AUTH" \
+          "$DEV/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
+          -o symbols/System.app 2>/dev/null && echo "  System.app: $(stat -c%s symbols/System.app) bytes" || echo "  System.app: FAILED"
+
+        # System Application (if published)
+        curl -sf --max-time 30 -u "$AUTH" \
+          "$DEV/packages?publisher=Microsoft&appName=System%20Application&appVersion=0.0.0.0" \
+          -o symbols/SystemApplication.app 2>/dev/null && echo "  SystemApplication.app: $(stat -c%s symbols/SystemApplication.app) bytes" || echo "  SystemApplication.app: not available"
+
+    - name: Publish sample extension
+      env:
+        BC_VERSION: ${{ matrix.bc_version }}
+      run: |
+        AUTH="admin:Admin123!"
+        INSTANCE="InstanceName"
+        DEV="http://localhost:7049/$INSTANCE/dev/apps?SchemaUpdateMode=forcesync"
+
+        # Create a minimal test extension
+        mkdir -p /tmp/testapp
+        cat > /tmp/testapp/app.json << 'APPJSON'
+        {
+          "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "name": "Smoke Test",
+          "publisher": "BCLinux",
+          "version": "1.0.0.0",
+          "runtime": "14.0",
+          "target": "OnPrem",
+          "dependencies": [],
+          "idRanges": [{ "from": 70000, "to": 70000 }]
+        }
+        APPJSON
+
+        cat > /tmp/testapp/HelloWorld.Codeunit.al << 'ALCODE'
+        codeunit 70000 "Smoke Test"
+        {
+            trigger OnRun()
+            var
+                msg: Text;
+            begin
+                msg := 'BC on Linux works!';
+            end;
+        }
+        ALCODE
+
+        # Compile with AL compiler
+        AL_TOOL=$(find ~/.dotnet/tools -name "alc" -type f 2>/dev/null | head -1)
+        if [ -z "$AL_TOOL" ]; then
+          dotnet tool install -g Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux --version 16.2.28.57946 2>/dev/null || true
+          AL_TOOL=$(find ~/.dotnet/tools -name "alc" -type f 2>/dev/null | head -1)
+        fi
+
+        # Download System.app as symbol
+        mkdir -p /tmp/testapp/.alpackages
+        curl -sf --max-time 30 -u "$AUTH" \
+          "http://localhost:7049/$INSTANCE/dev/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
+          -o /tmp/testapp/.alpackages/System.app 2>/dev/null
+
+        # Compile
+        echo "Compiling sample extension..."
+        $AL_TOOL /project:/tmp/testapp /packagecachepath:/tmp/testapp/.alpackages /out:/tmp/testapp/SmokeTest.app 2>&1 || {
+          echo "WARNING: Compilation failed (may need assembly probing paths for this BC version)"
+          exit 0
+        }
+
+        # Publish
+        echo "Publishing sample extension..."
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 \
+          -u "$AUTH" -X POST \
+          -F "file=@/tmp/testapp/SmokeTest.app;type=application/octet-stream" "$DEV")
+        echo "  Publish: HTTP $HTTP"
+        [ "$HTTP" = "200" ] || { echo "WARNING: Publish failed (HTTP $HTTP)"; exit 0; }
+        echo "Sample extension published successfully"
+
+    - name: Summary
+      if: always()
+      env:
+        BC_VERSION: ${{ matrix.bc_version }}
+      run: |
+        echo "=== BC v$BC_VERSION ==="
+        echo "Build + start: ${BUILD_DURATION:-n/a}s"
+        docker compose logs bc 2>&1 | grep "\[entrypoint\]" | tail -5

@@ -1,0 +1,19 @@
+# Build outputs
+**/bin/
+**/obj/
+**/publish/
+
+# .NET
+*.user
+*.suo
+
+# Local environment overrides (the shipped .env has defaults)
+.env.local
+
+# Artifacts (downloaded at runtime)
+artifacts/
+
+# IDE
+.vs/
+.vscode/
+*.code-workspace
