@@ -28,7 +28,9 @@
 #   - SQL Server accessible via docker exec
 #   - .NET 8 SDK (for building the TestRunner tool)
 
-set -euo pipefail
+set -uo pipefail
+# Note: -e is intentionally omitted. SQL operations may return non-zero and
+# we handle errors explicitly.
 
 # Defaults
 BC_HOST="localhost:7085"
