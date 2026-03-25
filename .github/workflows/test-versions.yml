@@ -118,15 +118,23 @@ jobs:
         mkdir -p symbols
 
         echo "=== Downloading symbols ==="
-        # System.app
+        # System.app (platform symbols — always available)
         curl -sf --max-time 30 -u "$AUTH" \
           "$DEV/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
-          -o symbols/System.app 2>/dev/null && echo "  System.app: $(stat -c%s symbols/System.app) bytes" || echo "  System.app: FAILED"
+          -o symbols/System.app
+        echo "  System.app: $(stat -c%s symbols/System.app) bytes"
 
-        # System Application (if published)
+        # System Application (pre-installed from CRONUS)
         curl -sf --max-time 30 -u "$AUTH" \
           "$DEV/packages?publisher=Microsoft&appName=System%20Application&appVersion=0.0.0.0" \
-          -o symbols/SystemApplication.app 2>/dev/null && echo "  SystemApplication.app: $(stat -c%s symbols/SystemApplication.app) bytes" || echo "  SystemApplication.app: not available"
+          -o symbols/SystemApplication.app
+        echo "  SystemApplication.app: $(stat -c%s symbols/SystemApplication.app) bytes"
+
+        # Base Application (pre-installed from CRONUS)
+        curl -sf --max-time 30 -u "$AUTH" \
+          "$DEV/packages?publisher=Microsoft&appName=Base%20Application&appVersion=0.0.0.0" \
+          -o symbols/BaseApplication.app
+        echo "  BaseApplication.app: $(stat -c%s symbols/BaseApplication.app) bytes"
 
     - name: Publish sample extension
       env:
@@ -136,7 +144,7 @@ jobs:
         INSTANCE="InstanceName"
         DEV="http://localhost:7049/$INSTANCE/dev/apps?SchemaUpdateMode=forcesync"
 
-        # Create a minimal test extension
+        # Create a minimal test extension with a test codeunit
         mkdir -p /tmp/testapp
         cat > /tmp/testapp/app.json << 'APPJSON'
         {
@@ -147,50 +155,74 @@ jobs:
           "runtime": "14.0",
           "target": "OnPrem",
           "dependencies": [],
-          "idRanges": [{ "from": 70000, "to": 70000 }]
+          "idRanges": [{ "from": 70000, "to": 70001 }]
         }
         APPJSON
 
-        cat > /tmp/testapp/HelloWorld.Codeunit.al << 'ALCODE'
+        cat > /tmp/testapp/SmokeTest.Codeunit.al << 'ALCODE'
         codeunit 70000 "Smoke Test"
         {
-            trigger OnRun()
-            var
-                msg: Text;
+            Subtype = Test;
+
+            [Test]
+            procedure TestBCOnLinuxWorks()
             begin
-                msg := 'BC on Linux works!';
+                if Today() < 20200101D then
+                    Error('Date sanity check failed');
             end;
         }
         ALCODE
-
-        # Compile with AL compiler
-        AL_TOOL=$(find ~/.dotnet/tools -name "alc" -type f 2>/dev/null | head -1)
-        if [ -z "$AL_TOOL" ]; then
-          dotnet tool install -g Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux --version 16.2.28.57946 2>/dev/null || true
-          AL_TOOL=$(find ~/.dotnet/tools -name "alc" -type f 2>/dev/null | head -1)
-        fi
 
         # Download System.app as symbol
         mkdir -p /tmp/testapp/.alpackages
         curl -sf --max-time 30 -u "$AUTH" \
           "http://localhost:7049/$INSTANCE/dev/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
-          -o /tmp/testapp/.alpackages/System.app 2>/dev/null
+          -o /tmp/testapp/.alpackages/System.app
 
         # Compile
-        echo "Compiling sample extension..."
-        $AL_TOOL /project:/tmp/testapp /packagecachepath:/tmp/testapp/.alpackages /out:/tmp/testapp/SmokeTest.app 2>&1 || {
-          echo "WARNING: Compilation failed (may need assembly probing paths for this BC version)"
-          exit 0
-        }
+        echo "Compiling sample test extension..."
+        AL compile \
+          "/project:/tmp/testapp" \
+          "/packagecachepath:/tmp/testapp/.alpackages" \
+          "/out:/tmp/testapp/SmokeTest.app" \
+          || { echo "FAIL: Sample extension compilation failed"; exit 1; }
 
         # Publish
-        echo "Publishing sample extension..."
+        echo "Publishing sample test extension..."
         HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 \
           -u "$AUTH" -X POST \
           -F "file=@/tmp/testapp/SmokeTest.app;type=application/octet-stream" "$DEV")
         echo "  Publish: HTTP $HTTP"
-        [ "$HTTP" = "200" ] || { echo "WARNING: Publish failed (HTTP $HTTP)"; exit 0; }
-        echo "Sample extension published successfully"
+        [ "$HTTP" = "200" ] || { echo "FAIL: Publish failed (HTTP $HTTP)"; exit 1; }
+
+    - name: Publish test framework
+      env:
+        BC_VERSION: ${{ matrix.bc_version }}
+      run: |
+        AUTH="admin:Admin123!"
+        INSTANCE="InstanceName"
+        DEV="http://localhost:7049/$INSTANCE/dev/apps?SchemaUpdateMode=forcesync"
+
+        # The MS Test Runner (codeunits 130450-130456) may not be pre-installed.
+        # Download and publish it from platform artifacts inside the container.
+        echo "Publishing MS Test Runner from platform artifacts..."
+        TR_APP=$(docker compose exec bc find /bc/artifacts/platform -ipath "*testframework/TestRunner*/*.app" 2>/dev/null | head -1 | tr -d '\r')
+        if [ -n "$TR_APP" ]; then
+          docker compose exec bc curl -s -o /dev/null -w "  Test Runner (MS): HTTP %{http_code}\n" --max-time 60 \
+            -u "$AUTH" -X POST \
+            -F "file=@$TR_APP;type=application/octet-stream" "$DEV" 2>/dev/null
+        else
+          echo "  Test Runner not found in artifacts — skipping"
+        fi
+
+        # Re-publish our TestRunner Extension (depends on MS Test Runner)
+        echo "Publishing TestRunner Extension..."
+        docker compose exec bc bash -c '
+          [ -f /bc/testrunner/TestRunner.app ] && curl -s -o /dev/null -w "  TestRunner Extension: HTTP %{http_code}\n" --max-time 30 \
+            -u "admin:Admin123!" -X POST \
+            -F "file=@/bc/testrunner/TestRunner.app;type=application/octet-stream" \
+            "http://localhost:7049/InstanceName/dev/apps?SchemaUpdateMode=synchronize"
+        ' 2>/dev/null || echo "  TestRunner Extension: skipped"
 
     - name: Run sample test
       env:
@@ -206,30 +238,25 @@ jobs:
           python3 -c "import sys,json; print(json.load(sys.stdin)['value'][0]['Id'])")
         API="http://localhost:7052/$INSTANCE/api/custom/automation/v1.0/companies($COMPANY_ID)/codeunitRunRequests"
 
-        # Check if TestRunner API is available
+        # Verify TestRunner API is available
         HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" "$API" 2>/dev/null || true)
-        if [ "$HTTP" != "200" ]; then
-          echo "TestRunner API not available (HTTP $HTTP) — skipping test execution"
-          exit 0
-        fi
+        [ "$HTTP" = "200" ] || { echo "FAIL: TestRunner API not available (HTTP $HTTP)"; exit 1; }
 
-        # Run the smoke test codeunit (70000)
-        echo "Running smoke test codeunit..."
+        # Run the smoke test codeunit
+        echo "Running smoke test codeunit 70000..."
         RESP=$(curl -sf --max-time 15 -u "$AUTH" -X POST \
           -H "Content-Type: application/json" -d '{"codeunitId": 70000}' \
-          "$API" 2>/dev/null) || { echo "WARNING: Could not create test request"; exit 0; }
-        ID=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('Id',''))" 2>/dev/null)
+          "$API")
+        ID=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('Id',''))")
 
-        if [ -n "$ID" ]; then
-          curl -sf -o /dev/null --max-time 60 -u "$AUTH" -X POST \
-            -H "Content-Type: application/json" \
-            "$API($ID)/Microsoft.NAV.runCodeunit" 2>/dev/null || true
+        curl -sf -o /dev/null --max-time 120 -u "$AUTH" -X POST \
+          -H "Content-Type: application/json" \
+          "$API($ID)/Microsoft.NAV.runCodeunit" 2>/dev/null || true
 
-          RESULT=$(curl -sf --max-time 10 -u "$AUTH" "$API($ID)" 2>/dev/null | \
-            python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('LastResult','Unknown'))" 2>/dev/null)
-          echo "Test result: $RESULT"
-          [ "$RESULT" = "Success" ] && echo "Test execution works!"
-        fi
+        RESULT=$(curl -sf --max-time 10 -u "$AUTH" "$API($ID)" | \
+          python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('LastResult','Unknown'))")
+        echo "Test result: $RESULT"
+        [ "$RESULT" = "Success" ] || { echo "FAIL: Test returned $RESULT"; exit 1; }
 
     - name: Summary
       if: always()
