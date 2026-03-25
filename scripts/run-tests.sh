@@ -34,8 +34,8 @@ set -euo pipefail
 BC_HOST="localhost:7085"
 COMPANY=""
 SQL_PASSWORD="${SA_PASSWORD:-Passw0rd123!}"
-SQL_CONTAINER="bc-linux-sql-1"
-BC_CONTAINER="bc-linux-bc-1"
+SQL_CONTAINER="${SQL_CONTAINER:-}"
+BC_CONTAINER="${BC_CONTAINER:-}"
 TEST_RUNNER_ID=130451
 CODEUNIT_RANGE=""
 EXTENSION_ID=""
@@ -72,6 +72,20 @@ sql_count() {
 }
 
 echo "=== BC Test Runner ==="
+
+# Auto-detect container names if not specified
+# Try docker compose from the repo root (where docker-compose.yml lives)
+if [ -z "$SQL_CONTAINER" ]; then
+    SQL_CONTAINER=$(cd "$REPO_DIR" && docker compose ps -q sql 2>/dev/null | head -1)
+    [ -z "$SQL_CONTAINER" ] && SQL_CONTAINER=$(docker ps --filter "name=sql" --format "{{.Names}}" | grep -i sql | head -1)
+    [ -z "$SQL_CONTAINER" ] && SQL_CONTAINER="bc-linux-sql-1"
+fi
+if [ -z "$BC_CONTAINER" ]; then
+    BC_CONTAINER=$(cd "$REPO_DIR" && docker compose ps -q bc 2>/dev/null | head -1)
+    [ -z "$BC_CONTAINER" ] && BC_CONTAINER=$(docker ps --filter "expose=7085" --format "{{.Names}}" | head -1)
+    [ -z "$BC_CONTAINER" ] && BC_CONTAINER="bc-linux-bc-1"
+fi
+echo "Containers: sql=$SQL_CONTAINER bc=$BC_CONTAINER"
 
 # --- Step 0: Verify SQL access ---
 echo "Verifying SQL access..."
