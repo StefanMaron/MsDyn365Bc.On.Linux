@@ -180,7 +180,11 @@ for cu in data.get('Codeunits', []):
 " 2>/dev/null || true)
 
     LINE_NO=10000
-    echo "$TEST_LINES" | while IFS='|' read -r TYPE ID NAME; do
+    # Write test lines to a temp file to avoid pipe/stdin conflicts with docker exec
+    TMPLINES=$(mktemp)
+    echo "$TEST_LINES" > "$TMPLINES"
+
+    while IFS='|' read -r TYPE ID NAME; do
         [ -z "$TYPE" ] && continue
 
         # Apply range filter
@@ -190,14 +194,10 @@ for cu in data.get('Codeunits', []):
 
         if [ "$TYPE" = "CU" ]; then
             echo "  Codeunit $ID: $NAME"
-            LINE_TYPE=0
-            FUNC=""
-            LEVEL=0
+            LINE_TYPE=0; FUNC=""; LEVEL=0
         else
             echo "    - $NAME"
-            LINE_TYPE=1
-            FUNC="$NAME"
-            LEVEL=1
+            LINE_TYPE=1; FUNC="$NAME"; LEVEL=1
         fi
 
         run_sql "
@@ -216,7 +216,8 @@ for cu in data.get('Codeunits', []):
         " > /dev/null 2>&1 || true
 
         LINE_NO=$((LINE_NO + 1))
-    done
+    done < "$TMPLINES"
+    rm -f "$TMPLINES"
 else
     # Fall back: discover test codeunits from Application Object Metadata in SQL
     echo "  Querying Application Object Metadata..."
