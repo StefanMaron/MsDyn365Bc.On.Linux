@@ -167,19 +167,29 @@ jobs:
           sleep 5
         done
 
-        # Publish test framework from platform artifacts
+        # Wait for entrypoint to publish test framework (it does this automatically now)
+        echo "Waiting for test framework to be published..."
         BC_ID=$(docker compose ps -q bc)
-        echo "Publishing test framework..."
-        for appname in "Microsoft_Test Runner.app" "Microsoft_Library Assert.app" "Microsoft_Library Variable Storage.app" "Microsoft_Any.app"; do
+        for i in $(seq 1 60); do
+          # Check if Test Runner is installed by looking for its tables
+          SQL_ID=$(docker compose ps -q sql)
+          TABLE_EXISTS=$(docker exec -e "_QB=$(echo 'SELECT COUNT(*) FROM sys.tables WHERE name LIKE '\''%AL Test Suite%'\''' | base64 -w0)" $SQL_ID bash -c \
+            'echo "$_QB" | base64 -d | /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "'"$SA_PASSWORD"'" -C -No -d CRONUS -i /dev/stdin' 2>/dev/null \
+            | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+          [ "${TABLE_EXISTS:-0}" -gt 0 ] && echo "  Test framework tables found." && break
+          [ $((i % 10)) -eq 0 ] && echo "  Waiting... ($((i*5))s)"
+          sleep 5
+        done
+
+        # Also try publishing from host if entrypoint didn't do it
+        for appname in "Microsoft_Test Runner.app" "Microsoft_Library Assert.app"; do
           APPPATH=$(docker exec $BC_ID find /bc/artifacts -name "$appname" -not -path "*/Internal/*" 2>/dev/null | head -1)
           if [ -n "$APPPATH" ]; then
             HTTP=$(docker exec $BC_ID curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
               -u "$AUTH" -X POST \
               -F "file=@$APPPATH;type=application/octet-stream" \
               "http://localhost:7049/apps?SchemaUpdateMode=forcesync" 2>/dev/null || echo "000")
-            echo "  $appname: HTTP $HTTP"
-          else
-            echo "  $appname: NOT FOUND in artifacts"
+            echo "  $appname: $HTTP"
           fi
         done
 

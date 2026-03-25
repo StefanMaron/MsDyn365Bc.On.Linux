@@ -367,7 +367,8 @@ exec 3>/tmp/bc-stdin
 # Wait for dev endpoint to be ready, then publish test runner
 (
     INSTANCE=$(grep -oP 'ServerInstance" value="\K[^"]+' $SERVICE_DIR/CustomSettings.config 2>/dev/null || echo "BC")
-    DEV_URL="http://localhost:7049/$INSTANCE/dev"
+    # HttpSysStub strips the instance path — dev endpoint is at the root port
+    DEV_URL="http://localhost:7049"
 
     echo "[entrypoint] Waiting for BC to start..."
     for i in $(seq 1 180); do
@@ -381,7 +382,9 @@ exec 3>/tmp/bc-stdin
         if [ "$HTTP" != "000" ]; then
             break
         fi
+        sleep 5
     done
+    echo "[entrypoint] Dev endpoint ready (HTTP $HTTP)"
 
     # Patch #15: After BC has loaded all runtime DLLs into memory, rename them so
     # Cecil's probing paths can't find them. This forces all assembly resolution
