@@ -167,7 +167,7 @@ WHERE ao.[Object Type] = 5
 SET IDENTITY_INSERT [$TEST_METHOD_TABLE] OFF;
 " > /dev/null
 
-# Count how many were inserted
+# Count how many codeunit lines were inserted
 INSERTED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0" \
     | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
 
@@ -178,6 +178,10 @@ if [ "${INSERTED:-0}" = "0" ]; then
     echo "  Make sure your test app is published and contains codeunits with Subtype = Test"
     exit 1
 fi
+
+# Step 3b: Function-level method expansion
+# The C# TestRunner tries codeunit 130452 to expand methods at runtime.
+# If that fails, codeunit-level tracking is used (PASS/FAIL/EXECUTED per codeunit).
 
 # Step 4: Run tests via WebSocket client services
 echo ""
@@ -200,49 +204,71 @@ sleep 2
 # Step 5: Read and display results from SQL
 echo ""
 echo "=== Test Results ==="
+# Show codeunit-level summary
+echo "--- Codeunit Summary ---"
+run_sql "
+USE [CRONUS];
+SELECT
+    t.[Test Codeunit] AS CU,
+    RTRIM(t.[Name]) AS Name,
+    CASE t.[Result] WHEN 0 THEN 'PENDING' WHEN 1 THEN 'PASS' WHEN 2 THEN 'FAIL' WHEN 3 THEN 'EXECUTED' ELSE '?' END AS Status
+FROM [$TEST_METHOD_TABLE] t
+WHERE t.[Test Suite] = N'DEFAULT' AND t.[Line Type] = 0
+ORDER BY t.[Test Codeunit];
+"
+
+# Show function-level details (pass/fail per test method)
+echo ""
+echo "--- Test Method Details ---"
 RESULTS=$(run_sql "
 USE [CRONUS];
 SELECT
-    t.[Test Codeunit],
-    RTRIM(t.[Name]) AS Name,
-    t.[Result],
-    CASE t.[Result]
-        WHEN 0 THEN 'PENDING'
-        WHEN 1 THEN 'PASS'
-        WHEN 2 THEN 'FAIL'
-        WHEN 3 THEN 'EXECUTED'
-        ELSE 'UNKNOWN'
-    END AS Status,
-    CONVERT(varchar, t.[Start Time], 108) AS Started,
+    t.[Test Codeunit] AS CU,
+    RTRIM(t.[Function]) AS Method,
+    CASE t.[Result] WHEN 0 THEN 'PENDING' WHEN 1 THEN 'PASS' WHEN 2 THEN 'FAIL' WHEN 3 THEN 'SKIP' ELSE '?' END AS Status,
     RTRIM(CAST(t.[Error Message Preview] AS nvarchar(200))) AS Error
 FROM [$TEST_METHOD_TABLE] t
-WHERE t.[Test Suite] = N'DEFAULT'
-  AND t.[Line Type] = 0
-ORDER BY t.[Test Codeunit];
+WHERE t.[Test Suite] = N'DEFAULT' AND t.[Line Type] = 1
+ORDER BY t.[Test Codeunit], t.[Line No_];
 ")
 echo "$RESULTS"
 
-# Count results (Result: 0=Pending, 1=Pass, 2=Fail, 3=Executed/Inconclusive)
-PASSED=$(echo "$RESULTS" | grep -cE "PASS|EXECUTED" || true)
-FAILED=$(echo "$RESULTS" | grep -c "FAIL" || true)
-PENDING=$(echo "$RESULTS" | grep -c "PENDING" || true)
-TOTAL=$((PASSED + FAILED + PENDING))
+# Count results from function-level lines
+FUNC_COUNT=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 1" \
+    | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+
+if [ "${FUNC_COUNT:-0}" -gt 0 ]; then
+    # Use function-level results
+    PASSED=$(echo "$RESULTS" | grep -c "PASS" || true)
+    FAILED=$(echo "$RESULTS" | grep -c "FAIL" || true)
+    PENDING=$(echo "$RESULTS" | grep -c "PENDING" || true)
+    TOTAL=$((PASSED + FAILED + PENDING))
+else
+    # Fall back to codeunit-level (no function expansion available)
+    PASSED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0 AND [Result] IN (1,3)" \
+        | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+    FAILED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0 AND [Result] = 2" \
+        | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+    PENDING=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0 AND [Result] = 0" \
+        | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+    TOTAL=$((${PASSED:-0} + ${FAILED:-0} + ${PENDING:-0}))
+fi
 
 echo ""
-echo "Total: $TOTAL | Passed: $PASSED | Failed: $FAILED | Pending: $PENDING"
+echo "=== Total: $TOTAL | Passed: ${PASSED:-0} | Failed: ${FAILED:-0} | Pending: ${PENDING:-0} ==="
 
-if [ "$FAILED" -gt 0 ]; then
+if [ "${FAILED:-0}" -gt 0 ]; then
     echo ""
     echo "=== Failed Tests ==="
     run_sql "
     USE [CRONUS];
-    SELECT t.[Test Codeunit], RTRIM(t.[Name]) AS Name,
+    SELECT t.[Test Codeunit] AS CU, RTRIM(t.[Function]) AS Method,
            RTRIM(CAST(t.[Error Message Preview] AS nvarchar(500))) AS Error
     FROM [$TEST_METHOD_TABLE] t
-    WHERE t.[Test Suite] = N'DEFAULT' AND t.[Result] = 2 AND t.[Line Type] = 0
-    ORDER BY t.[Test Codeunit];
+    WHERE t.[Test Suite] = N'DEFAULT' AND t.[Result] = 2
+    ORDER BY t.[Test Codeunit], t.[Line No_];
     "
     exit 1
 fi
 
-[ "$TOTAL" -gt 0 ] && exit 0 || exit 1
+[ "${TOTAL:-0}" -gt 0 ] && [ "${PENDING:-0}" -lt "${TOTAL:-0}" ] && exit 0 || exit 1
