@@ -80,7 +80,7 @@ jobs:
         BC_VERSION: ${{ matrix.bc_version }}
       run: |
         AUTH="admin:Admin123!"
-        INSTANCE="InstanceName"
+        INSTANCE="BC"
 
         echo "=== Checking endpoints ==="
 
@@ -113,7 +113,7 @@ jobs:
         BC_VERSION: ${{ matrix.bc_version }}
       run: |
         AUTH="admin:Admin123!"
-        INSTANCE="InstanceName"
+        INSTANCE="BC"
         DEV="http://localhost:7049/$INSTANCE/dev"
         mkdir -p symbols
 
@@ -141,7 +141,7 @@ jobs:
         BC_VERSION: ${{ matrix.bc_version }}
       run: |
         AUTH="admin:Admin123!"
-        INSTANCE="InstanceName"
+        INSTANCE="BC"
         DEV="http://localhost:7049/$INSTANCE/dev/apps?SchemaUpdateMode=forcesync"
 
         # Create a minimal test extension with a test codeunit
@@ -200,7 +200,7 @@ jobs:
         BC_VERSION: ${{ matrix.bc_version }}
       run: |
         AUTH="admin:Admin123!"
-        INSTANCE="InstanceName"
+        INSTANCE="BC"
         ODATA="http://localhost:7048/$INSTANCE"
 
         # Get company ID

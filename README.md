@@ -41,9 +41,9 @@ After `docker compose up`, these endpoints are available:
 
 | Endpoint | URL | Purpose |
 |----------|-----|---------|
-| Dev | `http://localhost:7049/InstanceName/dev` | Publish extensions, download symbols |
-| OData | `http://localhost:7048/InstanceName/ODataV4` | Data access |
-| API | `http://localhost:7052/InstanceName/api/v2.0` | Business API |
+| Dev | `http://localhost:7049/BC/dev` | Publish extensions, download symbols |
+| OData | `http://localhost:7048/BC/ODataV4` | Data access |
+| API | `http://localhost:7052/BC/api/v2.0` | Business API |
 
 Authentication: `admin` / `Admin123!` (NavUserPassword)
 
@@ -54,7 +54,7 @@ Publish an `.app` file via the dev endpoint:
 ```bash
 curl -u admin:Admin123! -X POST \
   -F "file=@MyExtension.app;type=application/octet-stream" \
-  "http://localhost:7049/InstanceName/dev/apps?SchemaUpdateMode=forcesync"
+  "http://localhost:7049/BC/dev/apps?SchemaUpdateMode=forcesync"
 ```
 
 Or use the AL Language extension in VS Code — point `launch.json` to `http://localhost:7049`:
@@ -62,7 +62,7 @@ Or use the AL Language extension in VS Code — point `launch.json` to `http://l
 ```json
 {
     "server": "http://localhost",
-    "serverInstance": "InstanceName",
+    "serverInstance": "BC",
     "port": 7049,
     "authentication": "UserPassword"
 }
@@ -75,12 +75,12 @@ Download symbol packages from the dev endpoint for use with the AL compiler:
 ```bash
 # System symbols
 curl -u admin:Admin123! \
-  "http://localhost:7049/InstanceName/dev/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
+  "http://localhost:7049/BC/dev/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
   -o System.app
 
 # System Application symbols
 curl -u admin:Admin123! \
-  "http://localhost:7049/InstanceName/dev/packages?publisher=Microsoft&appName=System%20Application&appVersion=0.0.0.0" \
+  "http://localhost:7049/BC/dev/packages?publisher=Microsoft&appName=System%20Application&appVersion=0.0.0.0" \
   -o SystemApplication.app
 ```
 
