@@ -61,11 +61,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Helper: run SQL query via environment variable (avoids all stdin/pipe conflicts)
+# Helper: run SQL query via base64-encoded env var (avoids stdin conflicts AND $ expansion)
 run_sql() {
-    docker exec -e "_Q=$1" "$SQL_CONTAINER" bash -c \
-        '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$0" -C -No -Q "$_Q"' \
-        "$SQL_PASSWORD" 2>&1
+    local _b64=$(echo "$1" | base64 -w0)
+    docker exec -e "_QB=$_b64" "$SQL_CONTAINER" bash -c \
+        'echo "$_QB" | base64 -d | /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "'"$SQL_PASSWORD"'" -C -No -i /dev/stdin' \
+        2>&1
 }
 
 sql_count() {
