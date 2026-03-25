@@ -54,7 +54,7 @@ jobs:
 
         echo "Waiting for BC to start..."
         for i in $(seq 1 180); do
-          if docker compose logs bc 2>&1 | grep -q "Ready for test apps\|Press Enter"; then
+          if docker compose logs bc 2>&1 | grep -q "Ready for extensions\|Ready for test apps\|Press Enter"; then
             echo "BC v$BC_VERSION ready after $((i*5))s"
             break
           fi
@@ -67,7 +67,7 @@ jobs:
           sleep 5
         done
 
-        if ! docker compose logs bc 2>&1 | grep -q "Ready for test apps\|Press Enter"; then
+        if ! docker compose logs bc 2>&1 | grep -q "Ready for extensions\|Ready for test apps\|Press Enter"; then
           echo "ERROR: BC did not start within 15 minutes"
           docker compose logs bc 2>&1 | tail -100
           exit 1
@@ -194,35 +194,6 @@ jobs:
           -F "file=@/tmp/testapp/SmokeTest.app;type=application/octet-stream" "$DEV")
         echo "  Publish: HTTP $HTTP"
         [ "$HTTP" = "200" ] || { echo "FAIL: Publish failed (HTTP $HTTP)"; exit 1; }
-
-    - name: Publish test framework
-      env:
-        BC_VERSION: ${{ matrix.bc_version }}
-      run: |
-        AUTH="admin:Admin123!"
-        INSTANCE="InstanceName"
-        DEV="http://localhost:7049/$INSTANCE/dev/apps?SchemaUpdateMode=forcesync"
-
-        # The MS Test Runner (codeunits 130450-130456) may not be pre-installed.
-        # Download and publish it from platform artifacts inside the container.
-        echo "Publishing MS Test Runner from platform artifacts..."
-        TR_APP=$(docker compose exec bc find /bc/artifacts/platform -ipath "*testframework/TestRunner*/*.app" 2>/dev/null | head -1 | tr -d '\r')
-        if [ -n "$TR_APP" ]; then
-          docker compose exec bc curl -s -o /dev/null -w "  Test Runner (MS): HTTP %{http_code}\n" --max-time 60 \
-            -u "$AUTH" -X POST \
-            -F "file=@$TR_APP;type=application/octet-stream" "$DEV" 2>/dev/null
-        else
-          echo "  Test Runner not found in artifacts — skipping"
-        fi
-
-        # Re-publish our TestRunner Extension (depends on MS Test Runner)
-        echo "Publishing TestRunner Extension..."
-        docker compose exec bc bash -c '
-          [ -f /bc/testrunner/TestRunner.app ] && curl -s -o /dev/null -w "  TestRunner Extension: HTTP %{http_code}\n" --max-time 30 \
-            -u "admin:Admin123!" -X POST \
-            -F "file=@/bc/testrunner/TestRunner.app;type=application/octet-stream" \
-            "http://localhost:7049/InstanceName/dev/apps?SchemaUpdateMode=synchronize"
-        ' 2>/dev/null || echo "  TestRunner Extension: skipped"
 
     - name: Run sample test
       env:

@@ -409,15 +409,31 @@ exec 3>/tmp/bc-stdin
         echo "[entrypoint] Patch #15: Renamed $RENAMED runtime DLLs to .bak (after BC loaded them)"
     fi
 
+    # Publish test framework from platform artifacts (Assert, Variable Storage, etc.)
+    # This enables developers to run AL tests without manually publishing these.
+    APPS_DIR=$(find "$ARTIFACTS/platform" -type d -name "testframework" 2>/dev/null | head -1)
+    if [ -n "$APPS_DIR" ]; then
+        echo "[entrypoint] Publishing test framework..."
+        for app in $(find "$APPS_DIR" -name "*.app" -type f 2>/dev/null); do
+            NAME=$(basename "$app" .app)
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 \
+                -u "admin:Admin123!" -X POST \
+                -F "file=@$app;type=application/octet-stream" \
+                "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
+            echo "[entrypoint]   $NAME: HTTP $HTTP"
+        done
+    fi
+
+    # Publish our TestRunner Extension (custom API for test execution, depends on MS Test Runner)
     if [ -f /bc/testrunner/TestRunner.app ]; then
         echo "[entrypoint] Publishing Test Runner Extension..."
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
             -u "admin:Admin123!" -X POST \
             -F "file=@/bc/testrunner/TestRunner.app;type=application/octet-stream" \
             "$DEV_URL/apps?SchemaUpdateMode=synchronize" 2>&1)
-        echo "[entrypoint] Test Runner publish: HTTP $HTTP_CODE"
+        echo "[entrypoint] Test Runner Extension: HTTP $HTTP_CODE"
     fi
-    echo "[entrypoint] Ready for test apps."
+    echo "[entrypoint] Ready for extensions."
 ) &
 
 wait $BC_PID
