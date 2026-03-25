@@ -14,8 +14,8 @@ RUN mkdir -p /build/output/refasm && \
     cp "$REF_DIR"/*.dll /build/output/refasm/ && \
     echo "Copied $(ls /build/output/refasm/*.dll | wc -l) reference assemblies"
 
-# Copy DrawingStub separately for Add-Ins overlay
-RUN cp src/stubs/DrawingStub/bin/Release/net8.0/System.Drawing.Common.dll /build/output/DrawingStub.dll
+# DrawingStub is built by the StartupHook publish target and lands in the publish output
+RUN cp /build/output/hook/System.Drawing.Common.dll /build/output/DrawingStub.dll
 
 # Runtime stage: minimal image
 FROM mcr.microsoft.com/dotnet/aspnet:8.0
