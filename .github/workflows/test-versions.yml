@@ -9,10 +9,11 @@ on:
         default: '27.0,27.5,28.0'
         type: string
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
+jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
