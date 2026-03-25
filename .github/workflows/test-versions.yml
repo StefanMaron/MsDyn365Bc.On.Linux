@@ -212,7 +212,7 @@ jobs:
           sleep 5
         done
 
-        # Create and compile a smoke test extension
+        # Create and compile a minimal smoke test extension (no dependencies on test framework)
         mkdir -p /tmp/testapp/.alpackages
         cat > /tmp/testapp/app.json << 'APPJSON'
         {
@@ -223,8 +223,6 @@ jobs:
           "runtime": "14.0",
           "target": "OnPrem",
           "dependencies": [
-            { "id": "dd0be2ea-f733-4d65-bb34-a28f4624fb14",
-              "name": "Library Assert", "publisher": "Microsoft", "version": "1.0.0.0" },
             { "id": "23de40a6-dfe8-4f80-80db-d70f83ce8caf",
               "name": "Test Runner", "publisher": "Microsoft", "version": "1.0.0.0" }
           ],
@@ -240,22 +238,20 @@ jobs:
 
             [Test]
             procedure TestBCOnLinuxWorks()
-            var
-                Assert: Codeunit "Library Assert";
             begin
-                Assert.IsTrue(Today() > 20200101D, 'Date sanity check');
-                Assert.AreEqual(42, 42, 'Basic integer equality');
-                Assert.AreEqual('Hello', 'Hello', 'Basic string equality');
+                if Today() < 20200101D then
+                    Error('Date sanity check failed: %1', Today());
+                if 42 <> 42 then
+                    Error('Basic integer equality failed');
             end;
         }
         ALCODE
 
-        # Download symbols
+        # Download symbols (System.app + Test Runner from pre-installed packages)
         curl -sf --max-time 30 -u "$AUTH" \
           "http://localhost:7049/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
           -o /tmp/testapp/.alpackages/System.app || true
-        # Also get the test framework symbols we need
-        for sym in "Library Assert" "Test Runner" "System Application"; do
+        for sym in "Test Runner" "System Application"; do
           curl -sf --max-time 30 -u "$AUTH" \
             "http://localhost:7049/packages?publisher=Microsoft&appName=$(echo $sym | sed 's/ /%20/g')&appVersion=0.0.0.0" \
             -o "/tmp/testapp/.alpackages/${sym}.app" 2>/dev/null || true

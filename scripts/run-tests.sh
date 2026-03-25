@@ -221,7 +221,7 @@ for cu in data.get('Codeunits', []):
 
         LINE_NO=$((LINE_NO + 1))
     done < "$TMPLINES"
-    rm -f "$TMPLINES"
+    # Keep TMPLINES for potential retry loop below
 else
     # Fall back: discover test codeunits from Application Object Metadata in SQL
     echo "  Querying Application Object Metadata..."
@@ -287,6 +287,8 @@ fi
 
 FUNC_COUNT=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 1")
 echo "  Test codeunits: ${CU_COUNT:-0}, Test methods: ${FUNC_COUNT:-0}"
+
+rm -f "$TMPLINES" 2>/dev/null
 
 if [ "${CU_COUNT:-0}" = "0" ]; then
     echo "ERROR: No test codeunits found after waiting for compilation"
