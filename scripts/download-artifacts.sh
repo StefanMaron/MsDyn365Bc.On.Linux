@@ -16,6 +16,24 @@ if [ $# -eq 2 ]; then
 elif [ $# -eq 4 ]; then
     BC_TYPE="$1"; BC_VERSION="$2"; BC_COUNTRY="$3"; DEST="$4"
     BASE_URL="https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net"
+
+    # Resolve short version (e.g. "27.5") to full version (e.g. "27.5.46862.48004")
+    # by listing available blobs in the Azure CDN storage container
+    if ! echo "$BC_VERSION" | grep -qP '^\d+\.\d+\.\d+'; then
+        echo "[artifacts] Resolving version $BC_VERSION..."
+        RESOLVED=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}" 2>/dev/null | \
+            grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -1 | cut -d/ -f1)
+        if [ -z "$RESOLVED" ]; then
+            echo "[artifacts] ERROR: Could not resolve version $BC_VERSION"
+            echo "[artifacts] Listing available versions..."
+            curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}" 2>/dev/null | \
+                grep -oP '<Name>\K[^<]+' | head -10
+            exit 1
+        fi
+        echo "[artifacts] Resolved: $BC_VERSION → $RESOLVED"
+        BC_VERSION="$RESOLVED"
+    fi
+
     APP_URL="$BASE_URL/$BC_TYPE/$BC_VERSION/$BC_COUNTRY"
     PLATFORM_URL="$BASE_URL/$BC_TYPE/$BC_VERSION/platform"
 else
