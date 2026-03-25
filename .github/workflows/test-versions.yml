@@ -52,12 +52,20 @@ jobs:
         STEP_START=$(date +%s)
         docker compose up -d --build 2>&1 | tail -10
 
-        echo "Waiting for BC to start..."
+        echo "Waiting for BC to be healthy..."
         for i in $(seq 1 180); do
-          if docker compose logs bc 2>&1 | grep -q "Ready for extensions\|Ready for test apps\|Press Enter"; then
-            echo "BC v$BC_VERSION ready after $((i*5))s"
-            break
-          fi
+          STATUS=$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q bc) 2>/dev/null || echo "unknown")
+          case "$STATUS" in
+            healthy)
+              echo "BC v$BC_VERSION healthy after $((i*5))s"
+              break
+              ;;
+            unhealthy)
+              echo "ERROR: BC container unhealthy"
+              docker compose logs bc 2>&1 | tail -50
+              exit 1
+              ;;
+          esac
           if ! docker compose ps bc 2>/dev/null | grep -q "Up"; then
             echo "ERROR: BC container died"
             docker compose logs bc 2>&1 | tail -50
@@ -67,8 +75,8 @@ jobs:
           sleep 5
         done
 
-        if ! docker compose logs bc 2>&1 | grep -q "Ready for extensions\|Ready for test apps\|Press Enter"; then
-          echo "ERROR: BC did not start within 15 minutes"
+        if [ "$STATUS" != "healthy" ]; then
+          echo "ERROR: BC did not become healthy within 15 minutes"
           docker compose logs bc 2>&1 | tail -100
           exit 1
         fi

@@ -38,6 +38,12 @@ services:
     volumes:
       - bc-artifacts:/bc/artifacts
       - bc-service:/bc/service
+    healthcheck:
+      test: curl -sf -o /dev/null -u admin:Admin123! http://localhost:7048/BC/ODataV4/Company || exit 1
+      interval: 15s
+      retries: 60
+      start_period: 60s
+      timeout: 10s
 
 volumes:
   bc-artifacts:

@@ -5,10 +5,12 @@ Run the Business Central service tier on Linux with Docker Compose.
 ```bash
 git clone https://github.com/StefanMaron/MsDyn365Bc.On.Linux.git
 cd MsDyn365Bc.On.Linux
-docker compose up -d
+docker compose up -d --wait
 ```
 
-BC artifacts are downloaded automatically on first boot. The service tier starts with a CRONUS demo database, dev endpoint, OData, and API — ready for extension development and testing.
+The `--wait` flag returns once BC is healthy (OData endpoint responding). First boot takes 5-10 minutes (artifact download + database restore + extension compilation). Subsequent starts take ~1 minute.
+
+BC starts with a CRONUS demo database, dev endpoint, OData, and API — ready for extension development and testing. The test framework (Library Assert, Variable Storage, etc.) is published automatically.
 
 ## Configuration
 

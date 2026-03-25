@@ -366,7 +366,7 @@ exec 3>/tmp/bc-stdin
 
 # Wait for dev endpoint to be ready, then publish test runner
 (
-    INSTANCE=$(grep -oP 'ServerInstance" value="\K[^"]+' $SERVICE_DIR/CustomSettings.config 2>/dev/null || echo "InstanceName")
+    INSTANCE=$(grep -oP 'ServerInstance" value="\K[^"]+' $SERVICE_DIR/CustomSettings.config 2>/dev/null || echo "BC")
     DEV_URL="http://localhost:7049/$INSTANCE/dev"
 
     echo "[entrypoint] Waiting for BC to start..."
