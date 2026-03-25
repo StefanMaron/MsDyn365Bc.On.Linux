@@ -156,10 +156,10 @@ IF NOT EXISTS (SELECT 1 FROM [$TEST_SUITE_TABLE] WHERE [Name] = N'DEFAULT')
             GETUTCDATE(), '00000000-0000-0000-0000-000000000001');
 ELSE
     UPDATE [$TEST_SUITE_TABLE] SET [Test Runner Id] = $TEST_RUNNER_ID WHERE [Name] = N'DEFAULT';
-" > /dev/null
+" > /dev/null 2>&1 || true
 
 # Clear existing test lines
-run_sql "USE [CRONUS]; DELETE FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT'" > /dev/null
+run_sql "USE [CRONUS]; DELETE FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT'" > /dev/null 2>&1 || true
 
 # Insert codeunit + function lines
 if [ -n "$TEST_JSON" ]; then
@@ -188,7 +188,7 @@ if [ -n "$TEST_JSON" ]; then
                 NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
                 GETUTCDATE(),'00000000-0000-0000-0000-000000000001');
         SET IDENTITY_INSERT [$TEST_METHOD_TABLE] OFF;
-        " > /dev/null
+        " > /dev/null 2>&1 || true
         LINE_NO=$((LINE_NO + 10000))
 
         # Insert function-level lines for each [Test] method
@@ -207,7 +207,7 @@ if [ -n "$TEST_JSON" ]; then
                     NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
                     GETUTCDATE(),'00000000-0000-0000-0000-000000000001');
             SET IDENTITY_INSERT [$TEST_METHOD_TABLE] OFF;
-            " > /dev/null
+            " > /dev/null 2>&1 || true
             LINE_NO=$((LINE_NO + 1))
             echo "    - $METHOD_NAME"
         done < <(echo "$TEST_JSON" | python3 -c "
@@ -248,7 +248,7 @@ else
     FROM [Application Object Metadata] ao
     WHERE ao.[Object Type] = 5 AND ao.[Object Subtype] = 'Test' $RANGE_FILTER;
     SET IDENTITY_INSERT [$TEST_METHOD_TABLE] OFF;
-    " > /dev/null
+    " > /dev/null 2>&1 || true
 fi
 
 CU_COUNT=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0")
