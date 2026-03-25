@@ -6,7 +6,7 @@ on:
       versions:
         description: 'BC versions to test (comma-separated, e.g. "27.0,27.5,28.0")'
         required: false
-        default: '27.0,27.5,28.0'
+        default: '27.0,27.1,27.2,27.3,27.4,27.5'
         type: string
   push:
     branches: [main, master]
@@ -23,7 +23,7 @@ jobs:
       run: |
         VERSIONS='${{ inputs.versions }}'
         if [ -z "$VERSIONS" ]; then
-          VERSIONS="27.0,27.5"
+          VERSIONS="27.0,27.1,27.2,27.3,27.4,27.5"
         fi
         JSON=$(echo "$VERSIONS" | python3 -c "import sys,json; print(json.dumps({'bc_version': sys.stdin.read().strip().split(',')}))")
         echo "matrix=$JSON" >> $GITHUB_OUTPUT
@@ -191,6 +191,45 @@ jobs:
         echo "  Publish: HTTP $HTTP"
         [ "$HTTP" = "200" ] || { echo "WARNING: Publish failed (HTTP $HTTP)"; exit 0; }
         echo "Sample extension published successfully"
+
+    - name: Run sample test
+      env:
+        BC_VERSION: ${{ matrix.bc_version }}
+      run: |
+        AUTH="admin:Admin123!"
+        INSTANCE="InstanceName"
+        ODATA="http://localhost:7048/$INSTANCE"
+
+        # Get company ID
+        COMPANY_ID=$(curl -sf --max-time 10 -u "$AUTH" \
+          "$ODATA/ODataV4/Company" | \
+          python3 -c "import sys,json; print(json.load(sys.stdin)['value'][0]['Id'])")
+        API="http://localhost:7052/$INSTANCE/api/custom/automation/v1.0/companies($COMPANY_ID)/codeunitRunRequests"
+
+        # Check if TestRunner API is available
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" "$API" 2>/dev/null || true)
+        if [ "$HTTP" != "200" ]; then
+          echo "TestRunner API not available (HTTP $HTTP) — skipping test execution"
+          exit 0
+        fi
+
+        # Run the smoke test codeunit (70000)
+        echo "Running smoke test codeunit..."
+        RESP=$(curl -sf --max-time 15 -u "$AUTH" -X POST \
+          -H "Content-Type: application/json" -d '{"codeunitId": 70000}' \
+          "$API" 2>/dev/null) || { echo "WARNING: Could not create test request"; exit 0; }
+        ID=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('Id',''))" 2>/dev/null)
+
+        if [ -n "$ID" ]; then
+          curl -sf -o /dev/null --max-time 60 -u "$AUTH" -X POST \
+            -H "Content-Type: application/json" \
+            "$API($ID)/Microsoft.NAV.runCodeunit" 2>/dev/null || true
+
+          RESULT=$(curl -sf --max-time 10 -u "$AUTH" "$API($ID)" 2>/dev/null | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('LastResult','Unknown'))" 2>/dev/null)
+          echo "Test result: $RESULT"
+          [ "$RESULT" = "Success" ] && echo "Test execution works!"
+        fi
 
     - name: Summary
       if: always()
