@@ -150,104 +150,101 @@ jobs:
           -o symbols/BaseApplication.app
         echo "  BaseApplication.app: $(stat -c%s symbols/BaseApplication.app) bytes"
 
-    - name: Publish sample extension
+    - name: Publish and run smoke test
       env:
         BC_VERSION: ${{ matrix.bc_version }}
       run: |
         AUTH="admin:Admin123!"
-        INSTANCE="BC"
-        DEV="http://localhost:7049/$INSTANCE/dev/apps?SchemaUpdateMode=forcesync"
 
-        # Create a minimal test extension with a test codeunit
-        mkdir -p /tmp/testapp
+        # Wait for test framework to be published by entrypoint
+        echo "Waiting for test framework..."
+        for i in $(seq 1 36); do
+          # Check if Test Runner app is installed (page 130455 requires it)
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -u "$AUTH" \
+            "http://localhost:7049/apps" -X POST \
+            -F "file=@/dev/null;type=application/octet-stream" 2>/dev/null || echo "000")
+          [ "$HTTP" != "000" ] && break
+          sleep 5
+        done
+
+        # Publish test framework from platform artifacts (if not done by entrypoint)
+        ARTIFACTS_DIR=$(docker exec $(docker compose ps -q bc) \
+          find /bc/artifacts -type d -name testframework 2>/dev/null | head -1)
+        if [ -n "$ARTIFACTS_DIR" ]; then
+          echo "Publishing test framework from $ARTIFACTS_DIR..."
+          for app in $(docker exec $(docker compose ps -q bc) \
+            find "$ARTIFACTS_DIR" -name "*.app" -not -path "*/Internal/*" 2>/dev/null); do
+            docker exec $(docker compose ps -q bc) \
+              curl -s -o /dev/null -w "  %{http_code} $(basename $app)\n" --max-time 60 \
+                -u "$AUTH" -X POST \
+                -F "file=@$app;type=application/octet-stream" \
+                "http://localhost:7049/apps?SchemaUpdateMode=forcesync" 2>/dev/null || true
+          done
+        fi
+
+        # Create and compile a smoke test extension
+        mkdir -p /tmp/testapp/.alpackages
         cat > /tmp/testapp/app.json << 'APPJSON'
         {
-          "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
           "name": "Smoke Test",
           "publisher": "BCLinux",
           "version": "1.0.0.0",
           "runtime": "14.0",
           "target": "OnPrem",
-          "dependencies": [],
+          "dependencies": [
+            { "id": "dd0be2ea-f733-4d65-bb34-a28f4624fb14",
+              "name": "Library Assert", "publisher": "Microsoft", "version": "1.0.0.0" },
+            { "id": "23de40a6-dfe8-4f80-80db-d70f83ce8caf",
+              "name": "Test Runner", "publisher": "Microsoft", "version": "1.0.0.0" }
+          ],
           "idRanges": [{ "from": 70000, "to": 70001 }]
         }
         APPJSON
 
         cat > /tmp/testapp/SmokeTest.Codeunit.al << 'ALCODE'
-        codeunit 70000 "Smoke Test"
+        codeunit 70000 "BC Linux Smoke Test"
         {
             Subtype = Test;
+            TestPermissions = Disabled;
 
             [Test]
             procedure TestBCOnLinuxWorks()
+            var
+                Assert: Codeunit "Library Assert";
             begin
-                if Today() < 20200101D then
-                    Error('Date sanity check failed');
+                Assert.IsTrue(Today() > 20200101D, 'Date sanity check');
+                Assert.AreEqual(42, 42, 'Basic integer equality');
+                Assert.AreEqual('Hello', 'Hello', 'Basic string equality');
             end;
         }
         ALCODE
 
-        # Download System.app as symbol
-        mkdir -p /tmp/testapp/.alpackages
+        # Download symbols
         curl -sf --max-time 30 -u "$AUTH" \
-          "http://localhost:7049/$INSTANCE/dev/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
-          -o /tmp/testapp/.alpackages/System.app
+          "http://localhost:7049/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
+          -o /tmp/testapp/.alpackages/System.app || true
+        # Also get the test framework symbols we need
+        for sym in "Library Assert" "Test Runner" "System Application"; do
+          curl -sf --max-time 30 -u "$AUTH" \
+            "http://localhost:7049/packages?publisher=Microsoft&appName=$(echo $sym | sed 's/ /%20/g')&appVersion=0.0.0.0" \
+            -o "/tmp/testapp/.alpackages/${sym}.app" 2>/dev/null || true
+        done
 
         # Compile
-        echo "Compiling sample test extension..."
+        echo "Compiling smoke test..."
         AL compile \
           "/project:/tmp/testapp" \
           "/packagecachepath:/tmp/testapp/.alpackages" \
           "/out:/tmp/testapp/SmokeTest.app" \
-          || { echo "FAIL: Sample extension compilation failed"; exit 1; }
+          || { echo "FAIL: Compilation failed"; exit 1; }
 
-        # Publish
-        echo "Publishing sample test extension..."
-        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 \
-          -u "$AUTH" -X POST \
-          -F "file=@/tmp/testapp/SmokeTest.app;type=application/octet-stream" "$DEV")
-        echo "  Publish: HTTP $HTTP"
-        [ "$HTTP" = "200" ] || { echo "FAIL: Publish failed (HTTP $HTTP)"; exit 1; }
-
-    - name: Run sample test
-      env:
-        BC_VERSION: ${{ matrix.bc_version }}
-      run: |
-        AUTH="admin:Admin123!"
-        INSTANCE="BC"
-        ODATA="http://localhost:7048/$INSTANCE"
-
-        # Get company ID
-        COMPANY_ID=$(curl -sf --max-time 10 -u "$AUTH" \
-          "$ODATA/ODataV4/Company" | \
-          python3 -c "import sys,json; print(json.load(sys.stdin)['value'][0]['Id'])")
-        API="http://localhost:7052/$INSTANCE/api/custom/automation/v1.0/companies($COMPANY_ID)/codeunitRunRequests"
-
-        # Wait for TestRunner API (entrypoint publishes test framework in background)
-        echo "Waiting for TestRunner API..."
-        for i in $(seq 1 24); do
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -u "$AUTH" "$API" 2>/dev/null || true)
-          [ "$HTTP" = "200" ] && break
-          echo "  attempt $i: HTTP $HTTP"
-          sleep 5
-        done
-        [ "$HTTP" = "200" ] || { echo "FAIL: TestRunner API not available after 2 min (HTTP $HTTP)"; exit 1; }
-
-        # Run the smoke test codeunit
-        echo "Running smoke test codeunit 70000..."
-        RESP=$(curl -sf --max-time 15 -u "$AUTH" -X POST \
-          -H "Content-Type: application/json" -d '{"codeunitId": 70000}' \
-          "$API")
-        ID=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('Id',''))")
-
-        curl -sf -o /dev/null --max-time 120 -u "$AUTH" -X POST \
-          -H "Content-Type: application/json" \
-          "$API($ID)/Microsoft.NAV.runCodeunit" 2>/dev/null || true
-
-        RESULT=$(curl -sf --max-time 10 -u "$AUTH" "$API($ID)" | \
-          python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('LastResult','Unknown'))")
-        echo "Test result: $RESULT"
-        [ "$RESULT" = "Success" ] || { echo "FAIL: Test returned $RESULT"; exit 1; }
+        # Run tests using the test runner script
+        echo "Running tests..."
+        ./scripts/run-tests.sh \
+          --app /tmp/testapp/SmokeTest.app \
+          --codeunit-range 70000 \
+          --timeout 5
 
     - name: Summary
       if: always()

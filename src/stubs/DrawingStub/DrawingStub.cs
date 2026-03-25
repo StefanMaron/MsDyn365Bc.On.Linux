@@ -144,6 +144,24 @@ namespace System.Drawing
         public SolidBrush(Color color) { Color = color; }
     }
 
+    public static class Brushes
+    {
+        public static Brush White { get; } = new SolidBrush(Color.White);
+        public static Brush Black { get; } = new SolidBrush(Color.Black);
+        public static Brush Transparent { get; } = new SolidBrush(Color.Transparent);
+        public static Brush Red { get; } = new SolidBrush(Color.Red);
+        public static Brush Green { get; } = new SolidBrush(Color.Green);
+        public static Brush Blue { get; } = new SolidBrush(Color.Blue);
+        public static Brush Gray { get; } = new SolidBrush(Color.Gray);
+        public static Brush LightGray { get; } = new SolidBrush(Color.LightGray);
+    }
+
+    public static class Pens
+    {
+        public static Pen Black { get; } = new Pen(Color.Black);
+        public static Pen White { get; } = new Pen(Color.White);
+    }
+
     public sealed class Pen : IDisposable
     {
         public Color Color { get; set; }
