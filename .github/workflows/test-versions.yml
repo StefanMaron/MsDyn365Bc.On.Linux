@@ -223,9 +223,15 @@ jobs:
           python3 -c "import sys,json; print(json.load(sys.stdin)['value'][0]['Id'])")
         API="http://localhost:7052/$INSTANCE/api/custom/automation/v1.0/companies($COMPANY_ID)/codeunitRunRequests"
 
-        # Verify TestRunner API is available
-        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" "$API" 2>/dev/null || true)
-        [ "$HTTP" = "200" ] || { echo "FAIL: TestRunner API not available (HTTP $HTTP)"; exit 1; }
+        # Wait for TestRunner API (entrypoint publishes test framework in background)
+        echo "Waiting for TestRunner API..."
+        for i in $(seq 1 24); do
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -u "$AUTH" "$API" 2>/dev/null || true)
+          [ "$HTTP" = "200" ] && break
+          echo "  attempt $i: HTTP $HTTP"
+          sleep 5
+        done
+        [ "$HTTP" = "200" ] || { echo "FAIL: TestRunner API not available after 2 min (HTTP $HTTP)"; exit 1; }
 
         # Run the smoke test codeunit
         echo "Running smoke test codeunit 70000..."
