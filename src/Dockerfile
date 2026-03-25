@@ -3,7 +3,9 @@ FROM mcr.microsoft.com/dotnet/sdk:8.0 AS builder
 
 WORKDIR /build
 COPY src/ src/
-RUN cd src/StartupHook && dotnet publish -c Release -o /build/output/hook 2>&1 | tail -5
+RUN cd src/StartupHook && dotnet publish -c Release -o /build/output/hook 2>&1 | tail -5 && \
+    echo "Hook output:" && ls /build/output/hook/*.dll | wc -l && \
+    cp src/stubs/DrawingStub/bin/Release/net8.0/System.Drawing.Common.dll /build/output/DrawingStub.dll
 
 # Publish MergeNetstandard as self-contained tool
 RUN cd src/tools/MergeNetstandard && dotnet publish -c Release -o /build/output/tools 2>&1 | tail -3
@@ -13,9 +15,6 @@ RUN mkdir -p /build/output/refasm && \
     REF_DIR=$(find /usr/share/dotnet/packs/Microsoft.NETCore.App.Ref -maxdepth 3 -type d -name "net8.0" | head -1) && \
     cp "$REF_DIR"/*.dll /build/output/refasm/ && \
     echo "Copied $(ls /build/output/refasm/*.dll | wc -l) reference assemblies"
-
-# DrawingStub is built by the StartupHook publish target and lands in the publish output
-RUN cp /build/output/hook/System.Drawing.Common.dll /build/output/DrawingStub.dll
 
 # Runtime stage: minimal image
 FROM mcr.microsoft.com/dotnet/aspnet:8.0
