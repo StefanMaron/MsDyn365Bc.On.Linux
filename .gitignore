@@ -17,3 +17,4 @@ artifacts/
 .vs/
 .vscode/
 *.code-workspace
+tools/TestRunner/lib/
