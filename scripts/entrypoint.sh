@@ -433,6 +433,7 @@ exec 3>/tmp/bc-stdin
         echo "[entrypoint] Test Runner Extension: HTTP $HTTP_CODE"
     fi
     echo "[entrypoint] Ready for extensions."
+    touch /tmp/bc-ready
 ) &
 
 wait $BC_PID

@@ -150,27 +150,6 @@ jobs:
           -o symbols/BaseApplication.app
         echo "  BaseApplication.app: $(stat -c%s symbols/BaseApplication.app) bytes"
 
-    - name: Wait for test framework
-      run: |
-        AUTH="admin:Admin123!"
-        # The entrypoint publishes test framework apps after BC starts.
-        # Wait for the AL Test Suite table to appear (created by Test Runner app).
-        echo "Waiting for test framework..."
-        SQL_ID=$(docker compose ps -q sql)
-        for i in $(seq 1 60); do
-          TABLE_EXISTS=$(docker exec -e "_QB=$(echo 'USE [CRONUS]; SELECT COUNT(*) FROM sys.tables WHERE name LIKE '\''%AL Test Suite%'\''' | base64 -w0)" $SQL_ID bash -c \
-            'echo "$_QB" | base64 -d | /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Passw0rd123!" -C -No -i /dev/stdin' 2>/dev/null \
-            | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
-          [ "${TABLE_EXISTS:-0}" -gt 0 ] && echo "  Test framework ready after $((i*5))s." && break
-          [ $((i % 12)) -eq 0 ] && echo "  Waiting... ($((i*5))s)"
-          sleep 5
-        done
-        if [ "${TABLE_EXISTS:-0}" -eq 0 ]; then
-          echo "WARNING: Test framework tables not found after 300s"
-          echo "Entrypoint logs:"
-          docker compose logs bc 2>&1 | grep "\[entrypoint\]" | tail -10
-        fi
-
     - name: Compile and publish smoke test
       env:
         BC_VERSION: ${{ matrix.bc_version }}
