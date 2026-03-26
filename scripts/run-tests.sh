@@ -1,138 +1,97 @@
 #!/usr/bin/env bash
-# run-tests.sh — Run AL tests on a BC Linux container (AL-Go compatible)
+# run-tests.sh — Run AL tests on a BC Linux container
+#
+# Mirrors BcContainerHelper's Run-TestsInBcContainer interface.
+# Extensions must be published BEFORE calling this script.
 #
 # Usage:
 #   ./scripts/run-tests.sh [options]
 #
 # Options:
-#   --app <path>               .app file to publish and test
-#   --codeunit-range <range>   Codeunit ID range filter (e.g. "90000" or "90000..90010")
-#   --extension-id <guid>      Filter tests by extension ID (from app.json)
-#   --company <name>           Company name (default: auto-detect from DB)
+#   --extension-id <guid>      Filter tests by extension ID
+#   --codeunit-range <range>   Codeunit ID range (e.g. "70000" or "70000..70010")
+#   --company <name>           Company name (default: auto-detect)
 #   --host <host:port>         BC client services host (default: localhost:7085)
-#   --sql-password <pw>        SA password (default: $SA_PASSWORD or Passw0rd123!)
 #   --test-runner <id>         Test runner codeunit ID (default: 130451)
-#   --timeout <minutes>        Per-codeunit test timeout (default: 3)
-#   --sql-container <name>     SQL container name (default: bc-linux-sql-1)
-#   --bc-container <name>      BC container name (default: bc-linux-bc-1)
-#
-# The script follows the same flow as AL-Go for GitHub / BcContainerHelper:
-#   1. Discovers test codeunits and methods from the .app file
-#   2. Populates the DEFAULT test suite via SQL
-#   3. Opens page 130455 via WebSocket client services
-#   4. Calls RunNextTest in a loop, reading TestResultJson after each call
-#   5. Outputs per-method pass/fail results
-#
-# Prerequisites:
-#   - BC container running with client services on port 7085
-#   - SQL Server accessible via docker exec
-#   - .NET 8 SDK (for building the TestRunner tool)
+#   --suite-name <name>        Test suite name (default: DEFAULT)
+#   --timeout <minutes>        Overall timeout (default: 30)
+#   --disabled-tests <file>    Path to disabled tests JSON
+#   --sql-password <pw>        SA password for company auto-detect
 
 set -uo pipefail
-# Note: -e is intentionally omitted. SQL operations may return non-zero and
-# we handle errors explicitly.
 
 # Defaults
 BC_HOST="localhost:7085"
 COMPANY=""
-SQL_PASSWORD="${SA_PASSWORD:-Passw0rd123!}"
-SQL_CONTAINER="${SQL_CONTAINER:-}"
-BC_CONTAINER="${BC_CONTAINER:-}"
 TEST_RUNNER_ID=130451
 CODEUNIT_RANGE=""
 EXTENSION_ID=""
-APP_FILE=""
-TIMEOUT_MIN=3
-AUTH="admin:Admin123!"
+TIMEOUT_MIN=30
+SUITE_NAME="DEFAULT"
+DISABLED_TESTS=""
+SQL_PASSWORD="${SA_PASSWORD:-Passw0rd123!}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --codeunit-range) CODEUNIT_RANGE="$2"; shift 2;;
         --extension-id) EXTENSION_ID="$2"; shift 2;;
+        --codeunit-range) CODEUNIT_RANGE="$2"; shift 2;;
         --company) COMPANY="$2"; shift 2;;
         --host) BC_HOST="$2"; shift 2;;
-        --sql-password) SQL_PASSWORD="$2"; shift 2;;
         --test-runner) TEST_RUNNER_ID="$2"; shift 2;;
-        --app) APP_FILE="$2"; shift 2;;
+        --suite-name) SUITE_NAME="$2"; shift 2;;
         --timeout) TIMEOUT_MIN="$2"; shift 2;;
-        --sql-container) SQL_CONTAINER="$2"; shift 2;;
-        --bc-container) BC_CONTAINER="$2"; shift 2;;
+        --disabled-tests) DISABLED_TESTS="$2"; shift 2;;
+        --sql-password) SQL_PASSWORD="$2"; shift 2;;
         *) echo "Unknown option: $1"; exit 1;;
     esac
 done
 
-# Helper: run SQL query via base64-encoded env var (avoids stdin conflicts AND $ expansion)
-run_sql() {
-    local _b64=$(echo "$1" | base64 -w0)
-    docker exec -e "_QB=$_b64" "$SQL_CONTAINER" bash -c \
-        'echo "$_QB" | base64 -d | /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "'"$SQL_PASSWORD"'" -C -No -i /dev/stdin' \
-        2>&1
-}
-
-sql_count() {
-    run_sql "$1" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1
-}
-
 echo "=== BC Test Runner ==="
 
-# Auto-detect container names if not specified
-# Try docker compose from the repo root (where docker-compose.yml lives)
-if [ -z "$SQL_CONTAINER" ]; then
-    SQL_CONTAINER=$(cd "$REPO_DIR" && docker compose ps -q sql 2>/dev/null | head -1)
-    [ -z "$SQL_CONTAINER" ] && SQL_CONTAINER=$(docker ps --filter "name=sql" --format "{{.Names}}" | grep -i sql | head -1)
-    [ -z "$SQL_CONTAINER" ] && SQL_CONTAINER="bc-linux-sql-1"
-fi
-if [ -z "$BC_CONTAINER" ]; then
-    BC_CONTAINER=$(cd "$REPO_DIR" && docker compose ps -q bc 2>/dev/null | head -1)
-    [ -z "$BC_CONTAINER" ] && BC_CONTAINER=$(docker ps --filter "expose=7085" --format "{{.Names}}" | head -1)
-    [ -z "$BC_CONTAINER" ] && BC_CONTAINER="bc-linux-bc-1"
-fi
-echo "Containers: sql=$SQL_CONTAINER bc=$BC_CONTAINER"
-
-# --- Step 0: Verify SQL access ---
-echo "Verifying SQL access..."
-run_sql "SELECT 1" > /dev/null || { echo "ERROR: Cannot connect to SQL Server"; exit 1; }
-
-# --- Step 1: Detect company ---
+# --- Auto-detect company if not specified ---
 if [ -z "$COMPANY" ]; then
-    COMPANY=$(run_sql "USE [CRONUS]; SELECT TOP 1 RTRIM([Name]) FROM [Company] WHERE [Name] != 'My Company' ORDER BY [Name]" \
-        | grep -v "^-" | grep -v "^Changed" | grep -v "^$" | grep -v "^(" | grep -v "^\s*$" | head -1 | sed 's/ *$//')
+    SQL_CONTAINER=$(cd "$REPO_DIR" && docker compose ps -q sql 2>/dev/null | head -1)
+    if [ -n "$SQL_CONTAINER" ]; then
+        COMPANY=$(docker exec -e "_QB=$(echo 'USE [CRONUS]; SELECT TOP 1 RTRIM([Name]) FROM [Company] ORDER BY [Name]' | base64 -w0)" \
+            "$SQL_CONTAINER" bash -c \
+            'echo "$_QB" | base64 -d | /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "'"$SQL_PASSWORD"'" -C -No -i /dev/stdin' \
+            2>/dev/null | grep -v "^-" | grep -v "^Changed" | grep -v "^$" | grep -v "^(" | grep -v "^\s*$" | head -1 | sed 's/ *$//')
+    fi
     [ -z "$COMPANY" ] && COMPANY="CRONUS International Ltd."
 fi
 echo "Company: $COMPANY"
 
-# Table name prefix (BC removes . from company name in table names)
+# --- Ensure DEFAULT test suite exists ---
+# The WebSocket protocol does not support SaveValue for page variables,
+# so we create the suite via SQL. Page 130455 reads it on open.
+run_sql() {
+    docker exec -e "_QB=$(echo "$1" | base64 -w0)" "$SQL_CONTAINER" bash -c \
+        'echo "$_QB" | base64 -d | /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "'"$SQL_PASSWORD"'" -C -No -i /dev/stdin' 2>&1
+}
+
 TABLE_PREFIX="$(echo "${COMPANY}" | sed 's/\.//g')_\$"
-TEST_SUITE_TABLE="${TABLE_PREFIX}AL Test Suite\$23de40a6-dfe8-4f80-80db-d70f83ce8caf"
-TEST_METHOD_TABLE="${TABLE_PREFIX}Test Method Line\$23de40a6-dfe8-4f80-80db-d70f83ce8caf"
+SUITE_TABLE="${TABLE_PREFIX}AL Test Suite\$23de40a6-dfe8-4f80-80db-d70f83ce8caf"
+METHOD_TABLE="${TABLE_PREFIX}Test Method Line\$23de40a6-dfe8-4f80-80db-d70f83ce8caf"
 
-# --- Step 2: Publish app if specified ---
-if [ -n "$APP_FILE" ]; then
-    echo "Publishing $(basename "$APP_FILE")..."
-    HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 -u "$AUTH" -X POST \
-        -F "file=@$APP_FILE;type=application/octet-stream" \
-        "http://localhost:7049/apps?SchemaUpdateMode=forcesync" 2>/dev/null || echo "000")
-    echo "  Publish: HTTP $HTTP"
+echo "Ensuring DEFAULT test suite..."
+run_sql "
+USE [CRONUS];
+IF NOT EXISTS (SELECT 1 FROM [$SUITE_TABLE] WHERE [Name] = N'$SUITE_NAME')
+    INSERT INTO [$SUITE_TABLE]
+    ([Name],[Description],[Last Run],[Run Type],[Test Runner Id],[Stability Run],
+     [CC Tracking Type],[CC Track All Sessions],[CC Exporter ID],[CC Coverage Map],
+     [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
+    VALUES (N'$SUITE_NAME',N'','1753-01-01',0,$TEST_RUNNER_ID,0,0,0,0,0,
+            NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
+            GETUTCDATE(),'00000000-0000-0000-0000-000000000001');
+ELSE
+    UPDATE [$SUITE_TABLE] SET [Test Runner Id] = $TEST_RUNNER_ID WHERE [Name] = N'$SUITE_NAME';
+" > /dev/null 2>&1
 
-    # Extract extension ID from app if not specified
-    if [ -z "$EXTENSION_ID" ]; then
-        EXTENSION_ID=$(unzip -p "$APP_FILE" NavxManifest.xml 2>/dev/null | grep -oP 'App Id="\K[^"]+' || true)
-        [ -n "$EXTENSION_ID" ] && echo "  Extension ID: $EXTENSION_ID"
-    fi
-fi
-
-# --- Step 3: Discover test codeunits and methods from .app or DB ---
-echo "Discovering tests..."
-
-# Try to discover from .app file's SymbolReference.json (fastest, most complete)
-TEST_JSON=""
-if [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
-    TEST_JSON=$(unzip -p "$APP_FILE" SymbolReference.json 2>/dev/null || true)
-fi
-
-# Build codeunit range filter for SQL
+# Populate test codeunit lines from Application Object Metadata
+echo "Populating test suite..."
 RANGE_FILTER=""
 if [ -n "$CODEUNIT_RANGE" ]; then
     if [[ "$CODEUNIT_RANGE" == *".."* ]]; then
@@ -144,242 +103,91 @@ if [ -n "$CODEUNIT_RANGE" ]; then
     fi
 fi
 
-# --- Step 4: Populate test suite ---
-echo "Setting up test suite..."
+EXT_FILTER=""
+[ -n "$EXTENSION_ID" ] && EXT_FILTER="AND ao.[App Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [ID] = '$EXTENSION_ID')"
 
-# Ensure DEFAULT suite exists
 run_sql "
 USE [CRONUS];
-IF NOT EXISTS (SELECT 1 FROM [$TEST_SUITE_TABLE] WHERE [Name] = N'DEFAULT')
-    INSERT INTO [$TEST_SUITE_TABLE]
-    ([Name], [Description], [Last Run], [Run Type], [Test Runner Id], [Stability Run],
-     [CC Tracking Type], [CC Track All Sessions], [CC Exporter ID], [CC Coverage Map],
-     [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
-    VALUES (N'DEFAULT', N'', '1753-01-01', 0, $TEST_RUNNER_ID, 0, 0, 0, 0, 0,
-            NEWID(), GETUTCDATE(), '00000000-0000-0000-0000-000000000001',
-            GETUTCDATE(), '00000000-0000-0000-0000-000000000001');
-ELSE
-    UPDATE [$TEST_SUITE_TABLE] SET [Test Runner Id] = $TEST_RUNNER_ID WHERE [Name] = N'DEFAULT';
-" > /dev/null 2>&1 || true
+DELETE FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME';
+SET IDENTITY_INSERT [$METHOD_TABLE] ON;
+INSERT INTO [$METHOD_TABLE]
+([Test Suite],[Line No_],[Test Codeunit],[Name],[Function],[Run],[Result],[Line Type],
+ [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
+ [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
+ [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
+SELECT N'$SUITE_NAME', ROW_NUMBER() OVER (ORDER BY ao.[Object ID]) * 10000,
+       ao.[Object ID], CAST(ao.[Object Name] AS nvarchar(250)),
+       N'', 1, 0, 0, '1753-01-01','1753-01-01', 0, N'', N'', 0x, 0x, 0, N'', 0x,
+       NEWID(), GETUTCDATE(), '00000000-0000-0000-0000-000000000001',
+       GETUTCDATE(), '00000000-0000-0000-0000-000000000001'
+FROM [Application Object Metadata] ao
+WHERE ao.[Object Type] = 5 AND ao.[Object Subtype] = 'Test'
+$RANGE_FILTER $EXT_FILTER;
+SET IDENTITY_INSERT [$METHOD_TABLE] OFF;
+" > /dev/null 2>&1
 
-# Clear existing test lines
-run_sql "USE [CRONUS]; DELETE FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT'" > /dev/null 2>&1 || true
-
-# Insert codeunit + function lines
-if [ -n "$TEST_JSON" ]; then
-    # Parse SymbolReference.json into a flat list: CU_ID|CU_NAME|METHOD_NAME
-    # One line per test method, codeunit lines have empty METHOD_NAME
-    echo "  Parsing .app SymbolReference.json..."
-    TEST_LINES=$(echo "$TEST_JSON" | python3 -c "
-import sys, json
-data = json.loads(sys.stdin.read().lstrip('\ufeff'))
-for cu in data.get('Codeunits', []):
-    props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
-    if props.get('Subtype') != 'Test': continue
-    print(f\"CU|{cu['Id']}|{cu['Name']}\")
-    for m in cu.get('Methods', []):
-        attrs = [a.get('Name','') for a in m.get('Attributes',[])]
-        if 'Test' in attrs:
-            print(f\"FN|{cu['Id']}|{m['Name']}\")
-" 2>/dev/null || true)
-
-    LINE_NO=10000
-    # Write test lines to a temp file to avoid pipe/stdin conflicts with docker exec
-    TMPLINES=$(mktemp)
-    echo "$TEST_LINES" > "$TMPLINES"
-
-    while IFS='|' read -r TYPE ID NAME; do
-        [ -z "$TYPE" ] && continue
-
-        # Apply range filter
-        if [ -n "$CODEUNIT_RANGE" ] && [[ "$CODEUNIT_RANGE" != *".."* ]] && [ "$ID" != "$CODEUNIT_RANGE" ]; then
-            continue
-        fi
-
-        if [ "$TYPE" = "CU" ]; then
-            echo "  Codeunit $ID: $NAME"
-            LINE_TYPE=0; FUNC=""; LEVEL=0
-        else
-            echo "    - $NAME"
-            LINE_TYPE=1; FUNC="$NAME"; LEVEL=1
-        fi
-
-        run_sql "
-        USE [CRONUS];
-        SET IDENTITY_INSERT [$TEST_METHOD_TABLE] ON;
-        INSERT INTO [$TEST_METHOD_TABLE]
-        ([Test Suite],[Line No_],[Test Codeunit],[Name],[Function],[Run],[Result],[Line Type],
-         [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
-         [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
-         [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
-        VALUES (N'DEFAULT',$LINE_NO,$ID,N'$NAME',N'$FUNC',1,0,$LINE_TYPE,
-                '1753-01-01','1753-01-01',$LEVEL,N'',N'',0x,0x,0,N'',0x,
-                NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
-                GETUTCDATE(),'00000000-0000-0000-0000-000000000001');
-        SET IDENTITY_INSERT [$TEST_METHOD_TABLE] OFF;
-        " > /dev/null 2>&1 || true
-
-        LINE_NO=$((LINE_NO + 1))
-    done < "$TMPLINES"
-    # Keep TMPLINES for potential retry loop below
-else
-    # Fall back: discover test codeunits from Application Object Metadata in SQL
-    echo "  Querying Application Object Metadata..."
-    run_sql "
-    USE [CRONUS];
-    SET IDENTITY_INSERT [$TEST_METHOD_TABLE] ON;
-    INSERT INTO [$TEST_METHOD_TABLE]
-    ([Test Suite],[Line No_],[Test Codeunit],[Name],[Function],[Run],[Result],[Line Type],
-     [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
-     [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
-     [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
-    SELECT N'DEFAULT', ROW_NUMBER() OVER (ORDER BY ao.[Object ID]) * 10000,
-           ao.[Object ID], CAST(ao.[Object Name] AS nvarchar(250)),
-           N'', 1, 0, 0,
-           '1753-01-01','1753-01-01',0,N'',N'',0x,0x,0,N'',0x,
-           NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
-           GETUTCDATE(),'00000000-0000-0000-0000-000000000001'
-    FROM [Application Object Metadata] ao
-    WHERE ao.[Object Type] = 5 AND ao.[Object Subtype] = 'Test' $RANGE_FILTER;
-    SET IDENTITY_INSERT [$TEST_METHOD_TABLE] OFF;
-    " > /dev/null 2>&1 || true
-fi
-
-CU_COUNT=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0")
-
-# If no codeunits were inserted, wait for server-side compilation
-if [ "${CU_COUNT:-0}" = "0" ]; then
-    echo "  Waiting for server-side compilation..."
-    for i in $(seq 1 30); do
-        sleep 5
-        # Re-run the insert (compilation may have completed)
-        if [ -n "$TEST_JSON" ]; then
-            while IFS='|' read -r TYPE ID NAME; do
-                [ -z "$TYPE" ] || [ "$TYPE" != "CU" ] && continue
-                if [ -n "$CODEUNIT_RANGE" ] && [[ "$CODEUNIT_RANGE" != *".."* ]] && [ "$ID" != "$CODEUNIT_RANGE" ]; then
-                    continue
-                fi
-                run_sql "
-                USE [CRONUS];
-                IF NOT EXISTS (SELECT 1 FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Test Codeunit] = $ID)
-                AND EXISTS (SELECT 1 FROM [Application Object Metadata] WHERE [Object Type] = 5 AND [Object ID] = $ID)
-                BEGIN
-                    SET IDENTITY_INSERT [$TEST_METHOD_TABLE] ON;
-                    INSERT INTO [$TEST_METHOD_TABLE]
-                    ([Test Suite],[Line No_],[Test Codeunit],[Name],[Function],[Run],[Result],[Line Type],
-                     [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
-                     [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
-                     [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
-                    VALUES (N'DEFAULT',$((i * 10000)),$ID,N'$NAME',N'',1,0,0,
-                            '1753-01-01','1753-01-01',0,N'',N'',0x,0x,0,N'',0x,
-                            NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
-                            GETUTCDATE(),'00000000-0000-0000-0000-000000000001');
-                    SET IDENTITY_INSERT [$TEST_METHOD_TABLE] OFF;
-                END
-                " > /dev/null 2>&1 || true
-            done < "$TMPLINES"
-        fi
-        CU_COUNT=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0")
-        [ "${CU_COUNT:-0}" -gt 0 ] && break
-        [ $((i % 6)) -eq 0 ] && echo "  Still waiting... ($((i*5))s)"
-    done
-fi
-
-FUNC_COUNT=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 1")
-echo "  Test codeunits: ${CU_COUNT:-0}, Test methods: ${FUNC_COUNT:-0}"
-
-rm -f "$TMPLINES" 2>/dev/null
+CU_COUNT=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 0" \
+    | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+echo "  Test codeunits: ${CU_COUNT:-0}"
 
 if [ "${CU_COUNT:-0}" = "0" ]; then
-    echo "ERROR: No test codeunits found after waiting for compilation"
-    echo "  Check that the test app is published and the codeunit exists in Application Object Metadata"
+    echo "ERROR: No test codeunits found"
     exit 1
 fi
 
-# --- Step 5: Run tests via WebSocket client services ---
-echo ""
-echo "=== Running Tests ==="
+# --- Build TestRunner tool if needed ---
 TESTRUNNER_DIR="$REPO_DIR/tools/TestRunner"
-
 if [ ! -f "$TESTRUNNER_DIR/bin/Release/net8.0/TestRunner.dll" ]; then
     echo "Building TestRunner..."
     dotnet build "$TESTRUNNER_DIR" -c Release 2>&1 | tail -3
 fi
 
-# The TestRunner opens page 130455, calls ClearTestResults then RunNextTest.
-# The session may die during test execution — results are read from SQL afterward.
+# --- Run tests via client services (page 130455) ---
+# RunNextTest triggers BC test execution. The session typically dies during test
+# execution (test isolation), so we ignore the exit code and read results from SQL.
 timeout "${TIMEOUT_MIN}m" dotnet run --project "$TESTRUNNER_DIR" --no-build -c Release -- \
-    --host "$BC_HOST" --company "$COMPANY" 2>&1 || true
+    --host "$BC_HOST" --company "$COMPANY" --timeout "$TIMEOUT_MIN" 2>&1 || true
 
 sleep 2
 
-# --- Step 6: Display results ---
+# --- Read results from SQL ---
 echo ""
 echo "=== Test Results ==="
+FUNC_COUNT=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 1" \
+    | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
 
-# Function-level results (per test method)
 if [ "${FUNC_COUNT:-0}" -gt 0 ]; then
-    RESULTS=$(run_sql "
+    run_sql "
     USE [CRONUS];
-    SELECT
-        CASE t.[Result] WHEN 2 THEN '  PASS' WHEN 1 THEN '  FAIL' WHEN 0 THEN '  ----' ELSE '  SKIP' END AS [  ],
-        RTRIM(t.[Function]) AS Method,
-        t.[Test Codeunit] AS CU,
-        RTRIM(CAST(t.[Error Message Preview] AS nvarchar(200))) AS Error
-    FROM [$TEST_METHOD_TABLE] t
-    WHERE t.[Test Suite] = N'DEFAULT' AND t.[Line Type] = 1
+    SELECT CASE t.[Result] WHEN 2 THEN '  PASS' WHEN 1 THEN '  FAIL' WHEN 0 THEN '  ----' ELSE '  SKIP' END,
+           RTRIM(t.[Function]), t.[Test Codeunit],
+           RTRIM(CAST(t.[Error Message Preview] AS nvarchar(200)))
+    FROM [$METHOD_TABLE] t
+    WHERE t.[Test Suite] = N'$SUITE_NAME' AND t.[Line Type] = 1
     ORDER BY t.[Test Codeunit], t.[Line No_];
-    ")
-    echo "$RESULTS"
-
-    # BC result codes: 0=NotExecuted, 1=Failure, 2=Success, 3=Inconclusive
-    PASSED=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 1 AND [Result] = 2")
-    FAILED=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 1 AND [Result] = 1")
-    SKIPPED=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 1 AND [Result] NOT IN (1,2)")
+    "
+    PASSED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 1 AND [Result] = 2" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+    FAILED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 1 AND [Result] = 1" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+    SKIPPED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 1 AND [Result] NOT IN (1,2)" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
 else
-    # Codeunit-level only
-    RESULTS=$(run_sql "
+    run_sql "
     USE [CRONUS];
-    SELECT
-        CASE t.[Result] WHEN 2 THEN '  PASS' WHEN 1 THEN '  FAIL' WHEN 3 THEN '  EXEC' WHEN 0 THEN '  ----' ELSE '  ???' END AS [  ],
-        RTRIM(t.[Name]) AS Codeunit,
-        t.[Test Codeunit] AS CU
-    FROM [$TEST_METHOD_TABLE] t
-    WHERE t.[Test Suite] = N'DEFAULT' AND t.[Line Type] = 0
+    SELECT CASE t.[Result] WHEN 2 THEN '  PASS' WHEN 1 THEN '  FAIL' WHEN 3 THEN '  EXEC' WHEN 0 THEN '  ----' ELSE '  ???' END,
+           RTRIM(t.[Name]), t.[Test Codeunit]
+    FROM [$METHOD_TABLE] t
+    WHERE t.[Test Suite] = N'$SUITE_NAME' AND t.[Line Type] = 0
     ORDER BY t.[Test Codeunit];
-    ")
-    echo "$RESULTS"
-
-    PASSED=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0 AND [Result] IN (2,3)")
-    FAILED=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0 AND [Result] = 1")
-    SKIPPED=$(sql_count "USE [CRONUS]; SELECT COUNT(*) FROM [$TEST_METHOD_TABLE] WHERE [Test Suite] = N'DEFAULT' AND [Line Type] = 0 AND [Result] = 0")
+    "
+    PASSED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 0 AND [Result] IN (2,3)" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+    FAILED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 0 AND [Result] = 1" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+    SKIPPED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 0 AND [Result] = 0" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
 fi
 
 TOTAL=$(( ${PASSED:-0} + ${FAILED:-0} + ${SKIPPED:-0} ))
 echo ""
 echo "Results: $TOTAL total, ${PASSED:-0} passed, ${FAILED:-0} failed, ${SKIPPED:-0} skipped"
 
-# Show failure details
-if [ "${FAILED:-0}" -gt 0 ]; then
-    echo ""
-    echo "=== Failures ==="
-    run_sql "
-    USE [CRONUS];
-    SELECT t.[Test Codeunit] AS CU, RTRIM(t.[Function]) AS Method,
-           RTRIM(CAST(t.[Error Message Preview] AS nvarchar(500))) AS Error
-    FROM [$TEST_METHOD_TABLE] t
-    WHERE t.[Test Suite] = N'DEFAULT' AND t.[Result] = 1 AND t.[Function] != N''
-    ORDER BY t.[Test Codeunit], t.[Line No_];
-    "
-    exit 1
-fi
-
-if [ "${PASSED:-0}" -gt 0 ]; then
-    exit 0
-elif [ "$TOTAL" -gt 0 ] && [ "${SKIPPED:-0}" -eq "$TOTAL" ]; then
-    echo "WARNING: All tests skipped"
-    exit 0
-else
-    echo "ERROR: No tests executed"
-    exit 1
-fi
+if [ "${FAILED:-0}" -gt 0 ]; then exit 1; fi
+if [ "${PASSED:-0}" -gt 0 ]; then exit 0; fi
+echo "ERROR: No tests executed"
+exit 1

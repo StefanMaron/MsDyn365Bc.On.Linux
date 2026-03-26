@@ -150,69 +150,35 @@ jobs:
           -o symbols/BaseApplication.app
         echo "  BaseApplication.app: $(stat -c%s symbols/BaseApplication.app) bytes"
 
-    - name: Publish and run smoke test
+    - name: Wait for test framework
+      run: |
+        AUTH="admin:Admin123!"
+        # The entrypoint publishes test framework apps after BC starts.
+        # Wait for the AL Test Suite table to appear (created by Test Runner app).
+        echo "Waiting for test framework..."
+        SQL_ID=$(docker compose ps -q sql)
+        for i in $(seq 1 60); do
+          TABLE_EXISTS=$(docker exec -e "_QB=$(echo 'USE [CRONUS]; SELECT COUNT(*) FROM sys.tables WHERE name LIKE '\''%AL Test Suite%'\''' | base64 -w0)" $SQL_ID bash -c \
+            'echo "$_QB" | base64 -d | /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Passw0rd123!" -C -No -i /dev/stdin' 2>/dev/null \
+            | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+          [ "${TABLE_EXISTS:-0}" -gt 0 ] && echo "  Test framework ready after $((i*5))s." && break
+          [ $((i % 12)) -eq 0 ] && echo "  Waiting... ($((i*5))s)"
+          sleep 5
+        done
+        if [ "${TABLE_EXISTS:-0}" -eq 0 ]; then
+          echo "WARNING: Test framework tables not found after 300s"
+          echo "Entrypoint logs:"
+          docker compose logs bc 2>&1 | grep "\[entrypoint\]" | tail -10
+        fi
+
+    - name: Compile and publish smoke test
       env:
         BC_VERSION: ${{ matrix.bc_version }}
       run: |
         AUTH="admin:Admin123!"
+        DEV="http://localhost:7049"
 
-        # Wait for test framework to be published by entrypoint
-        echo "Waiting for test framework..."
-        for i in $(seq 1 36); do
-          # Check if Test Runner app is installed (page 130455 requires it)
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -u "$AUTH" \
-            "http://localhost:7049/apps" -X POST \
-            -F "file=@/dev/null;type=application/octet-stream" 2>/dev/null || echo "000")
-          [ "$HTTP" != "000" ] && break
-          sleep 5
-        done
-
-        # Publish test framework apps from the host
-        # The dev endpoint strips instance paths on Linux (HttpSysStub), so use root port
-        echo "Publishing test framework..."
-        for appname in "Microsoft_Test Runner.app" "Microsoft_Library Assert.app" \
-                       "Microsoft_Library Variable Storage.app" "Microsoft_Any.app"; do
-          APPPATH=$(find symbols/ -name "*.app" 2>/dev/null | head -0)  # Not from symbols
-          # Find in the platform artifacts inside the container
-          BC_ID=$(docker compose ps -q bc)
-          APPPATH=$(docker exec $BC_ID find /bc/artifacts -name "$appname" -not -path "*/Internal/*" 2>/dev/null | head -1)
-          if [ -z "$APPPATH" ]; then
-            # Try to download from dev endpoint as a package
-            curl -sf --max-time 30 -u "$AUTH" \
-              "http://localhost:7049/packages?publisher=Microsoft&appName=$(echo ${appname#Microsoft_} | sed 's/\.app//;s/ /%20/g')&appVersion=0.0.0.0" \
-              -o "/tmp/$appname" 2>/dev/null && APPPATH="/tmp/$appname" || true
-          fi
-          if [ -n "$APPPATH" ] && [ "$APPPATH" != "/tmp/$appname" ]; then
-            # File is inside the container — publish from there
-            HTTP=$(docker exec $BC_ID curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
-              -u "$AUTH" -X POST \
-              -F "file=@$APPPATH;type=application/octet-stream" \
-              "http://localhost:7049/apps?SchemaUpdateMode=forcesync" 2>/dev/null || echo "000")
-            echo "  $appname: $HTTP (from container)"
-          elif [ -f "/tmp/$appname" ]; then
-            # Publish from host via the mapped port
-            HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
-              -u "$AUTH" -X POST \
-              -F "file=@/tmp/$appname;type=application/octet-stream" \
-              "http://localhost:7049/apps?SchemaUpdateMode=forcesync" 2>/dev/null || echo "000")
-            echo "  $appname: $HTTP (from host)"
-          else
-            echo "  $appname: NOT FOUND"
-          fi
-        done
-
-        # Wait for test framework compilation (tables to appear in SQL)
-        echo "Waiting for test framework compilation..."
-        SQL_ID=$(docker compose ps -q sql)
-        for i in $(seq 1 30); do
-          TABLE_EXISTS=$(docker exec -e "_QB=$(echo 'USE [CRONUS]; SELECT COUNT(*) FROM sys.tables WHERE name LIKE '\''%AL Test Suite%'\''' | base64 -w0)" $SQL_ID bash -c \
-            'echo "$_QB" | base64 -d | /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Passw0rd123!" -C -No -i /dev/stdin' 2>/dev/null \
-            | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
-          [ "${TABLE_EXISTS:-0}" -gt 0 ] && echo "  Tables ready." && break
-          sleep 5
-        done
-
-        # Create and compile a minimal smoke test extension (no dependencies on test framework)
+        # Create a minimal smoke test extension
         mkdir -p /tmp/testapp/.alpackages
         cat > /tmp/testapp/app.json << 'APPJSON'
         {
@@ -247,30 +213,46 @@ jobs:
         }
         ALCODE
 
-        # Download symbols (System.app + Test Runner from pre-installed packages)
-        curl -sf --max-time 30 -u "$AUTH" \
-          "http://localhost:7049/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
+        # Download symbols
+        curl -sf --max-time 30 -u "$AUTH" "$DEV/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
           -o /tmp/testapp/.alpackages/System.app || true
         for sym in "Test Runner" "System Application"; do
           curl -sf --max-time 30 -u "$AUTH" \
-            "http://localhost:7049/packages?publisher=Microsoft&appName=$(echo $sym | sed 's/ /%20/g')&appVersion=0.0.0.0" \
+            "$DEV/packages?publisher=Microsoft&appName=$(echo $sym | sed 's/ /%20/g')&appVersion=0.0.0.0" \
             -o "/tmp/testapp/.alpackages/${sym}.app" 2>/dev/null || true
         done
 
         # Compile
         echo "Compiling smoke test..."
-        AL compile \
-          "/project:/tmp/testapp" \
-          "/packagecachepath:/tmp/testapp/.alpackages" \
-          "/out:/tmp/testapp/SmokeTest.app" \
+        AL compile "/project:/tmp/testapp" "/packagecachepath:/tmp/testapp/.alpackages" "/out:/tmp/testapp/SmokeTest.app" \
           || { echo "FAIL: Compilation failed"; exit 1; }
 
-        # Run tests using the test runner script
+        # Publish (separate from test execution)
+        echo "Publishing smoke test..."
+        RESP=$(curl -s -w "\n%{http_code}" --max-time 120 -u "$AUTH" -X POST \
+          -F "file=@/tmp/testapp/SmokeTest.app;type=application/octet-stream" \
+          "$DEV/apps?SchemaUpdateMode=forcesync")
+        HTTP=$(echo "$RESP" | tail -1)
+        BODY=$(echo "$RESP" | head -n -1)
+        echo "  HTTP $HTTP"
+        if [ "$HTTP" != "200" ] && [ "$HTTP" != "422" ]; then
+          echo "  ERROR: $BODY"
+          exit 1
+        fi
+        [ "$HTTP" = "422" ] && echo "  $BODY"
+
+        # Extract extension ID
+        EXT_ID=$(unzip -p /tmp/testapp/SmokeTest.app NavxManifest.xml 2>/dev/null | grep -oP 'App Id="\K[^"]+' || true)
+        echo "SMOKE_TEST_EXT_ID=$EXT_ID" >> $GITHUB_ENV
+
+    - name: Run smoke test
+      env:
+        BC_VERSION: ${{ matrix.bc_version }}
+      run: |
         echo "Running tests..."
         ./scripts/run-tests.sh \
-          --app /tmp/testapp/SmokeTest.app \
           --codeunit-range 70000 \
-          --timeout 5
+          --timeout 3
 
     - name: Summary
       if: always()

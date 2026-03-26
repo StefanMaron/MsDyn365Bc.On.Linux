@@ -4,19 +4,29 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using StreamJsonRpc;
 
-// BC Test Runner — connects via WebSocket client services and invokes RunNextTest.
-// Usage: dotnet run -- <host:port> [--company <name>]
-// The test suite and method lines must be pre-populated (via SQL or the run-tests.sh wrapper).
-// This tool opens the Command Line Test Tool (page 130455) and calls RunNextTest in a loop.
-// Results are read from the TestResultJson field after each invocation.
+// BC Test Runner — connects via WebSocket client services to page 130455
+// (Command Line Test Tool) and runs tests using RunNextTest + TestResultJson.
+//
+// Mirrors BcContainerHelper's Run-TestsInBcContainer external behavior:
+//   1. Open page 130455
+//   2. ClearTestResults
+//   3. RunNextTest loop → parse TestResultJson
+//   4. Output per-method results
+//
+// Note: The DEFAULT test suite must be pre-created (via SQL in run-tests.sh).
+// The WebSocket protocol does not support SaveValue for setting page variables
+// like CurrentSuiteName. This is an implementation detail — the external
+// interface matches BcContainerHelper's behavior.
 
 var host = "localhost:7085";
 var company = "CRONUS International Ltd.";
 var user = "admin";
 var password = "Admin123!";
+var timeoutMin = 30;
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -24,229 +34,197 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--company" && i + 1 < args.Length) company = args[++i];
     else if (args[i] == "--user" && i + 1 < args.Length) user = args[++i];
     else if (args[i] == "--password" && i + 1 < args.Length) password = args[++i];
+    else if (args[i] == "--timeout" && i + 1 < args.Length) timeoutMin = int.Parse(args[++i]);
     else if (!args[i].StartsWith("--")) host = args[i];
 }
 
 int exitCode = 1;
-try
-{
-    exitCode = await RunTests(host, company, user, password);
-}
-catch (Exception ex)
-{
-    Console.Error.WriteLine($"FATAL: {ex.Message}");
-}
+try { exitCode = await RunTests(); }
+catch (Exception ex) { Console.Error.WriteLine($"FATAL: {ex.Message}"); }
 return exitCode;
 
-async Task<int> RunTests(string host, string company, string user, string password)
+async Task<int> RunTests()
 {
-    Console.WriteLine($"Connecting to ws://{host}/ws/connect");
-    var ws = new ClientWebSocket();
     var authBytes = Encoding.UTF8.GetBytes($"{user}:{password}");
-    ws.Options.SetRequestHeader("Authorization", $"Basic {Convert.ToBase64String(authBytes)}");
-    var cts = new CancellationTokenSource(TimeSpan.FromMinutes(30));
-    await ws.ConnectAsync(new Uri($"ws://{host}/ws/connect"), cts.Token);
-
-    var handler = new WebSocketMessageHandler(ws);
-    var rpc = new JsonRpc(handler);
-
-    // Capture MetadataToken from responses
+    var cts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMin));
     var tokenCapture = new MetadataTokenCapture();
-    rpc.TraceSource.Switch.Level = System.Diagnostics.SourceLevels.Verbose;
-    rpc.TraceSource.Listeners.Add(tokenCapture);
 
-    var callbacks = new ClientCallbacks();
-    rpc.AddLocalRpcTarget(callbacks);
-    rpc.StartListening();
-
-    // OpenConnection
-    await rpc.InvokeWithCancellationAsync<JToken>("OpenConnection",
-        new object[] { new {
-            LCID = 1033, DefaultLCID = 1033, TimeZoneId = "UTC",
-            Credentials = new { UserName = user, Password = password }
-        }}, cts.Token);
-    Console.WriteLine("Connected.");
-
-    long versionNumber = tokenCapture.MetadataToken;
-
-    // OpenCompany
-    Console.WriteLine($"Opening company '{company}'...");
-    try
-    {
-        await rpc.InvokeWithCancellationAsync<JToken>("OpenCompany",
-            new object[] { company, false }, cts.Token);
-    }
-    catch (RemoteInvocationException ex)
-    {
-        Console.Error.WriteLine($"OpenCompany warning: {ex.Message[..Math.Min(100, ex.Message.Length)]}");
-    }
-    versionNumber = tokenCapture.MetadataToken;
-
-    // OpenForm 130455
-    Console.WriteLine("Opening Command Line Test Tool (page 130455)...");
-    var formCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
-    formCts.CancelAfter(TimeSpan.FromSeconds(30));
-    var formResult = await rpc.InvokeWithCancellationAsync<JToken>("OpenForm",
-        new object[] { new {
-            HasMainForm = true,
-            States = new[] { new { FormId = 130455, TableView = new { TableId = 130450 } } },
-            ControlIds = new string?[] { null },
-            VersionNumber = versionNumber,
-            MainFormHandle = Guid.Empty
-        }}, formCts.Token);
-
-    if (formResult == null || formResult.Type == JTokenType.Null)
-    {
-        Console.Error.WriteLine("ERROR: Cannot open page 130455. Is the test toolkit installed?");
-        return 1;
-    }
-
-    var formState = formResult["States"]?[0];
-    Console.WriteLine($"Form opened (handle={formState?["ServerFormHandle"]})");
-
-    // GetPage to position Rec
-    try
-    {
-        var pageResult = await rpc.InvokeWithCancellationAsync<JToken>("GetPage",
-            new object[] {
-                new { PageSize = 50, IncludeMoreDataInformation = true, IncludeNonRowData = true },
-                formState
-            }, cts.Token);
-        if (pageResult?["State"] != null) formState = pageResult["State"];
-    }
-    catch { /* non-fatal */ }
+    var (rpc, ws) = await Connect(authBytes, tokenCapture, cts.Token);
+    var formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
+    if (formState == null) return 1;
 
     // ClearTestResults
-    Console.WriteLine("Clearing previous results...");
+    Console.Write("Clearing previous results... ");
     try
     {
-        var r = await rpc.InvokeWithCancellationAsync<JToken>("InvokeApplicationMethod",
-            new object[] {
-                new { ApplicationCodeType = 1, ObjectId = 0, MethodName = "ClearTestResults", DataSetState = formState },
-                formState
-            }, cts.Token);
+        var r = await Invoke(rpc, formState, "ClearTestResults", cts.Token);
         if (r?["DataSetState"] != null) formState = r["DataSetState"];
+        Console.WriteLine("OK");
     }
-    catch (RemoteInvocationException ex)
-    {
-        Console.Error.WriteLine($"ClearTestResults warning: {ex.Message[..Math.Min(100, ex.Message.Length)]}");
-    }
+    catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
 
     // RunNextTest loop
     int totalPassed = 0, totalFailed = 0, totalSkipped = 0;
+    var allResults = new List<JObject>();
     var startTime = DateTime.UtcNow;
-    bool sessionAlive = true;
 
-    while (sessionAlive)
+    Console.WriteLine("\n=== Running Tests ===");
+    while (true)
     {
-        Console.Write("Running next test... ");
         try
         {
             var actionCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
             actionCts.CancelAfter(TimeSpan.FromMinutes(5));
 
-            var result = await rpc.InvokeWithCancellationAsync<JToken>("InvokeApplicationMethod",
-                new object[] {
-                    new { ApplicationCodeType = 1, ObjectId = 0, MethodName = "RunNextTest", DataSetState = formState },
-                    formState
-                }, actionCts.Token);
-
+            var result = await Invoke(rpc, formState, "RunNextTest", actionCts.Token);
             if (result?["DataSetState"] != null) formState = result["DataSetState"];
 
-            // The TestResultJson is in the form's page variables, accessible via GetPage
-            // For now, try to read it from the response
-            Console.WriteLine("OK");
+            // Read TestResultJson via GetPage
+            var testResultJson = await ReadTestResultJson(rpc, formState!, cts.Token);
+            if (string.IsNullOrEmpty(testResultJson) || testResultJson == "All tests executed.")
+            {
+                Console.WriteLine("All tests executed.");
+                break;
+            }
+            var parsed = JObject.Parse(testResultJson);
+            allResults.Add(parsed);
+            ProcessResult(parsed, ref totalPassed, ref totalFailed, ref totalSkipped);
         }
         catch (RemoteInvocationException ex) when (ex.Message.Contains("All tests executed"))
         {
             Console.WriteLine("All tests executed.");
             break;
         }
-        catch (RemoteInvocationException ex) when (ex.Message.Contains("does not exist"))
+        catch (Exception ex) when (ex is RemoteInvocationException || ex is OperationCanceledException || ex is ConnectionLostException)
         {
-            Console.Error.WriteLine($"\nERROR: {ex.Message}");
-            return 1;
-        }
-        catch (Exception ex) when (ex is RemoteInvocationException || ex is OperationCanceledException
-            || ex is ConnectionLostException)
-        {
-            // Session died during test execution — this is expected with test isolation
-            Console.WriteLine($"session ended ({ex.GetType().Name})");
-            sessionAlive = false;
-
-            // Try to reconnect for the next test
+            Console.Error.WriteLine($"  Session ended: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
             try
             {
-                rpc.Dispose();
-                ws.Dispose();
-
-                ws = new ClientWebSocket();
-                ws.Options.SetRequestHeader("Authorization", $"Basic {Convert.ToBase64String(authBytes)}");
-                await ws.ConnectAsync(new Uri($"ws://{host}/ws/connect"), cts.Token);
-
-                handler = new WebSocketMessageHandler(ws);
-                rpc = new JsonRpc(handler);
-                rpc.TraceSource.Switch.Level = System.Diagnostics.SourceLevels.Verbose;
-                rpc.TraceSource.Listeners.Add(tokenCapture);
-                rpc.AddLocalRpcTarget(new ClientCallbacks());
-                rpc.StartListening();
-
-                await rpc.InvokeWithCancellationAsync<JToken>("OpenConnection",
-                    new object[] { new {
-                        LCID = 1033, DefaultLCID = 1033, TimeZoneId = "UTC",
-                        Credentials = new { UserName = user, Password = password }
-                    }}, cts.Token);
-
-                try { await rpc.InvokeWithCancellationAsync<JToken>("OpenCompany",
-                    new object[] { company, false }, cts.Token); } catch { }
-
-                versionNumber = tokenCapture.MetadataToken;
-                formResult = await rpc.InvokeWithCancellationAsync<JToken>("OpenForm",
-                    new object[] { new {
-                        HasMainForm = true,
-                        States = new[] { new { FormId = 130455, TableView = new { TableId = 130450 } } },
-                        ControlIds = new string?[] { null },
-                        VersionNumber = versionNumber,
-                        MainFormHandle = Guid.Empty
-                    }}, cts.Token);
-
-                if (formResult?["States"]?[0] != null)
-                {
-                    formState = formResult["States"]![0]!;
-                    try
-                    {
-                        var pr = await rpc.InvokeWithCancellationAsync<JToken>("GetPage",
-                            new object[] {
-                                new { PageSize = 50, IncludeMoreDataInformation = true, IncludeNonRowData = true },
-                                formState
-                            }, cts.Token);
-                        if (pr?["State"] != null) formState = pr["State"];
-                    }
-                    catch { }
-                    sessionAlive = true;
-                    Console.WriteLine("  Reconnected, continuing...");
-                }
+                rpc.Dispose(); ws.Dispose();
+                await Task.Delay(2000, cts.Token);
+                (rpc, ws) = await Connect(authBytes, tokenCapture, cts.Token);
+                formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
+                if (formState == null) break;
+                Console.WriteLine("  Reconnected, continuing...");
             }
-            catch (Exception reconnectEx)
-            {
-                Console.Error.WriteLine($"  Reconnect failed: {reconnectEx.Message[..Math.Min(80, reconnectEx.Message.Length)]}");
-                break;
-            }
+            catch { Console.Error.WriteLine("  Reconnect failed"); break; }
         }
     }
 
     var elapsed = DateTime.UtcNow - startTime;
-    Console.WriteLine($"\nTest execution completed in {elapsed.TotalSeconds:F0}s");
-    Console.WriteLine("Read results from SQL (see run-tests.sh wrapper).");
+    Console.WriteLine($"\n=== Test Results ({elapsed.TotalSeconds:F0}s) ===");
+    foreach (var r in allResults)
+    {
+        var cu = r["codeUnit"]?.Value<int>() ?? 0;
+        var name = r["name"]?.ToString() ?? "";
+        var trs = r["testResults"] as JArray;
+        if (trs != null)
+            foreach (var tr in trs)
+            {
+                var method = tr["method"]?.ToString() ?? "";
+                var res = tr["result"]?.Value<int>() ?? 0;
+                var status = res == 2 ? "PASS" : res == 1 ? "FAIL" : "SKIP";
+                var msg = tr["message"]?.ToString() ?? "";
+                Console.Write($"  {status}  {cu} {name}::{method}");
+                if (res == 1 && msg.Length > 0) Console.Write($" — {msg[..Math.Min(120, msg.Length)]}");
+                Console.WriteLine();
+            }
+        else
+        {
+            var res = r["result"]?.Value<int>() ?? 0;
+            Console.WriteLine($"  {(res == 2 ? "PASS" : res == 1 ? "FAIL" : "SKIP")}  {cu} {name}");
+        }
+    }
+    int total = totalPassed + totalFailed + totalSkipped;
+    Console.WriteLine($"\nResults: {total} total, {totalPassed} passed, {totalFailed} failed, {totalSkipped} skipped");
 
     try { await rpc.InvokeAsync("CloseConnection"); } catch { }
-    rpc.Dispose();
-    ws.Dispose();
-    return 0;
+    rpc.Dispose(); ws.Dispose();
+    return totalFailed > 0 ? 1 : (totalPassed > 0 ? 0 : 1);
 }
 
-// --- Callback handlers ---
-class ClientCallbacks
+void ProcessResult(JObject r, ref int passed, ref int failed, ref int skipped)
+{
+    var cu = r["codeUnit"]?.Value<int>() ?? 0;
+    var name = r["name"]?.ToString() ?? "";
+    var trs = r["testResults"] as JArray;
+    Console.Write($"  Codeunit {cu} {name} ");
+    if (trs != null && trs.Count > 0)
+    {
+        int p = 0, f = 0, s = 0;
+        foreach (var tr in trs) { var res = tr["result"]?.Value<int>() ?? 0; if (res == 2) { p++; passed++; } else if (res == 1) { f++; failed++; } else { s++; skipped++; } }
+        Console.WriteLine($"({p} passed, {f} failed, {s} skipped)");
+    }
+    else { var res = r["result"]?.Value<int>() ?? 0; if (res == 2) { passed++; Console.WriteLine("PASS"); } else if (res == 1) { failed++; Console.WriteLine("FAIL"); } else { skipped++; Console.WriteLine("SKIP"); } }
+}
+
+async Task<string> ReadTestResultJson(JsonRpc rpc, JToken formState, CancellationToken ct)
+{
+    try
+    {
+        var page = await rpc.InvokeWithCancellationAsync<JToken>("GetPage",
+            new object[] { new { PageSize = 1, IncludeMoreDataInformation = true, IncludeNonRowData = true }, formState }, ct);
+        var s = page?.ToString() ?? "";
+        var idx = s.IndexOf("\"TestResultJson\"", StringComparison.Ordinal);
+        if (idx < 0) idx = s.IndexOf("\"TestResultsJSONText\"", StringComparison.Ordinal);
+        if (idx >= 0)
+        {
+            // Extract the value after the key
+            var valStart = s.IndexOf(":", idx) + 1;
+            var valEnd = s.IndexOf("\n", valStart);
+            if (valEnd < 0) valEnd = s.Length;
+            var val = s[valStart..valEnd].Trim().Trim('"', ',');
+            if (val.StartsWith("{")) return val;
+            if (val == "All tests executed.") return val;
+        }
+        return "";
+    }
+    catch { return ""; }
+}
+
+async Task<JToken?> Invoke(JsonRpc rpc, JToken? formState, string action, CancellationToken ct)
+{
+    return await rpc.InvokeWithCancellationAsync<JToken>("InvokeApplicationMethod",
+        new object[] {
+            new { ApplicationCodeType = 1, ObjectId = 0, MethodName = action, DataSetState = formState },
+            formState!
+        }, ct);
+}
+
+async Task<(JsonRpc, ClientWebSocket)> Connect(byte[] authBytes, MetadataTokenCapture tc, CancellationToken ct)
+{
+    Console.WriteLine($"Connecting to ws://{host}/ws/connect");
+    var ws = new ClientWebSocket();
+    ws.Options.SetRequestHeader("Authorization", $"Basic {Convert.ToBase64String(authBytes)}");
+    await ws.ConnectAsync(new Uri($"ws://{host}/ws/connect"), ct);
+    var rpc = new JsonRpc(new WebSocketMessageHandler(ws));
+    rpc.TraceSource.Switch.Level = System.Diagnostics.SourceLevels.Verbose;
+    rpc.TraceSource.Listeners.Add(tc);
+    rpc.AddLocalRpcTarget(new Callbacks());
+    rpc.StartListening();
+    await rpc.InvokeWithCancellationAsync<JToken>("OpenConnection",
+        new object[] { new { LCID = 1033, DefaultLCID = 1033, TimeZoneId = "UTC", Credentials = new { UserName = user, Password = password } } }, ct);
+    Console.WriteLine("Connected.");
+    return (rpc, ws);
+}
+
+async Task<JToken?> OpenTestPage(JsonRpc rpc, MetadataTokenCapture tc, string company, CancellationToken ct)
+{
+    try { await rpc.InvokeWithCancellationAsync<JToken>("OpenCompany", new object[] { company, false }, ct); }
+    catch (RemoteInvocationException ex) { Console.Error.WriteLine($"  OpenCompany: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
+
+    Console.Write("Opening page 130455... ");
+    var formCts = CancellationTokenSource.CreateLinkedTokenSource(ct); formCts.CancelAfter(TimeSpan.FromSeconds(30));
+    var form = await rpc.InvokeWithCancellationAsync<JToken>("OpenForm",
+        new object[] { new { HasMainForm = true, States = new[] { new { FormId = 130455, TableView = new { TableId = 130450 } } }, ControlIds = new string?[] { null }, VersionNumber = tc.MetadataToken, MainFormHandle = Guid.Empty } }, formCts.Token);
+    if (form == null || form.Type == JTokenType.Null) { Console.Error.WriteLine("FAIL"); return null; }
+    var state = form["States"]?[0];
+    Console.WriteLine($"OK ({state?["ServerFormHandle"]})");
+    try { var pg = await rpc.InvokeWithCancellationAsync<JToken>("GetPage", new object[] { new { PageSize = 50, IncludeMoreDataInformation = true, IncludeNonRowData = true }, state! }, ct); if (pg?["State"] != null) state = pg["State"]; } catch { }
+    return state;
+}
+
+class Callbacks
 {
     [JsonRpcMethod("Confirm")] public Task Confirm(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("ProcessServerRequests")] public Task ProcessServerRequests(JToken r) => Task.CompletedTask;
@@ -271,16 +249,15 @@ class ClientCallbacks
 class MetadataTokenCapture : System.Diagnostics.TraceListener
 {
     public long MetadataToken { get; private set; }
-    public override void Write(string? message) { }
-    public override void WriteLine(string? message)
+    public override void Write(string? m) { }
+    public override void WriteLine(string? m)
     {
-        if (message == null) return;
-        var idx = message.IndexOf("\"MetadataToken\":", StringComparison.Ordinal);
-        if (idx < 0) return;
-        var start = idx + "\"MetadataToken\":".Length;
-        var end = message.IndexOfAny(new[] { ',', '}', '\n' }, start);
-        if (end < 0) end = message.Length;
-        if (long.TryParse(message[start..end].Trim(), out var token) && token > 0)
-            MetadataToken = token;
+        if (m == null) return;
+        var i = m.IndexOf("\"MetadataToken\":", StringComparison.Ordinal);
+        if (i < 0) return;
+        var s = i + "\"MetadataToken\":".Length;
+        var e = m.IndexOfAny(new[] { ',', '}', '\n' }, s);
+        if (e < 0) e = m.Length;
+        if (long.TryParse(m[s..e].Trim(), out var t) && t > 0) MetadataToken = t;
     }
 }

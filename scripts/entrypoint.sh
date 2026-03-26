@@ -298,8 +298,15 @@ fi
 # Sandbox tenant type
 $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1 WHERE tenantid = 'default';" 2>/dev/null
 
-# Keep pre-installed apps (System Application, Base Application, etc.)
-echo "[entrypoint] Keeping pre-installed CRONUS apps"
+# Clear pre-installed test framework apps so they can be properly published+synced+installed
+# via the dev endpoint after BC starts. The CRONUS backup has them as global apps but
+# NOT installed for the tenant. The dev endpoint handles the full lifecycle.
+$SQLCMD_DB -Q "
+DELETE FROM [Installed Application] WHERE [Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any'));
+DELETE FROM [NAV App Installed App] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any');
+DELETE FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any');
+" 2>/dev/null
+echo "[entrypoint] Cleared test framework global entries (will re-publish via dev endpoint)"
 
 # Admin user (password hash for Admin123! with GUID 00000000-0000-0000-0000-000000000001)
 USER_GUID='00000000-0000-0000-0000-000000000001'
@@ -366,8 +373,12 @@ exec 3>/tmp/bc-stdin
 
 # Wait for dev endpoint to be ready, then publish test runner
 (
+    # Disable set -e in background subshell — curl returns non-zero when BC
+    # hasn't started yet, and inherited set -e would silently kill this process
+    # before Patch #15 and test framework publishing can run.
+    set +e
+
     INSTANCE=$(grep -oP 'ServerInstance" value="\K[^"]+' $SERVICE_DIR/CustomSettings.config 2>/dev/null || echo "BC")
-    # HttpSysStub strips the instance path — dev endpoint is at the root port
     DEV_URL="http://localhost:7049"
 
     echo "[entrypoint] Waiting for BC to start..."
@@ -386,47 +397,31 @@ exec 3>/tmp/bc-stdin
     done
     echo "[entrypoint] Dev endpoint ready (HTTP $HTTP)"
 
-    # Patch #15: After BC has loaded all runtime DLLs into memory, rename them so
-    # Cecil's probing paths can't find them. This forces all assembly resolution
-    # to use our managed reference assemblies from Add-Ins.
-    # First restore any .bak files from a previous run (container restart safety).
-    RUNTIME_DIR=$(ls -d /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.* 2>/dev/null | head -1)
-    if [ -n "$RUNTIME_DIR" ] && [ -d "$ADDINS_DIR" ]; then
-        # Restore .bak→.dll from any previous Patch #15 run
-        RESTORE_COUNT=0
-        for bak in "$RUNTIME_DIR"/*.dll.bak; do
-            [ -f "$bak" ] || continue
-            mv "$bak" "${bak%.bak}"
-            RESTORE_COUNT=$((RESTORE_COUNT + 1))
-        done
-        [ $RESTORE_COUNT -gt 0 ] && echo "[entrypoint] Patch #15: Restored $RESTORE_COUNT runtime DLLs from .bak (restart recovery)"
+    # Patch #15: Disabled — renaming ALL runtime DLLs breaks System.Net.HttpListener
+    # and other assemblies that BC needs at request time (not just at startup).
+    # The merged assemblies in Add-Ins should handle type-forwarding resolution
+    # for server-side compilation without needing to hide the runtime DLLs.
+    # TODO: Selectively rename only the DLLs that cause Cecil type-forwarding issues.
+    echo "[entrypoint] Patch #15: Skipped (merged assemblies handle type-forwarding)"
 
-        # Now rename runtime DLLs that we have Add-Ins replacements for
-        RENAMED=0
-        for refasm in "$ADDINS_DIR"/*.dll; do
-            fname=$(basename "$refasm")
-            if [ -f "$RUNTIME_DIR/$fname" ]; then
-                mv "$RUNTIME_DIR/$fname" "$RUNTIME_DIR/${fname}.bak"
-                RENAMED=$((RENAMED + 1))
-            fi
-        done
-        echo "[entrypoint] Patch #15: Renamed $RENAMED runtime DLLs to .bak (after BC loaded them)"
-    fi
-
-    # Publish test framework from platform artifacts (Assert, Variable Storage, etc.)
-    # This enables developers to run AL tests without manually publishing these.
-    APPS_DIR=$(find "$ARTIFACTS/platform" -type d -name "testframework" 2>/dev/null | head -1)
-    if [ -n "$APPS_DIR" ]; then
-        echo "[entrypoint] Publishing test framework..."
-        for app in $(find "$APPS_DIR" -name "*.app" -type f 2>/dev/null); do
-            NAME=$(basename "$app" .app)
-            HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 \
-                -u "admin:Admin123!" -X POST \
-                -F "file=@$app;type=application/octet-stream" \
-                "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
-            echo "[entrypoint]   $NAME: HTTP $HTTP"
-        done
-    fi
+    # Publish test framework apps. These are needed for running AL tests.
+    # BC pre-loads them as "global" apps but doesn't install for the tenant.
+    # We cleared the stale global entries at DB setup so we can re-publish here.
+    echo "[entrypoint] Publishing test framework..."
+    # Use find to handle spaces in filenames (e.g. "Test Runner")
+    find "$ARTIFACTS" -name "*.app" -type f \( \
+        -name "Microsoft_Test Runner_*" -o \
+        -name "Microsoft_Library Assert_*" -o \
+        -name "Microsoft_Library Variable Storage_*" -o \
+        -name "Microsoft_Any_*" \
+    \) 2>/dev/null | sort | while read -r app; do
+        NAME=$(basename "$app")
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
+            -u "admin:Admin123!" -X POST \
+            -F "file=@$app;type=application/octet-stream" \
+            "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
+        echo "[entrypoint]   $NAME: HTTP $HTTP"
+    done
 
     # Publish our TestRunner Extension (custom API for test execution, depends on MS Test Runner)
     if [ -f /bc/testrunner/TestRunner.app ]; then
