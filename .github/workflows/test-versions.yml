@@ -251,6 +251,7 @@ jobs:
       run: |
         echo "Running tests..."
         ./scripts/run-tests.sh \
+          --app /tmp/testapp/SmokeTest.app \
           --codeunit-range 70000 \
           --timeout 3
 

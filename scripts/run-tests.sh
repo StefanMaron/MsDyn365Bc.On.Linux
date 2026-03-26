@@ -33,8 +33,11 @@ SQL_PASSWORD="${SA_PASSWORD:-Passw0rd123!}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+APP_FILE=""
+
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --app) APP_FILE="$2"; shift 2;;
         --extension-id) EXTENSION_ID="$2"; shift 2;;
         --codeunit-range) CODEUNIT_RANGE="$2"; shift 2;;
         --company) COMPANY="$2"; shift 2;;
@@ -90,45 +93,98 @@ ELSE
     UPDATE [$SUITE_TABLE] SET [Test Runner Id] = $TEST_RUNNER_ID WHERE [Name] = N'$SUITE_NAME';
 " > /dev/null 2>&1
 
-# Populate test codeunit lines from Application Object Metadata
+# Populate test suite with codeunit + function lines
 echo "Populating test suite..."
-RANGE_FILTER=""
-if [ -n "$CODEUNIT_RANGE" ]; then
-    if [[ "$CODEUNIT_RANGE" == *".."* ]]; then
-        FROM=$(echo "$CODEUNIT_RANGE" | cut -d. -f1)
-        TO=$(echo "$CODEUNIT_RANGE" | cut -d. -f3)
-        RANGE_FILTER="AND ao.[Object ID] BETWEEN $FROM AND $TO"
-    else
-        RANGE_FILTER="AND ao.[Object ID] = $CODEUNIT_RANGE"
+run_sql "USE [CRONUS]; DELETE FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME';" > /dev/null 2>&1
+
+LINE_NO=10000
+insert_line() {
+    local CU_ID="$1" NAME="$2" FUNC="$3" LINE_TYPE="$4" LEVEL="$5"
+    run_sql "
+    USE [CRONUS];
+    SET IDENTITY_INSERT [$METHOD_TABLE] ON;
+    INSERT INTO [$METHOD_TABLE]
+    ([Test Suite],[Line No_],[Test Codeunit],[Name],[Function],[Run],[Result],[Line Type],
+     [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
+     [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
+     [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
+    VALUES (N'$SUITE_NAME',$LINE_NO,$CU_ID,N'$NAME',N'$FUNC',1,0,$LINE_TYPE,
+            '1753-01-01','1753-01-01',$LEVEL,N'',N'',0x,0x,0,N'',0x,
+            NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
+            GETUTCDATE(),'00000000-0000-0000-0000-000000000001');
+    SET IDENTITY_INSERT [$METHOD_TABLE] OFF;
+    " > /dev/null 2>&1
+    LINE_NO=$((LINE_NO + 1))
+}
+
+# If --app is provided, parse SymbolReference.json for per-method lines
+if [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
+    TEST_LINES=$(unzip -p "$APP_FILE" SymbolReference.json 2>/dev/null | python3 -c "
+import sys, json
+data = json.loads(sys.stdin.read().lstrip('\ufeff'))
+for cu in data.get('Codeunits', []):
+    props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
+    if props.get('Subtype') != 'Test': continue
+    print(f\"CU|{cu['Id']}|{cu['Name']}\")
+    for m in cu.get('Methods', []):
+        attrs = [a.get('Name','') for a in m.get('Attributes',[])]
+        if 'Test' in attrs:
+            print(f\"FN|{cu['Id']}|{m['Name']}\")
+" 2>/dev/null || true)
+
+    TMPLINES=$(mktemp)
+    echo "$TEST_LINES" > "$TMPLINES"
+    while IFS='|' read -r TYPE ID NAME; do
+        [ -z "$TYPE" ] && continue
+        # Apply codeunit range filter
+        if [ -n "$CODEUNIT_RANGE" ] && [[ "$CODEUNIT_RANGE" != *".."* ]] && [ "$ID" != "$CODEUNIT_RANGE" ]; then
+            continue
+        fi
+        if [ "$TYPE" = "CU" ]; then
+            echo "  Codeunit $ID: $NAME"
+            insert_line "$ID" "$NAME" "" 0 0
+        else
+            echo "    - $NAME"
+            insert_line "$ID" "$NAME" "$NAME" 1 1
+        fi
+    done < "$TMPLINES"
+    rm -f "$TMPLINES"
+else
+    # Fallback: discover codeunits from Application Object Metadata (no per-method detail)
+    RANGE_FILTER=""
+    if [ -n "$CODEUNIT_RANGE" ]; then
+        if [[ "$CODEUNIT_RANGE" == *".."* ]]; then
+            FROM=$(echo "$CODEUNIT_RANGE" | cut -d. -f1)
+            TO=$(echo "$CODEUNIT_RANGE" | cut -d. -f3)
+            RANGE_FILTER="AND ao.[Object ID] BETWEEN $FROM AND $TO"
+        else
+            RANGE_FILTER="AND ao.[Object ID] = $CODEUNIT_RANGE"
+        fi
     fi
+    run_sql "
+    USE [CRONUS];
+    SET IDENTITY_INSERT [$METHOD_TABLE] ON;
+    INSERT INTO [$METHOD_TABLE]
+    ([Test Suite],[Line No_],[Test Codeunit],[Name],[Function],[Run],[Result],[Line Type],
+     [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
+     [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
+     [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
+    SELECT N'$SUITE_NAME', ROW_NUMBER() OVER (ORDER BY ao.[Object ID]) * 10000,
+           ao.[Object ID], CAST(ao.[Object Name] AS nvarchar(250)),
+           N'', 1, 0, 0, '1753-01-01','1753-01-01', 0, N'', N'', 0x, 0x, 0, N'', 0x,
+           NEWID(), GETUTCDATE(), '00000000-0000-0000-0000-000000000001',
+           GETUTCDATE(), '00000000-0000-0000-0000-000000000001'
+    FROM [Application Object Metadata] ao
+    WHERE ao.[Object Type] = 5 AND ao.[Object Subtype] = 'Test' $RANGE_FILTER;
+    SET IDENTITY_INSERT [$METHOD_TABLE] OFF;
+    " > /dev/null 2>&1
 fi
-
-EXT_FILTER=""
-[ -n "$EXTENSION_ID" ] && EXT_FILTER="AND ao.[App Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [ID] = '$EXTENSION_ID')"
-
-run_sql "
-USE [CRONUS];
-DELETE FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME';
-SET IDENTITY_INSERT [$METHOD_TABLE] ON;
-INSERT INTO [$METHOD_TABLE]
-([Test Suite],[Line No_],[Test Codeunit],[Name],[Function],[Run],[Result],[Line Type],
- [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
- [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
- [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
-SELECT N'$SUITE_NAME', ROW_NUMBER() OVER (ORDER BY ao.[Object ID]) * 10000,
-       ao.[Object ID], CAST(ao.[Object Name] AS nvarchar(250)),
-       N'', 1, 0, 0, '1753-01-01','1753-01-01', 0, N'', N'', 0x, 0x, 0, N'', 0x,
-       NEWID(), GETUTCDATE(), '00000000-0000-0000-0000-000000000001',
-       GETUTCDATE(), '00000000-0000-0000-0000-000000000001'
-FROM [Application Object Metadata] ao
-WHERE ao.[Object Type] = 5 AND ao.[Object Subtype] = 'Test'
-$RANGE_FILTER $EXT_FILTER;
-SET IDENTITY_INSERT [$METHOD_TABLE] OFF;
-" > /dev/null 2>&1
 
 CU_COUNT=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 0" \
     | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
-echo "  Test codeunits: ${CU_COUNT:-0}"
+FUNC_COUNT=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 1" \
+    | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+echo "  Test codeunits: ${CU_COUNT:-0}, Test methods: ${FUNC_COUNT:-0}"
 
 if [ "${CU_COUNT:-0}" = "0" ]; then
     echo "ERROR: No test codeunits found"
