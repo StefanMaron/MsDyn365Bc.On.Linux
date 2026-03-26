@@ -49,42 +49,104 @@ After `docker compose up`, these endpoints are available:
 
 Authentication: `admin` / `Admin123!` (NavUserPassword)
 
-## Publishing Extensions
+## Local Development with VS Code
 
-Publish an `.app` file via the dev endpoint:
+### Setup
+
+1. Start BC:
+   ```bash
+   docker compose up -d --wait
+   ```
+
+2. Add a `launch.json` to your AL project's `.vscode/` folder:
+   ```json
+   {
+       "version": "0.2.0",
+       "configurations": [
+           {
+               "name": "BC Linux",
+               "type": "al",
+               "request": "launch",
+               "server": "http://localhost",
+               "serverInstance": "BC",
+               "port": 7049,
+               "authentication": "UserPassword",
+               "startupObjectId": 22,
+               "startupObjectType": "Page",
+               "breakOnError": "All",
+               "launchBrowser": false,
+               "enableLongRunningSqlStatements": true,
+               "enableSqlInformationDebugger": true
+           }
+       ]
+   }
+   ```
+
+3. Download symbols — press `Ctrl+Shift+P` → **AL: Download Symbols**, or manually:
+   ```bash
+   mkdir -p .alpackages
+   for app in System "System Application" "Base Application" "Application"; do
+     curl -sf -u admin:Admin123! \
+       "http://localhost:7049/BC/dev/packages?publisher=Microsoft&appName=$(echo $app | sed 's/ /%20/g')&appVersion=0.0.0.0" \
+       -o ".alpackages/${app}.app"
+   done
+   ```
+
+4. Publish — press `F5` or `Ctrl+F5` in VS Code. The AL extension uses the `launch.json` settings to publish via the dev endpoint.
+
+### Publishing from the command line
 
 ```bash
+# Compile
+AL compile "/project:." "/packagecachepath:.alpackages" "/out:MyExtension.app"
+
+# Publish
 curl -u admin:Admin123! -X POST \
   -F "file=@MyExtension.app;type=application/octet-stream" \
   "http://localhost:7049/BC/dev/apps?SchemaUpdateMode=forcesync"
 ```
 
-Or use the AL Language extension in VS Code — point `launch.json` to `http://localhost:7049`:
+### Running Tests
 
-```json
-{
-    "server": "http://localhost",
-    "serverInstance": "BC",
-    "port": 7049,
-    "authentication": "UserPassword"
-}
-```
+The test framework (Test Runner, Library Assert, Library Variable Storage, Any) is published automatically on first boot.
 
-## Downloading Symbols
+1. **Publish your test app** (separate from running tests):
+   ```bash
+   curl -u admin:Admin123! -X POST \
+     -F "file=@MyTestApp.app;type=application/octet-stream" \
+     "http://localhost:7049/BC/dev/apps?SchemaUpdateMode=forcesync"
+   ```
 
-Download symbol packages from the dev endpoint for use with the AL compiler:
+2. **Run tests**:
+   ```bash
+   # Run all test codeunits from your app
+   ./scripts/run-tests.sh --app MyTestApp.app --codeunit-range 50000..50100
 
-```bash
-# System symbols
-curl -u admin:Admin123! \
-  "http://localhost:7049/BC/dev/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
-  -o System.app
+   # Run a single test codeunit
+   ./scripts/run-tests.sh --app MyTestApp.app --codeunit-range 50000
 
-# System Application symbols
-curl -u admin:Admin123! \
-  "http://localhost:7049/BC/dev/packages?publisher=Microsoft&appName=System%20Application&appVersion=0.0.0.0" \
-  -o SystemApplication.app
-```
+   # Run without .app (codeunit-level results only, no per-method detail)
+   ./scripts/run-tests.sh --codeunit-range 50000..50100
+   ```
+
+   Output:
+   ```
+   === BC Test Runner ===
+   Company: CRONUS International Ltd.
+   Populating test suite...
+     Codeunit 50000: My Tests
+       - TestCustomerCreation
+       - TestSalesOrderPosting
+     Test codeunits: 1, Test methods: 2
+
+   === Test Results ===
+     PASS TestCustomerCreation        50000
+     PASS TestSalesOrderPosting       50000
+
+   Results: 2 total, 2 passed, 0 failed, 0 skipped
+   ```
+
+   The `--app` flag enables per-method results by parsing the `.app` file's symbol metadata. Without it, you get codeunit-level results only.
 
 ## GitHub Codespaces
 
