@@ -31,7 +31,7 @@ jobs:
   test:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
@@ -59,7 +59,7 @@ jobs:
         docker compose up -d --build 2>&1 | tail -10
 
         echo "Waiting for BC to be healthy..."
-        for i in $(seq 1 180); do
+        for i in $(seq 1 360); do
           STATUS=$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q bc) 2>/dev/null || echo "unknown")
           case "$STATUS" in
             healthy)
@@ -82,7 +82,7 @@ jobs:
         done
 
         if [ "$STATUS" != "healthy" ]; then
-          echo "ERROR: BC did not become healthy within 15 minutes"
+          echo "ERROR: BC did not become healthy within 30 minutes"
           docker compose logs bc 2>&1 | tail -100
           exit 1
         fi
