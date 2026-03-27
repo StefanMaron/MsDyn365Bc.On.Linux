@@ -314,9 +314,9 @@ if [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ]; then
     echo "[entrypoint] Cleared ALL pre-installed apps (BC_CLEAR_ALL_APPS=true)"
 else
     $SQLCMD_DB -Q "
-    DELETE FROM [Installed Application] WHERE [Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any'));
-    DELETE FROM [NAV App Installed App] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any');
-    DELETE FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any');
+    DELETE FROM [Installed Application] WHERE [Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any'));
+    DELETE FROM [NAV App Installed App] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any');
+    DELETE FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any');
     " 2>/dev/null
     echo "[entrypoint] Cleared test framework global entries (will re-publish via dev endpoint)"
 fi
@@ -426,6 +426,7 @@ exec 3>/tmp/bc-stdin
         -name "Microsoft_Test Runner_*" -o \
         -name "Microsoft_Library Assert_*" -o \
         -name "Microsoft_Library Variable Storage_*" -o \
+        -name "Microsoft_Permissions Mock_*" -o \
         -name "Microsoft_Any_*" \
     \) 2>/dev/null | sort | while read -r app; do
         NAME=$(basename "$app")
