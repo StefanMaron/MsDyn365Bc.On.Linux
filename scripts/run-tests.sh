@@ -124,7 +124,11 @@ if [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
     TEST_LINES=$(unzip -p "$APP_FILE" SymbolReference.json 2>/dev/null | python3 -c "
 import sys, json
 data = json.loads(sys.stdin.read().lstrip('\ufeff'))
-for cu in data.get('Codeunits', []):
+# Collect codeunits from top level and from namespaces
+all_codeunits = list(data.get('Codeunits', []))
+for ns in data.get('Namespaces', []):
+    all_codeunits.extend(ns.get('Codeunits', []))
+for cu in all_codeunits:
     props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
     if props.get('Subtype') != 'Test': continue
     print(f\"CU|{cu['Id']}|{cu['Name']}\")
