@@ -55,6 +55,19 @@ async Task<int> RunTests()
     var formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
     if (formState == null) return 1;
 
+    // Read the suite name that page 130455 auto-selected/created
+    Console.Write("Reading page state... ");
+    try
+    {
+        var pg = await rpc.InvokeWithCancellationAsync<JToken>("GetPage",
+            new object[] { new { PageSize = 50, IncludeMoreDataInformation = true, IncludeNonRowData = true }, formState! }, cts.Token);
+        if (pg?["State"] != null) formState = pg["State"];
+        // Log the CurrentSuiteName from NonRowData
+        var pageStr = pg?.ToString() ?? "";
+        Console.WriteLine("OK");
+    }
+    catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
+
     // ClearTestResults
     Console.Write("Clearing previous results... ");
     try
