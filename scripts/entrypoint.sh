@@ -298,15 +298,28 @@ fi
 # Sandbox tenant type
 $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1 WHERE tenantid = 'default';" 2>/dev/null
 
-# Clear pre-installed test framework apps so they can be properly published+synced+installed
-# via the dev endpoint after BC starts. The CRONUS backup has them as global apps but
-# NOT installed for the tenant. The dev endpoint handles the full lifecycle.
-$SQLCMD_DB -Q "
-DELETE FROM [Installed Application] WHERE [Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any'));
-DELETE FROM [NAV App Installed App] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any');
-DELETE FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any');
-" 2>/dev/null
-echo "[entrypoint] Cleared test framework global entries (will re-publish via dev endpoint)"
+# Clear pre-installed apps before BC starts.
+# BC_CLEAR_ALL_APPS=true: nuclear clear of ALL apps (needed when publishing custom System App)
+# Default: only clear test framework apps (Test Runner, Library Assert, etc.)
+if [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ]; then
+    $SQLCMD_DB -Q "
+    DELETE FROM [NAV App Installed App];
+    DELETE FROM [NAV App Tenant App];
+    DELETE FROM [NAV App Dependencies];
+    DELETE FROM [NAV App Published App];
+    DELETE FROM [Published Application];
+    DELETE FROM [Installed Application];
+    DELETE FROM [Inplace Installed Application];
+    " 2>/dev/null
+    echo "[entrypoint] Cleared ALL pre-installed apps (BC_CLEAR_ALL_APPS=true)"
+else
+    $SQLCMD_DB -Q "
+    DELETE FROM [Installed Application] WHERE [Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any'));
+    DELETE FROM [NAV App Installed App] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any');
+    DELETE FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Any');
+    " 2>/dev/null
+    echo "[entrypoint] Cleared test framework global entries (will re-publish via dev endpoint)"
+fi
 
 # Admin user (password hash for Admin123! with GUID 00000000-0000-0000-0000-000000000001)
 USER_GUID='00000000-0000-0000-0000-000000000001'
