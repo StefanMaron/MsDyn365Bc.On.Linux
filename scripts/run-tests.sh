@@ -53,9 +53,11 @@ done
 
 echo "=== BC Test Runner ==="
 
+# --- Detect SQL container ---
+SQL_CONTAINER=$(cd "$REPO_DIR" && docker compose ps -q sql 2>/dev/null | head -1)
+
 # --- Auto-detect company if not specified ---
 if [ -z "$COMPANY" ]; then
-    SQL_CONTAINER=$(cd "$REPO_DIR" && docker compose ps -q sql 2>/dev/null | head -1)
     if [ -n "$SQL_CONTAINER" ]; then
         COMPANY=$(docker exec -e "_QB=$(echo 'USE [CRONUS]; SELECT TOP 1 RTRIM([Name]) FROM [Company] ORDER BY [Name]' | base64 -w0)" \
             "$SQL_CONTAINER" bash -c \
