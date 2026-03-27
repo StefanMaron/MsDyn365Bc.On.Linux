@@ -37,6 +37,55 @@ BC_DEV_PORT=17049 docker compose up -d
 | `BC_ODATA_PORT` | `7048` | OData port |
 | `BC_API_PORT` | `7052` | API port |
 
+## Running Multiple Instances
+
+You can run multiple BC environments side-by-side by giving each stack a unique project name and port set. Docker Compose uses the project name to namespace all containers, networks, and volumes, so they don't collide.
+
+Use the `-p` flag (or `COMPOSE_PROJECT_NAME` env var) together with different ports:
+
+```bash
+# Instance 1: BC 27.5 on default ports
+docker compose -p bc275 up -d --wait
+
+# Instance 2: BC 28.0 on offset ports
+COMPOSE_PROJECT_NAME=bc280 \
+BC_VERSION=28.0 \
+SQL_PORT=21433 \
+BC_DEV_PORT=17049 \
+BC_ODATA_PORT=17048 \
+BC_API_PORT=17052 \
+BC_MGMT_PORT=17045 \
+BC_CLIENT_PORT=17085 \
+  docker compose up -d --wait
+```
+
+Each instance gets its own containers (`bc275-bc-1`, `bc280-bc-1`), volumes, and network. Manage them independently:
+
+```bash
+docker compose -p bc275 logs -f     # logs for instance 1
+docker compose -p bc280 down        # stop instance 2
+docker compose -p bc275 down -v     # stop instance 1 and remove its volumes
+```
+
+**Important:** Every port must be unique across instances — you'll get a bind error if two instances try to map the same host port. The easiest approach is to pick a port offset (e.g. +10000) for each additional instance.
+
+For convenience, you can create a separate `.env` file per instance:
+
+```bash
+# .env.bc280
+BC_VERSION=28.0
+SQL_PORT=21433
+BC_DEV_PORT=17049
+BC_ODATA_PORT=17048
+BC_API_PORT=17052
+BC_MGMT_PORT=17045
+BC_CLIENT_PORT=17085
+```
+
+```bash
+docker compose -p bc280 --env-file .env.bc280 up -d --wait
+```
+
 ## Endpoints
 
 After `docker compose up`, these endpoints are available:
