@@ -120,53 +120,52 @@ insert_line() {
 }
 
 # If --app is provided, parse SymbolReference.json for per-method lines
+APP_PARSED=false
 if [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
-    echo "  Parsing $APP_FILE ($(stat -c%s "$APP_FILE" 2>/dev/null || echo '?') bytes)..."
     TEST_LINES=$(unzip -p "$APP_FILE" SymbolReference.json 2>/dev/null | python3 -c "
 import sys, json
 raw = sys.stdin.read()
 if not raw.strip():
-    print('ERROR: Empty SymbolReference.json', file=sys.stderr)
     sys.exit(0)
 data = json.loads(raw.lstrip('\ufeff'))
-all_codeunits = list(data.get('Codeunits', []))
-for ns in data.get('Namespaces', []):
-    all_codeunits.extend(ns.get('Codeunits', []))
-test_count = 0
-for cu in all_codeunits:
-    props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
-    if props.get('Subtype') != 'Test': continue
-    test_count += 1
-    print(f\"CU|{cu['Id']}|{cu['Name']}\")
-    for m in cu.get('Methods', []):
-        attrs = [a.get('Name','') for a in m.get('Attributes',[])]
-        if 'Test' in attrs:
-            print(f\"FN|{cu['Id']}|{m['Name']}\")
-if test_count == 0:
-    print(f'WARNING: {len(all_codeunits)} codeunits found, 0 with Subtype=Test', file=sys.stderr)
-    for cu in all_codeunits[:3]:
+def collect(node):
+    for cu in node.get('Codeunits', []):
         props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
-        print(f'  CU {cu[\"Id\"]} {cu[\"Name\"]}: Subtype={props.get(\"Subtype\",\"(none)\")}', file=sys.stderr)
-" || true)
+        if props.get('Subtype') != 'Test': continue
+        print(f\"CU|{cu['Id']}|{cu['Name']}\")
+        for m in cu.get('Methods', []):
+            if any(a.get('Name','')=='Test' for a in m.get('Attributes',[])):
+                print(f\"FN|{cu['Id']}|{m['Name']}\")
+    for ns in node.get('Namespaces', []):
+        collect(ns)
+collect(data)
+" 2>/dev/null || true)
 
-    TMPLINES=$(mktemp)
-    echo "$TEST_LINES" > "$TMPLINES"
-    while IFS='|' read -r TYPE ID NAME; do
-        [ -z "$TYPE" ] && continue
-        # Apply codeunit range filter
-        if [ -n "$CODEUNIT_RANGE" ] && [[ "$CODEUNIT_RANGE" != *".."* ]] && [ "$ID" != "$CODEUNIT_RANGE" ]; then
-            continue
-        fi
-        if [ "$TYPE" = "CU" ]; then
-            echo "  Codeunit $ID: $NAME"
-            insert_line "$ID" "$NAME" "" 0 0
-        else
-            echo "    - $NAME"
-            insert_line "$ID" "$NAME" "$NAME" 1 1
-        fi
-    done < "$TMPLINES"
-    rm -f "$TMPLINES"
-else
+    if [ -n "$TEST_LINES" ]; then
+        TMPLINES=$(mktemp)
+        echo "$TEST_LINES" > "$TMPLINES"
+        while IFS='|' read -r TYPE ID NAME; do
+            [ -z "$TYPE" ] && continue
+            # Apply codeunit range filter
+            if [ -n "$CODEUNIT_RANGE" ] && [[ "$CODEUNIT_RANGE" != *".."* ]] && [ "$ID" != "$CODEUNIT_RANGE" ]; then
+                continue
+            fi
+            if [ "$TYPE" = "CU" ]; then
+                echo "  Codeunit $ID: $NAME"
+                insert_line "$ID" "$NAME" "" 0 0
+            else
+                echo "    - $NAME"
+                insert_line "$ID" "$NAME" "$NAME" 1 1
+            fi
+        done < "$TMPLINES"
+        rm -f "$TMPLINES"
+        APP_PARSED=true
+    else
+        echo "  SymbolReference.json had no test codeunits, falling back to SQL discovery..."
+    fi
+fi
+
+if [ "$APP_PARSED" = "false" ]; then
     # Fallback: discover codeunits from Application Object Metadata (no per-method detail)
     RANGE_FILTER=""
     if [ -n "$CODEUNIT_RANGE" ]; then
