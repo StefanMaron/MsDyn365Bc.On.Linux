@@ -121,22 +121,33 @@ insert_line() {
 
 # If --app is provided, parse SymbolReference.json for per-method lines
 if [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
+    echo "  Parsing $APP_FILE ($(stat -c%s "$APP_FILE" 2>/dev/null || echo '?') bytes)..."
     TEST_LINES=$(unzip -p "$APP_FILE" SymbolReference.json 2>/dev/null | python3 -c "
 import sys, json
-data = json.loads(sys.stdin.read().lstrip('\ufeff'))
-# Collect codeunits from top level and from namespaces
+raw = sys.stdin.read()
+if not raw.strip():
+    print('ERROR: Empty SymbolReference.json', file=sys.stderr)
+    sys.exit(0)
+data = json.loads(raw.lstrip('\ufeff'))
 all_codeunits = list(data.get('Codeunits', []))
 for ns in data.get('Namespaces', []):
     all_codeunits.extend(ns.get('Codeunits', []))
+test_count = 0
 for cu in all_codeunits:
     props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
     if props.get('Subtype') != 'Test': continue
+    test_count += 1
     print(f\"CU|{cu['Id']}|{cu['Name']}\")
     for m in cu.get('Methods', []):
         attrs = [a.get('Name','') for a in m.get('Attributes',[])]
         if 'Test' in attrs:
             print(f\"FN|{cu['Id']}|{m['Name']}\")
-" 2>/dev/null || true)
+if test_count == 0:
+    print(f'WARNING: {len(all_codeunits)} codeunits found, 0 with Subtype=Test', file=sys.stderr)
+    for cu in all_codeunits[:3]:
+        props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
+        print(f'  CU {cu[\"Id\"]} {cu[\"Name\"]}: Subtype={props.get(\"Subtype\",\"(none)\")}', file=sys.stderr)
+" || true)
 
     TMPLINES=$(mktemp)
     echo "$TEST_LINES" > "$TMPLINES"
