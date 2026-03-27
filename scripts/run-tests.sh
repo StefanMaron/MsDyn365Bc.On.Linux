@@ -214,11 +214,16 @@ if [ ! -f "$TESTRUNNER_DIR/bin/Release/net8.0/TestRunner.dll" ]; then
     dotnet build "$TESTRUNNER_DIR" -c Release 2>&1 | tail -3
 fi
 
+# --- Verify suite exists before running ---
+SUITE_CHECK=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$SUITE_TABLE] WHERE [Name] = N'$SUITE_NAME'" \
+    | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+echo "  Suite '$SUITE_NAME' exists: ${SUITE_CHECK:-0} rows"
+
 # --- Run tests via client services (page 130455) ---
 # RunNextTest triggers BC test execution. The session typically dies during test
 # execution (test isolation), so we ignore the exit code and read results from SQL.
 timeout "${TIMEOUT_MIN}m" dotnet run --project "$TESTRUNNER_DIR" --no-build -c Release -- \
-    --host "$BC_HOST" --company "$COMPANY" --timeout "$TIMEOUT_MIN" 2>&1 || true
+    --host "$BC_HOST" --company "$COMPANY" --suite "$SUITE_NAME" --timeout "$TIMEOUT_MIN" 2>&1 || true
 
 sleep 2
 

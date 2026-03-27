@@ -27,6 +27,7 @@ var company = "CRONUS International Ltd.";
 var user = "admin";
 var password = "Admin123!";
 var timeoutMin = 30;
+var suiteName = "DEFAULT";
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -35,6 +36,7 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--user" && i + 1 < args.Length) user = args[++i];
     else if (args[i] == "--password" && i + 1 < args.Length) password = args[++i];
     else if (args[i] == "--timeout" && i + 1 < args.Length) timeoutMin = int.Parse(args[++i]);
+    else if (args[i] == "--suite" && i + 1 < args.Length) suiteName = args[++i];
     else if (!args[i].StartsWith("--")) host = args[i];
 }
 
@@ -213,10 +215,12 @@ async Task<JToken?> OpenTestPage(JsonRpc rpc, MetadataTokenCapture tc, string co
     try { await rpc.InvokeWithCancellationAsync<JToken>("OpenCompany", new object[] { company, false }, ct); }
     catch (RemoteInvocationException ex) { Console.Error.WriteLine($"  OpenCompany: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
 
-    Console.Write("Opening page 130455... ");
+    Console.Write($"Opening page 130455 (suite={suiteName})... ");
     var formCts = CancellationTokenSource.CreateLinkedTokenSource(ct); formCts.CancelAfter(TimeSpan.FromSeconds(30));
     var form = await rpc.InvokeWithCancellationAsync<JToken>("OpenForm",
-        new object[] { new { HasMainForm = true, States = new[] { new { FormId = 130455, TableView = new { TableId = 130450 } } }, ControlIds = new string?[] { null }, VersionNumber = tc.MetadataToken, MainFormHandle = Guid.Empty } }, formCts.Token);
+        new object[] { new { HasMainForm = true, States = new[] { new {
+            FormId = 130455, TableView = new { TableId = 130450 }
+        } }, ControlIds = new string?[] { null }, VersionNumber = tc.MetadataToken, MainFormHandle = Guid.Empty } }, formCts.Token);
     if (form == null || form.Type == JTokenType.Null) { Console.Error.WriteLine("FAIL"); return null; }
     var state = form["States"]?[0];
     Console.WriteLine($"OK ({state?["ServerFormHandle"]})");
