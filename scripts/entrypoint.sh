@@ -478,18 +478,43 @@ exec 3>/tmp/bc-stdin
         echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS: republishing extensions in dependency order..."
 
         # Build a name→app-file map by scanning all .app files in artifacts.
-        # .app files are ZIP archives; NavxManifest.xml inside contains Name/Publisher/Version.
+        # BC 27+ uses Ready-to-Run packages: the outer .app is a ZIP containing
+        # readytorunappmanifest.json with EmbeddedApp* keys. Older packages use
+        # NavxManifest.xml. Python handles both formats reliably.
         APP_INDEX="/tmp/bc-app-index.tsv"
-        > "$APP_INDEX"
-        while IFS= read -r -d '' appfile; do
-            # Extract NavxManifest.xml, parse Name+Publisher+Version
-            MANIFEST_XML=$(unzip -p "$appfile" "NavxManifest.xml" 2>/dev/null) || continue
-            APP_NAME=$(echo "$MANIFEST_XML" | grep -oP '(?<=Name=")[^"]+' | head -1)
-            APP_PUB=$(echo "$MANIFEST_XML"  | grep -oP '(?<=Publisher=")[^"]+' | head -1)
-            APP_VER=$(echo "$MANIFEST_XML"  | grep -oP '(?<=Version=")[^"]+' | head -1)
-            [ -z "$APP_NAME" ] && continue
-            printf '%s\t%s\t%s\t%s\n' "$APP_NAME" "$APP_PUB" "$APP_VER" "$appfile" >> "$APP_INDEX"
-        done < <(find "$ARTIFACTS" -name "*.app" -type f -print0 2>/dev/null)
+        ARTIFACTS_VAL="$ARTIFACTS"
+        python3 << PYEOF > "$APP_INDEX"
+import os, zipfile, json, re
+
+artifacts = "$ARTIFACTS_VAL"
+for root, dirs, files in os.walk(artifacts):
+    for fname in files:
+        if not fname.endswith('.app'):
+            continue
+        path = os.path.join(root, fname)
+        try:
+            z = zipfile.ZipFile(path)
+            names = z.namelist()
+            if 'readytorunappmanifest.json' in names:
+                d = json.loads(z.read('readytorunappmanifest.json'))
+                app_name = d.get('EmbeddedAppName', '')
+                app_pub  = d.get('EmbeddedAppPublisher', '')
+                app_ver  = d.get('EmbeddedAppVersion', '')
+            elif 'NavxManifest.xml' in names:
+                xml = z.read('NavxManifest.xml').decode('utf-8', errors='replace')
+                m_name = re.search(r'Name="([^"]+)"', xml)
+                m_pub  = re.search(r'Publisher="([^"]+)"', xml)
+                m_ver  = re.search(r'Version="([^"]+)"', xml)
+                app_name = m_name.group(1) if m_name else ''
+                app_pub  = m_pub.group(1)  if m_pub  else ''
+                app_ver  = m_ver.group(1)  if m_ver  else ''
+            else:
+                continue
+            if app_name:
+                print(f"{app_name}\t{app_pub}\t{app_ver}\t{path}")
+        except Exception:
+            pass
+PYEOF
 
         # Topological sort: read snapshot and dep graph, emit in dependency order.
         # Uses a simple iterative approach: emit apps whose deps are already emitted.
