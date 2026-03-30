@@ -70,7 +70,7 @@ if [ -z "$COMPANY" ]; then
         COMPANY=$(docker exec -e "_QB=$(echo 'USE [CRONUS]; SELECT TOP 1 RTRIM([Name]) FROM [Company] ORDER BY [Name]' | base64 -w0)" \
             "$SQL_CONTAINER" bash -c \
             'echo "$_QB" | base64 -d | /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "'"$SQL_PASSWORD"'" -C -No -i /dev/stdin' \
-            2>/dev/null | grep -v "^-" | grep -v "^Changed" | grep -v "^$" | grep -v "^(" | grep -v "^\s*$" | head -1 | sed 's/ *$//')
+            2>/dev/null | grep -v "^-" | grep -v "^Changed" | grep -v "^$" | grep -v "^(" | grep -v "^[[:space:]]*$" | head -1 | sed 's/ *$//')
     fi
     [ -z "$COMPANY" ] && COMPANY="CRONUS International Ltd."
 fi
@@ -130,7 +130,7 @@ insert_line() {
 # If --app is provided, parse SymbolReference.json for per-method lines
 APP_PARSED=false
 if [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
-    TEST_LINES=$(unzip -p "$APP_FILE" SymbolReference.json 2>/dev/null | python3 -c "
+    TEST_LINES=$(unzip -p "$APP_FILE" SymbolReference.json 2>/dev/null | env -u PYTHONHOME -u PYTHONPATH python3 -c "
 import sys, json
 raw = sys.stdin.read()
 if not raw.strip():
@@ -205,9 +205,9 @@ if [ "$APP_PARSED" = "false" ]; then
 fi
 
 CU_COUNT=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 0" \
-    | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+    | grep -oE '^ +[0-9]+' | tr -d ' ' | tail -1)
 FUNC_COUNT=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 1" \
-    | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+    | grep -oE '^ +[0-9]+' | tr -d ' ' | tail -1)
 echo "  Test codeunits: ${CU_COUNT:-0}, Test methods: ${FUNC_COUNT:-0}"
 
 if [ "${CU_COUNT:-0}" = "0" ]; then
@@ -215,7 +215,7 @@ if [ "${CU_COUNT:-0}" = "0" ]; then
     exit 1
 fi
 
-# --- Build TestRunner tool if needed ---
+# --- Build TestRunner ---
 TESTRUNNER_DIR="$REPO_DIR/tools/TestRunner"
 if [ ! -f "$TESTRUNNER_DIR/bin/Release/net8.0/TestRunner.dll" ]; then
     echo "Building TestRunner..."
@@ -224,7 +224,7 @@ fi
 
 # --- Verify suite exists before running ---
 SUITE_CHECK=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$SUITE_TABLE] WHERE [Name] = N'$SUITE_NAME'" \
-    | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+    | grep -oE '^ +[0-9]+' | tr -d ' ' | tail -1)
 echo "  Suite '$SUITE_NAME' exists: ${SUITE_CHECK:-0} rows"
 
 # --- Run tests via client services (page 130455) ---
