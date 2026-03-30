@@ -13,6 +13,10 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -28,8 +32,35 @@ jobs:
         JSON=$(echo "$VERSIONS" | python3 -c "import sys,json; print(json.dumps({'bc_version': sys.stdin.read().strip().split(',')}))")
         echo "matrix=$JSON" >> $GITHUB_OUTPUT
 
+  build-image:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Log in to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and push BC runner image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: src/Dockerfile
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository }}/bc-runner:${{ github.sha }}
+          ghcr.io/${{ github.repository }}/bc-runner:latest
+        cache-from: type=registry,ref=ghcr.io/${{ github.repository }}/bc-runner:cache
+        cache-to: type=registry,ref=ghcr.io/${{ github.repository }}/bc-runner:cache,mode=max
+
   test:
-    needs: prepare
+    needs: [prepare, build-image]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -39,6 +70,30 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Log in to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Cache BC artifacts
+      id: artifact-cache
+      uses: actions/cache@v4
+      with:
+        path: ./artifact-cache/${{ matrix.bc_version }}
+        key: bc-artifacts-${{ matrix.bc_version }}-${{ hashFiles('scripts/download-artifacts.sh') }}
+        restore-keys: |
+          bc-artifacts-${{ matrix.bc_version }}-
+
+    - name: Download BC artifacts
+      if: steps.artifact-cache.outputs.cache-hit != 'true'
+      env:
+        BC_VERSION: ${{ matrix.bc_version }}
+      run: |
+        mkdir -p ./artifact-cache/$BC_VERSION
+        scripts/download-artifacts.sh sandbox "$BC_VERSION" w1 ./artifact-cache/$BC_VERSION
 
     - name: Setup .NET SDK and AL compiler
       uses: actions/setup-dotnet@v4
@@ -51,12 +106,14 @@ jobs:
           --version 16.2.28.57946 2>/dev/null || true
         echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
 
-    - name: Build and start BC
+    - name: Start BC
       env:
         BC_VERSION: ${{ matrix.bc_version }}
+        BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ matrix.bc_version }}
+        BC_RUNNER_IMAGE: ghcr.io/${{ github.repository }}/bc-runner:${{ github.sha }}
       run: |
         STEP_START=$(date +%s)
-        docker compose up -d --build 2>&1 | tail -10
+        docker compose up -d 2>&1 | tail -10
 
         echo "Waiting for BC to be healthy..."
         for i in $(seq 1 360); do
