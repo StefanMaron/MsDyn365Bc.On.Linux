@@ -124,10 +124,20 @@ async Task<int> RunTests()
 
         try { rpc.Dispose(); ws.Dispose(); } catch { }
 
-        if (string.IsNullOrEmpty(testResultJson) || testResultJson == "All tests executed.")
+        if (testResultJson == "All tests executed.")
         {
             Console.WriteLine("All tests executed.");
             break;
+        }
+
+        // Empty means the connection died after RunNextTest returned but before
+        // GetPage could read the result.  The codeunit results are already
+        // committed to the Test Method Line table.  Continue so the next
+        // iteration reconnects and advances to the next codeunit.
+        if (string.IsNullOrEmpty(testResultJson))
+        {
+            Console.Error.WriteLine("  TestResultJson empty (connection dropped after run) — continuing");
+            continue;
         }
 
         try
