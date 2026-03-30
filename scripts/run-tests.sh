@@ -15,6 +15,7 @@
 #   --test-runner <id>         Test runner codeunit ID (default: 130451)
 #   --suite-name <name>        Test suite name (default: DEFAULT)
 #   --timeout <minutes>        Overall timeout (default: 30)
+#   --codeunit-timeout <min>   Max time for one codeunit run before watchdog reconnects (default: 10)
 #   --disabled-tests <file>    Path to disabled tests JSON
 #   --sql-password <pw>        SA password for company auto-detect
 
@@ -27,6 +28,7 @@ TEST_RUNNER_ID=130451
 CODEUNIT_RANGE=""
 EXTENSION_ID=""
 TIMEOUT_MIN=30
+CODEUNIT_TIMEOUT_MIN=10
 SUITE_NAME="DEFAULT"
 DISABLED_TESTS=""
 SQL_PASSWORD="${SA_PASSWORD:-Passw0rd123!}"
@@ -45,6 +47,7 @@ while [[ $# -gt 0 ]]; do
         --test-runner) TEST_RUNNER_ID="$2"; shift 2;;
         --suite-name) SUITE_NAME="$2"; shift 2;;
         --timeout) TIMEOUT_MIN="$2"; shift 2;;
+        --codeunit-timeout) CODEUNIT_TIMEOUT_MIN="$2"; shift 2;;
         --disabled-tests) DISABLED_TESTS="$2"; shift 2;;
         --sql-password) SQL_PASSWORD="$2"; shift 2;;
         *) echo "Unknown option: $1"; exit 1;;
@@ -224,6 +227,7 @@ echo "  Suite '$SUITE_NAME' exists: ${SUITE_CHECK:-0} rows"
 # execution (test isolation), so we ignore the exit code and read results from SQL.
 timeout "${TIMEOUT_MIN}m" dotnet run --project "$TESTRUNNER_DIR" --no-build -c Release -- \
     --host "$BC_HOST" --company "$COMPANY" --suite "$SUITE_NAME" --timeout "$TIMEOUT_MIN" \
+    --codeunit-timeout "$CODEUNIT_TIMEOUT_MIN" \
     --max-iterations $(( ${CU_COUNT:-100} + 2 )) 2>&1 || true
 
 sleep 2

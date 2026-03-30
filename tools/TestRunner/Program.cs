@@ -27,6 +27,7 @@ var company = "CRONUS International Ltd.";
 var user = "admin";
 var password = "Admin123!";
 var timeoutMin = 30;
+var codeunitTimeoutMin = 10; // max time for a single RunNextTest call (per codeunit)
 var suiteName = "DEFAULT";
 var maxIterations = 500;
 
@@ -37,6 +38,7 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--user" && i + 1 < args.Length) user = args[++i];
     else if (args[i] == "--password" && i + 1 < args.Length) password = args[++i];
     else if (args[i] == "--timeout" && i + 1 < args.Length) timeoutMin = int.Parse(args[++i]);
+    else if (args[i] == "--codeunit-timeout" && i + 1 < args.Length) codeunitTimeoutMin = int.Parse(args[++i]);
     else if (args[i] == "--suite" && i + 1 < args.Length) suiteName = args[++i];
     else if (args[i] == "--max-iterations" && i + 1 < args.Length) maxIterations = int.Parse(args[++i]);
     else if (!args[i].StartsWith("--")) host = args[i];
@@ -115,9 +117,9 @@ async Task<int> RunTests()
             // disarm the watchdog before it could fire.
             var capturedRpc = rpc;
             var capturedWs = ws;
-            _ = Task.Delay(TimeSpan.FromSeconds(180)).ContinueWith(_ =>
+            _ = Task.Delay(TimeSpan.FromMinutes(codeunitTimeoutMin)).ContinueWith(_ =>
             {
-                Console.Error.WriteLine("  Watchdog: aborting hung connection after 3 min");
+                Console.Error.WriteLine($"  Watchdog: aborting hung connection after {codeunitTimeoutMin} min (--codeunit-timeout)");
                 try { capturedWs.Abort(); } catch { }
                 try { capturedRpc.Dispose(); } catch { }
             });
