@@ -11,23 +11,25 @@ using StreamJsonRpc;
 // BC Test Runner — connects via WebSocket client services to page 130455
 // (Command Line Test Tool) and runs tests using RunNextTest + TestResultJson.
 //
-// Mirrors BcContainerHelper's Run-TestsInBcContainer external behavior:
-//   1. Open page 130455
-//   2. ClearTestResults
-//   3. RunNextTest loop → parse TestResultJson
-//   4. Output per-method results
+// Mirrors BcContainerHelper's Run-TestsInBcContainer external behavior with
+// renewClientContextBetweenTests: reconnect BEFORE each RunNextTest call so
+// that BC's test-isolation session kill (which drops the WebSocket after each
+// codeunit) is never treated as an error.  BC tracks test-suite progress in
+// the Test Method Line table, so a fresh session always picks up where it
+// left off.
 //
 // Note: The DEFAULT test suite must be pre-created (via SQL in run-tests.sh).
 // The suite is opened by filtering TableView to Name=suiteName, which positions
 // the page on the correct record so OnOpenPage sets CurrentSuiteName correctly.
-// interface matches BcContainerHelper's behavior.
 
 var host = "localhost:7085";
 var company = "CRONUS International Ltd.";
 var user = "admin";
 var password = "Admin123!";
 var timeoutMin = 30;
+var codeunitTimeoutMin = 10; // max time for a single RunNextTest call (per codeunit)
 var suiteName = "DEFAULT";
+var maxIterations = 500;
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -36,7 +38,9 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--user" && i + 1 < args.Length) user = args[++i];
     else if (args[i] == "--password" && i + 1 < args.Length) password = args[++i];
     else if (args[i] == "--timeout" && i + 1 < args.Length) timeoutMin = int.Parse(args[++i]);
+    else if (args[i] == "--codeunit-timeout" && i + 1 < args.Length) codeunitTimeoutMin = int.Parse(args[++i]);
     else if (args[i] == "--suite" && i + 1 < args.Length) suiteName = args[++i];
+    else if (args[i] == "--max-iterations" && i + 1 < args.Length) maxIterations = int.Parse(args[++i]);
     else if (!args[i].StartsWith("--")) host = args[i];
 }
 
@@ -51,24 +55,12 @@ async Task<int> RunTests()
     var cts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMin));
     var tokenCapture = new MetadataTokenCapture();
 
-    var (rpc, ws) = await Connect(authBytes, tokenCapture, cts.Token);
+    // Initial connection — used only for ClearTestResults before the loop.
+    var (rpc, ws, _) = await Connect(authBytes, tokenCapture, cts.Token);
     var formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
     if (formState == null) return 1;
 
-    // Read the suite name that page 130455 auto-selected/created
-    Console.Write("Reading page state... ");
-    try
-    {
-        var pg = await rpc.InvokeWithCancellationAsync<JToken>("GetPage",
-            new object[] { new { PageSize = 50, IncludeMoreDataInformation = true, IncludeNonRowData = true }, formState! }, cts.Token);
-        if (pg?["State"] != null) formState = pg["State"];
-        // Log the CurrentSuiteName from NonRowData
-        var pageStr = pg?.ToString() ?? "";
-        Console.WriteLine("OK");
-    }
-    catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
-
-    // ClearTestResults
+    // ClearTestResults once, before the loop.
     Console.Write("Clearing previous results... ");
     try
     {
@@ -78,51 +70,104 @@ async Task<int> RunTests()
     }
     catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
 
-    // RunNextTest loop
+    rpc.Dispose(); ws.Dispose();
+
+    // RunNextTest loop — reconnect BEFORE every call (mirrors BcContainerHelper's
+    // renewClientContextBetweenTests).  Each test-codeunit run will kill the BC
+    // session (test isolation), so ConnectionLostException is the normal outcome.
+    // BC tracks which codeunit to run next in the Test Method Line table, so a
+    // fresh session always advances to the next pending codeunit.
     int totalPassed = 0, totalFailed = 0, totalSkipped = 0;
     var allResults = new List<JObject>();
     var startTime = DateTime.UtcNow;
 
     Console.WriteLine("\n=== Running Tests ===");
-    while (true)
+    for (int iteration = 0; iteration < maxIterations; iteration++)
     {
+        // Proactive reconnect before each RunNextTest.
+        CancellationTokenSource sessionEndedCts;
         try
         {
-            var actionCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
-            actionCts.CancelAfter(TimeSpan.FromMinutes(5));
-
-            var result = await Invoke(rpc, formState, "RunNextTest", actionCts.Token);
-            if (result?["DataSetState"] != null) formState = result["DataSetState"];
-
-            // Read TestResultJson via GetPage
-            var testResultJson = await ReadTestResultJson(rpc, formState!, cts.Token);
-            if (string.IsNullOrEmpty(testResultJson) || testResultJson == "All tests executed.")
+            (rpc, ws, sessionEndedCts) = await Connect(authBytes, tokenCapture, cts.Token);
+            formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
+            if (formState == null)
             {
-                Console.WriteLine("All tests executed.");
+                Console.Error.WriteLine("  Could not open test page after reconnect");
                 break;
             }
-            var parsed = JObject.Parse(testResultJson);
-            allResults.Add(parsed);
-            ProcessResult(parsed, ref totalPassed, ref totalFailed, ref totalSkipped);
         }
-        catch (RemoteInvocationException ex) when (ex.Message.Contains("All tests executed"))
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  Reconnect failed: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
+            break;
+        }
+
+        string testResultJson = "";
+        try
+        {
+            // BC kills the AL session after each test-codeunit run (test isolation).
+            // It does NOT send a clean WebSocket close frame, so the pending Invoke hangs
+            // indefinitely.  We use a watchdog task that aborts the WebSocket after a
+            // deadline — this interrupts the StreamJsonRpc receive loop and causes
+            // ConnectionLostException to be thrown on the pending InvokeWithCancellationAsync.
+            //
+            // IMPORTANT: we do NOT link the watchdog to sessionEndedCts.  BC sends
+            // ClearClientMetadataCache for reasons other than session termination (e.g.
+            // after app publish), which would immediately cancel a linked token and silently
+            // disarm the watchdog before it could fire.
+            var capturedRpc = rpc;
+            var capturedWs = ws;
+            _ = Task.Delay(TimeSpan.FromMinutes(codeunitTimeoutMin)).ContinueWith(_ =>
+            {
+                Console.Error.WriteLine($"  Watchdog: aborting hung connection after {codeunitTimeoutMin} min (--codeunit-timeout)");
+                try { capturedWs.Abort(); } catch { }
+                try { capturedRpc.Dispose(); } catch { }
+            });
+
+            var result = await Invoke(rpc, formState, "RunNextTest", cts.Token);
+            if (result?["DataSetState"] != null) formState = result["DataSetState"];
+
+            // Try to read result while the connection is still alive.
+            testResultJson = await ReadTestResultJson(rpc, formState!, cts.Token);
+        }
+        catch (Exception ex) when (ex is ConnectionLostException || ex is RemoteInvocationException || ex is OperationCanceledException)
+        {
+            // Expected: BC killed the session after the codeunit finished (test isolation).
+            // The result is committed to the Test Method Line table; the next iteration
+            // will reconnect and RunNextTest will advance to the next codeunit.
+            Console.Error.WriteLine($"  Session ended after codeunit (expected): {ex.Message[..Math.Min(60, ex.Message.Length)]}");
+            try { rpc.Dispose(); ws.Dispose(); } catch { }
+            await Task.Delay(500, CancellationToken.None);
+            continue;
+        }
+
+        try { rpc.Dispose(); ws.Dispose(); } catch { }
+
+        if (testResultJson == "All tests executed.")
         {
             Console.WriteLine("All tests executed.");
             break;
         }
-        catch (Exception ex) when (ex is RemoteInvocationException || ex is OperationCanceledException || ex is ConnectionLostException)
+
+        // Empty means the connection died after RunNextTest returned but before
+        // GetPage could read the result.  The codeunit results are already
+        // committed to the Test Method Line table.  Continue so the next
+        // iteration reconnects and advances to the next codeunit.
+        if (string.IsNullOrEmpty(testResultJson))
         {
-            Console.Error.WriteLine($"  Session ended: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
-            try
-            {
-                rpc.Dispose(); ws.Dispose();
-                await Task.Delay(2000, cts.Token);
-                (rpc, ws) = await Connect(authBytes, tokenCapture, cts.Token);
-                formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
-                if (formState == null) break;
-                Console.WriteLine("  Reconnected, continuing...");
-            }
-            catch { Console.Error.WriteLine("  Reconnect failed"); break; }
+            Console.Error.WriteLine("  TestResultJson empty (connection dropped after run) — continuing");
+            continue;
+        }
+
+        try
+        {
+            var parsed = JObject.Parse(testResultJson);
+            allResults.Add(parsed);
+            ProcessResult(parsed, ref totalPassed, ref totalFailed, ref totalSkipped);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  Could not parse result JSON: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
         }
     }
 
@@ -153,8 +198,6 @@ async Task<int> RunTests()
     int total = totalPassed + totalFailed + totalSkipped;
     Console.WriteLine($"\nResults: {total} total, {totalPassed} passed, {totalFailed} failed, {totalSkipped} skipped");
 
-    try { await rpc.InvokeAsync("CloseConnection"); } catch { }
-    rpc.Dispose(); ws.Dispose();
     return totalFailed > 0 ? 1 : (totalPassed > 0 ? 0 : 1);
 }
 
@@ -206,21 +249,22 @@ async Task<JToken?> Invoke(JsonRpc rpc, JToken? formState, string action, Cancel
         }, ct);
 }
 
-async Task<(JsonRpc, ClientWebSocket)> Connect(byte[] authBytes, MetadataTokenCapture tc, CancellationToken ct)
+async Task<(JsonRpc, ClientWebSocket, CancellationTokenSource)> Connect(byte[] authBytes, MetadataTokenCapture tc, CancellationToken ct)
 {
     Console.WriteLine($"Connecting to ws://{host}/ws/connect");
+    var sessionEndedCts = new CancellationTokenSource();
     var ws = new ClientWebSocket();
     ws.Options.SetRequestHeader("Authorization", $"Basic {Convert.ToBase64String(authBytes)}");
     await ws.ConnectAsync(new Uri($"ws://{host}/ws/connect"), ct);
     var rpc = new JsonRpc(new WebSocketMessageHandler(ws));
     rpc.TraceSource.Switch.Level = System.Diagnostics.SourceLevels.Verbose;
     rpc.TraceSource.Listeners.Add(tc);
-    rpc.AddLocalRpcTarget(new Callbacks());
+    rpc.AddLocalRpcTarget(new Callbacks(sessionEndedCts));
     rpc.StartListening();
     await rpc.InvokeWithCancellationAsync<JToken>("OpenConnection",
         new object[] { new { LCID = 1033, DefaultLCID = 1033, TimeZoneId = "UTC", Credentials = new { UserName = user, Password = password } } }, ct);
     Console.WriteLine("Connected.");
-    return (rpc, ws);
+    return (rpc, ws, sessionEndedCts);
 }
 
 async Task<JToken?> OpenTestPage(JsonRpc rpc, MetadataTokenCapture tc, string company, CancellationToken ct)
@@ -243,13 +287,22 @@ async Task<JToken?> OpenTestPage(JsonRpc rpc, MetadataTokenCapture tc, string co
 
 class Callbacks
 {
+    private readonly CancellationTokenSource _sessionEndedCts;
+
+    public Callbacks(CancellationTokenSource sessionEndedCts) => _sessionEndedCts = sessionEndedCts;
+
+    // BC sends ClearClientMetadataCache (and sometimes OnSessionTerminating) right before
+    // killing the WebSocket session during test isolation.  We log receipt for diagnostics.
+    // NOTE: BC also sends ClearClientMetadataCache for other reasons (e.g. app publish),
+    // so receiving it does NOT reliably mean the session is ending.
+    [JsonRpcMethod("ClearClientMetadataCache")] public Task ClearClientMetadataCache() { Console.Error.WriteLine("  [notification] ClearClientMetadataCache received"); _sessionEndedCts.Cancel(); return Task.CompletedTask; }
+    [JsonRpcMethod("OnSessionTerminating")]     public Task OnSessionTerminating()      { Console.Error.WriteLine("  [notification] OnSessionTerminating received"); _sessionEndedCts.Cancel(); return Task.CompletedTask; }
+
     [JsonRpcMethod("Confirm")] public Task Confirm(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("ProcessServerRequests")] public Task ProcessServerRequests(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("FormRunModal")] public Task FormRunModal(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("FormClose")] public Task FormClose(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("FormActivate")] public Task FormActivate(JToken r) => Task.CompletedTask;
-    [JsonRpcMethod("OnSessionTerminating")] public Task OnSessionTerminating() => Task.CompletedTask;
-    [JsonRpcMethod("ClearClientMetadataCache")] public Task ClearClientMetadataCache() => Task.CompletedTask;
     [JsonRpcMethod("SelectionMenu")] public Task SelectionMenu(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("FileActionDialog")] public Task FileActionDialog(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("FeedbackRequested")] public Task FeedbackRequested(JToken r) => Task.CompletedTask;

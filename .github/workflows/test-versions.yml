@@ -238,19 +238,50 @@ jobs:
         }
         APPJSON
 
+        # Two codeunits with two tests each — exercises the multi-codeunit reconnect fix.
+        # Each codeunit run triggers a BC test-isolation session kill; the runner must
+        # reconnect and advance to the next codeunit for both to complete.
         cat > /tmp/testapp/SmokeTest.Codeunit.al << 'ALCODE'
-        codeunit 70000 "BC Linux Smoke Test"
+        codeunit 70000 "BC Linux Smoke Test 1"
         {
             Subtype = Test;
             TestPermissions = Disabled;
 
             [Test]
-            procedure TestBCOnLinuxWorks()
+            procedure TestDateSanity()
             begin
                 if Today() < 20200101D then
                     Error('Date sanity check failed: %1', Today());
-                if 42 <> 42 then
-                    Error('Basic integer equality failed');
+            end;
+
+            [Test]
+            procedure TestBasicArithmetic()
+            begin
+                if 6 * 7 <> 42 then
+                    Error('Basic arithmetic failed');
+            end;
+        }
+
+        codeunit 70001 "BC Linux Smoke Test 2"
+        {
+            Subtype = Test;
+            TestPermissions = Disabled;
+
+            [Test]
+            procedure TestStringConcatenation()
+            var
+                Result: Text;
+            begin
+                Result := 'Hello' + ', ' + 'World';
+                if Result <> 'Hello, World' then
+                    Error('String concatenation failed: %1', Result);
+            end;
+
+            [Test]
+            procedure TestBooleanLogic()
+            begin
+                if not (true and not false) then
+                    Error('Boolean logic failed');
             end;
         }
         ALCODE
@@ -291,11 +322,12 @@ jobs:
       env:
         BC_VERSION: ${{ matrix.bc_version }}
       run: |
-        echo "Running tests..."
+        echo "Running tests (2 codeunits × 2 methods — exercises multi-codeunit reconnect)..."
         ./scripts/run-tests.sh \
           --app /tmp/testapp/SmokeTest.app \
-          --codeunit-range 70000 \
-          --timeout 3
+          --codeunit-range 70000..70001 \
+          --timeout 10 \
+          --codeunit-timeout 3
 
     - name: Summary
       if: always()
