@@ -305,3 +305,76 @@ jobs:
         echo "=== BC v$BC_VERSION ==="
         echo "Build + start: ${BUILD_DURATION:-n/a}s"
         docker compose logs bc 2>&1 | grep "\[entrypoint\]" | tail -5
+
+  # Exercises the container's own artifact download path (no pre-cached artifacts).
+  # This verifies the feature works and lets us measure in-container download speed
+  # directly so it can be compared against the host-side download used by test jobs.
+  # Runs once (BC 27.5) in parallel with the main matrix.
+  test-container-download:
+    needs: [build-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: Container download test (BC 27.5)
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set lowercase image name
+      run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/bc-runner" >> $GITHUB_ENV
+
+    - name: Log in to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Start BC (in-container artifact download)
+      # BC_ARTIFACTS_DIR is intentionally NOT set so docker-compose uses a named
+      # volume (bc-artifacts) which starts empty — forcing the entrypoint to
+      # download artifacts itself.  This validates the container download feature.
+      env:
+        BC_VERSION: "27.5"
+        BC_RUNNER_IMAGE: ${{ env.IMAGE }}:${{ github.sha }}
+      run: |
+        STEP_START=$(date +%s)
+        docker compose up -d 2>&1 | tail -10
+
+        echo "Waiting for BC to be healthy (in-container download included in this time)..."
+        for i in $(seq 1 360); do
+          STATUS=$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q bc) 2>/dev/null || echo "unknown")
+          case "$STATUS" in
+            healthy)
+              echo "BC healthy after $((i*5))s (including in-container artifact download)"
+              break
+              ;;
+            unhealthy)
+              echo "ERROR: BC container unhealthy"
+              docker compose logs bc 2>&1 | tail -50
+              exit 1
+              ;;
+          esac
+          if ! docker compose ps bc 2>/dev/null | grep -q "Up"; then
+            echo "ERROR: BC container died"
+            docker compose logs bc 2>&1 | tail -50
+            exit 1
+          fi
+          [ $((i % 12)) -eq 0 ] && echo "  $((i*5))s: $(docker compose logs bc 2>&1 | grep '\[entrypoint\]' | tail -1)"
+          sleep 5
+        done
+
+        if [ "$STATUS" != "healthy" ]; then
+          echo "ERROR: BC did not become healthy within 30 minutes"
+          docker compose logs bc 2>&1 | tail -100
+          exit 1
+        fi
+
+        echo "TOTAL_DURATION=$(($(date +%s) - STEP_START))" >> $GITHUB_ENV
+
+    - name: Download timing summary
+      if: always()
+      run: |
+        echo "=== In-container artifact download timing ==="
+        docker compose logs bc 2>&1 | grep "\[artifacts\]"
+        echo ""
+        echo "Total start time (download + DB restore + BC startup): ${TOTAL_DURATION:-n/a}s"
