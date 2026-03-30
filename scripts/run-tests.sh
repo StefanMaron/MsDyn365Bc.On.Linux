@@ -223,7 +223,8 @@ echo "  Suite '$SUITE_NAME' exists: ${SUITE_CHECK:-0} rows"
 # RunNextTest triggers BC test execution. The session typically dies during test
 # execution (test isolation), so we ignore the exit code and read results from SQL.
 timeout "${TIMEOUT_MIN}m" dotnet run --project "$TESTRUNNER_DIR" --no-build -c Release -- \
-    --host "$BC_HOST" --company "$COMPANY" --suite "$SUITE_NAME" --timeout "$TIMEOUT_MIN" 2>&1 || true
+    --host "$BC_HOST" --company "$COMPANY" --suite "$SUITE_NAME" --timeout "$TIMEOUT_MIN" \
+    --max-iterations $(( ${CU_COUNT:-100} + 2 )) 2>&1 || true
 
 sleep 2
 

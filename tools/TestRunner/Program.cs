@@ -11,16 +11,16 @@ using StreamJsonRpc;
 // BC Test Runner — connects via WebSocket client services to page 130455
 // (Command Line Test Tool) and runs tests using RunNextTest + TestResultJson.
 //
-// Mirrors BcContainerHelper's Run-TestsInBcContainer external behavior:
-//   1. Open page 130455
-//   2. ClearTestResults
-//   3. RunNextTest loop → parse TestResultJson
-//   4. Output per-method results
+// Mirrors BcContainerHelper's Run-TestsInBcContainer external behavior with
+// renewClientContextBetweenTests: reconnect BEFORE each RunNextTest call so
+// that BC's test-isolation session kill (which drops the WebSocket after each
+// codeunit) is never treated as an error.  BC tracks test-suite progress in
+// the Test Method Line table, so a fresh session always picks up where it
+// left off.
 //
 // Note: The DEFAULT test suite must be pre-created (via SQL in run-tests.sh).
 // The suite is opened by filtering TableView to Name=suiteName, which positions
 // the page on the correct record so OnOpenPage sets CurrentSuiteName correctly.
-// interface matches BcContainerHelper's behavior.
 
 var host = "localhost:7085";
 var company = "CRONUS International Ltd.";
@@ -28,6 +28,7 @@ var user = "admin";
 var password = "Admin123!";
 var timeoutMin = 30;
 var suiteName = "DEFAULT";
+var maxIterations = 500;
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -37,6 +38,7 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--password" && i + 1 < args.Length) password = args[++i];
     else if (args[i] == "--timeout" && i + 1 < args.Length) timeoutMin = int.Parse(args[++i]);
     else if (args[i] == "--suite" && i + 1 < args.Length) suiteName = args[++i];
+    else if (args[i] == "--max-iterations" && i + 1 < args.Length) maxIterations = int.Parse(args[++i]);
     else if (!args[i].StartsWith("--")) host = args[i];
 }
 
@@ -51,24 +53,12 @@ async Task<int> RunTests()
     var cts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMin));
     var tokenCapture = new MetadataTokenCapture();
 
+    // Initial connection — used only for ClearTestResults before the loop.
     var (rpc, ws) = await Connect(authBytes, tokenCapture, cts.Token);
     var formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
     if (formState == null) return 1;
 
-    // Read the suite name that page 130455 auto-selected/created
-    Console.Write("Reading page state... ");
-    try
-    {
-        var pg = await rpc.InvokeWithCancellationAsync<JToken>("GetPage",
-            new object[] { new { PageSize = 50, IncludeMoreDataInformation = true, IncludeNonRowData = true }, formState! }, cts.Token);
-        if (pg?["State"] != null) formState = pg["State"];
-        // Log the CurrentSuiteName from NonRowData
-        var pageStr = pg?.ToString() ?? "";
-        Console.WriteLine("OK");
-    }
-    catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
-
-    // ClearTestResults
+    // ClearTestResults once, before the loop.
     Console.Write("Clearing previous results... ");
     try
     {
@@ -78,14 +68,38 @@ async Task<int> RunTests()
     }
     catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
 
-    // RunNextTest loop
+    rpc.Dispose(); ws.Dispose();
+
+    // RunNextTest loop — reconnect BEFORE every call (mirrors BcContainerHelper's
+    // renewClientContextBetweenTests).  Each test-codeunit run will kill the BC
+    // session (test isolation), so ConnectionLostException is the normal outcome.
+    // BC tracks which codeunit to run next in the Test Method Line table, so a
+    // fresh session always advances to the next pending codeunit.
     int totalPassed = 0, totalFailed = 0, totalSkipped = 0;
     var allResults = new List<JObject>();
     var startTime = DateTime.UtcNow;
 
     Console.WriteLine("\n=== Running Tests ===");
-    while (true)
+    for (int iteration = 0; iteration < maxIterations; iteration++)
     {
+        // Proactive reconnect before each RunNextTest.
+        try
+        {
+            (rpc, ws) = await Connect(authBytes, tokenCapture, cts.Token);
+            formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
+            if (formState == null)
+            {
+                Console.Error.WriteLine("  Could not open test page after reconnect");
+                break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  Reconnect failed: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
+            break;
+        }
+
+        string testResultJson = "";
         try
         {
             var actionCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
@@ -94,35 +108,37 @@ async Task<int> RunTests()
             var result = await Invoke(rpc, formState, "RunNextTest", actionCts.Token);
             if (result?["DataSetState"] != null) formState = result["DataSetState"];
 
-            // Read TestResultJson via GetPage
-            var testResultJson = await ReadTestResultJson(rpc, formState!, cts.Token);
-            if (string.IsNullOrEmpty(testResultJson) || testResultJson == "All tests executed.")
-            {
-                Console.WriteLine("All tests executed.");
-                break;
-            }
-            var parsed = JObject.Parse(testResultJson);
-            allResults.Add(parsed);
-            ProcessResult(parsed, ref totalPassed, ref totalFailed, ref totalSkipped);
+            // Try to read result while the connection is still alive.
+            testResultJson = await ReadTestResultJson(rpc, formState!, cts.Token);
         }
-        catch (RemoteInvocationException ex) when (ex.Message.Contains("All tests executed"))
+        catch (Exception ex) when (ex is ConnectionLostException || ex is RemoteInvocationException || ex is OperationCanceledException)
+        {
+            // Expected: BC killed the session after the codeunit finished (test isolation).
+            // The result is committed to the Test Method Line table; the next iteration
+            // will reconnect and RunNextTest will advance to the next codeunit.
+            Console.Error.WriteLine($"  Session ended after codeunit (expected): {ex.Message[..Math.Min(60, ex.Message.Length)]}");
+            try { rpc.Dispose(); ws.Dispose(); } catch { }
+            await Task.Delay(500, CancellationToken.None);
+            continue;
+        }
+
+        try { rpc.Dispose(); ws.Dispose(); } catch { }
+
+        if (string.IsNullOrEmpty(testResultJson) || testResultJson == "All tests executed.")
         {
             Console.WriteLine("All tests executed.");
             break;
         }
-        catch (Exception ex) when (ex is RemoteInvocationException || ex is OperationCanceledException || ex is ConnectionLostException)
+
+        try
         {
-            Console.Error.WriteLine($"  Session ended: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
-            try
-            {
-                rpc.Dispose(); ws.Dispose();
-                await Task.Delay(2000, cts.Token);
-                (rpc, ws) = await Connect(authBytes, tokenCapture, cts.Token);
-                formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
-                if (formState == null) break;
-                Console.WriteLine("  Reconnected, continuing...");
-            }
-            catch { Console.Error.WriteLine("  Reconnect failed"); break; }
+            var parsed = JObject.Parse(testResultJson);
+            allResults.Add(parsed);
+            ProcessResult(parsed, ref totalPassed, ref totalFailed, ref totalSkipped);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  Could not parse result JSON: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
         }
     }
 
@@ -153,8 +169,6 @@ async Task<int> RunTests()
     int total = totalPassed + totalFailed + totalSkipped;
     Console.WriteLine($"\nResults: {total} total, {totalPassed} passed, {totalFailed} failed, {totalSkipped} skipped");
 
-    try { await rpc.InvokeAsync("CloseConnection"); } catch { }
-    rpc.Dispose(); ws.Dispose();
     return totalFailed > 0 ? 1 : (totalPassed > 0 ? 0 : 1);
 }
 
