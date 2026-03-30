@@ -56,6 +56,11 @@ done
 
 echo "=== BC Test Runner ==="
 
+if [ "$CODEUNIT_TIMEOUT_MIN" -ge "$TIMEOUT_MIN" ]; then
+    echo "WARNING: --codeunit-timeout ($CODEUNIT_TIMEOUT_MIN min) >= --timeout ($TIMEOUT_MIN min)." \
+         "The watchdog will fire at the same time as the overall timeout, leaving no room to reconnect for subsequent codeunits."
+fi
+
 # --- Detect SQL container ---
 SQL_CONTAINER=$(cd "$REPO_DIR" && docker compose ps -q sql 2>/dev/null | head -1)
 
