@@ -28,16 +28,18 @@ elif [ $# -eq 4 ]; then
     BASE_URL="https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net"
 
     # Resolve short version (e.g. "27.5") to full version (e.g. "27.5.46862.48004")
-    # by listing available blobs in the Azure CDN storage container
+    # by listing available blobs in the Azure CDN storage container.
+    # Use a trailing dot in the prefix (e.g. "27.3.") so that "27.3" does not
+    # accidentally match "27.30" or blobs from adjacent minor versions.
     if ! echo "$BC_VERSION" | grep -qP '^\d+\.\d+\.\d+'; then
         echo "[artifacts] Resolving version $BC_VERSION..."
         T_RESOLVE=$(_ms)
-        RESOLVED=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}" 2>/dev/null | \
-            grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -1 | cut -d/ -f1)
+        RESOLVED=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}." 2>/dev/null | \
+            grep -oP '<Name>\K[^<]+' | grep "^${BC_VERSION}\." | grep "/${BC_COUNTRY}$" | sort -V | tail -1 | cut -d/ -f1)
         if [ -z "$RESOLVED" ]; then
             echo "[artifacts] ERROR: Could not resolve version $BC_VERSION"
-            echo "[artifacts] Listing available versions..."
-            curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}" 2>/dev/null | \
+            echo "[artifacts] Listing available versions matching prefix '${BC_VERSION}.'..."
+            curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}." 2>/dev/null | \
                 grep -oP '<Name>\K[^<]+' | head -10
             exit 1
         fi
