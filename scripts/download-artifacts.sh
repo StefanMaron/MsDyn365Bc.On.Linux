@@ -25,26 +25,30 @@ if [ $# -eq 2 ]; then
     PLATFORM_URL=$(echo "$APP_URL" | sed 's|/[^/]*$|/platform|')
 elif [ $# -eq 4 ]; then
     BC_TYPE="$1"; BC_VERSION="$2"; BC_COUNTRY="$3"; DEST="$4"
-    # bcartifacts.azureedge.net is the canonical public BC artifact CDN used by
-    # BcContainerHelper. Blobs are named with the user-facing version number
-    # (e.g. 27.3.45284.45861/w1), so prefix=27.3. correctly resolves CU3
-    # without cross-matching internal build numbers from other CUs.
-    BASE_URL="https://bcartifacts.azureedge.net"
+    BASE_URL="https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net"
 
-    # Resolve short version (e.g. "27.3") to full 4-part build number
-    # (e.g. "27.3.45284.45861") by querying the Azure CDN blob listing.
-    # Use a trailing dot so "27.3." does not match "27.30.x" or "27.31.x".
+    # Resolve short version (e.g. "27.3") to the latest full build number
+    # (e.g. "27.3.44313.48381") using the per-country index JSON published
+    # by BcContainerHelper at <cdn>/<type>/indexes/<country>.json.
+    # This index contains ALL available versions with correct user-facing
+    # minor version numbers (27.3.x, 27.5.x, etc.) — unlike the blob listing
+    # API which ignores the prefix parameter and returns only the latest release.
     if ! echo "$BC_VERSION" | grep -qP '^\d+\.\d+\.\d+'; then
         echo "[artifacts] Resolving version $BC_VERSION..."
         T_RESOLVE=$(_ms)
-        # Use -L to follow any CDN redirect to the underlying blob storage
-        RESOLVED=$(curl -sfL "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}." 2>/dev/null | \
-            grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -1 | cut -d/ -f1)
+        RESOLVED=$(curl -sfL "$BASE_URL/${BC_TYPE}/indexes/${BC_COUNTRY}.json" 2>/dev/null | \
+            python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+prefix = sys.argv[1] + '.'
+matches = sorted(e['Version'] for e in data if e['Version'].startswith(prefix))
+print(matches[-1] if matches else '')
+" "$BC_VERSION")
         if [ -z "$RESOLVED" ]; then
             echo "[artifacts] ERROR: Could not resolve version $BC_VERSION"
-            echo "[artifacts] Listing available versions matching prefix '${BC_VERSION}.'..."
-            curl -sfL "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}." 2>/dev/null | \
-                grep -oP '<Name>\K[^<]+' | head -10
+            echo "[artifacts] Available 27.x versions in index:"
+            curl -sfL "$BASE_URL/${BC_TYPE}/indexes/${BC_COUNTRY}.json" 2>/dev/null | \
+                python3 -c "import sys,json; [print(e['Version']) for e in json.load(sys.stdin) if e['Version'].startswith('${BC_VERSION%%.*}.')]" | head -10
             exit 1
         fi
         echo "[artifacts] Resolved: $BC_VERSION → $RESOLVED ($(( $(_ms) - T_RESOLVE ))ms)"
