@@ -103,15 +103,32 @@ async Task<int> RunTests()
         string testResultJson = "";
         try
         {
-            // Link to both the overall timeout and the per-session "session ended" signal.
-            // BC sends ClearClientMetadataCache immediately before killing the WebSocket
-            // session for test isolation.  When we receive it we cancel actionCts, which
-            // aborts the in-flight RunNextTest call without waiting for a TCP-level close
-            // that may never arrive.
-            var actionCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, sessionEndedCts.Token);
-            actionCts.CancelAfter(TimeSpan.FromMinutes(3)); // hard fallback if notification never fires
+            // BC kills the AL session after each test-codeunit run (test isolation).
+            // It does NOT always send a clean WebSocket close frame, so StreamJsonRpc's
+            // cancellation pathway (which tries to send $/cancelRequest over the dead TCP)
+            // also hangs.
+            //
+            // Solution: a watchdog Task directly disposes the JsonRpc object after
+            // a deadline.  JsonRpc.Dispose() immediately throws ConnectionLostException
+            // on all pending calls, regardless of the network state.
+            //
+            // The ClearClientMetadataCache / OnSessionTerminating callbacks (which also
+            // cancel sessionEndedCts) serve as a fast path when BC does send those
+            // notifications; the watchdog is the reliable fallback.
+            var capturedRpc = rpc;
+            using var watchdogCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, sessionEndedCts.Token);
+            _ = Task.Delay(TimeSpan.FromSeconds(180), watchdogCts.Token).ContinueWith(
+                _ =>
+                {
+                    Console.Error.WriteLine("  Watchdog: RunNextTest timeout — force-disposing connection");
+                    try { capturedRpc.Dispose(); } catch { }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.NotOnCanceled,
+                TaskScheduler.Default);
 
-            var result = await Invoke(rpc, formState, "RunNextTest", actionCts.Token);
+            var result = await Invoke(rpc, formState, "RunNextTest", cts.Token);
+            watchdogCts.Cancel(); // session completed normally; disarm watchdog
             if (result?["DataSetState"] != null) formState = result["DataSetState"];
 
             // Try to read result while the connection is still alive.
