@@ -398,9 +398,7 @@ log_step "Database ready (admin / Admin123!). Step 3 (DB setup): $(($(date +%s) 
 # =============================================================================
 # Step 4: Start BC server in background, publish test runner, then wait
 # =============================================================================
-STEP4_START=$(date +%s)
 cd "$SERVICE_DIR"
-
 # Verify SQL is still accessible before starting BC
 log_step "Verifying SQL connection..."
 if sqlcmd -S "$SQL_SERVER" -U "$BC_DB_USER" -P "$BC_DB_PASSWORD" -d CRONUS -C -No -Q "SELECT 1" &>/dev/null; then
@@ -417,13 +415,14 @@ fi
 log_step "Config check:"
 grep -E "DatabaseServer|DatabaseName|DatabaseUserName|ProtectedDatabase" "$SERVICE_DIR/CustomSettings.config" | head -5
 log_step "Pre-seeding R2R extension DLL cache..."
-# BC's NST compiles all published extensions from AL source on first startup (~190s).
+# BC's NST compiles all published extensions from AL source on first startup (~190s without pre-seeding).
 # R2R (.app) packages already contain the pre-compiled DLLs under publishedartifacts/.
-# By extracting them into the assembly cache before NST starts, the NST finds them
-# and skips recompilation entirely — dropping startup time from ~190s to <10s.
+# By extracting them into the assembly cache before NST starts, the NST finds them and can skip most
+# of that work — reducing first-start time from ~190s to ~110s overall (AL compilation sub-phase drops to <10s).
 PLATFORM_VER=$(python3 -c "import json; print(json.load(open('$ARTIFACTS/app/manifest.json'))['platform'])" 2>/dev/null || true)
 if [ -n "$PLATFORM_VER" ]; then
-    ASSEMBLY_CACHE="/usr/share/Microsoft/Microsoft Dynamics NAV/270/Server/MicrosoftDynamicsNavServer\$MicrosoftDynamicsNavServer/apps/assembly/release/${PLATFORM_VER}_1"
+    INSTANCE=$(grep -oP 'ServerInstance" value="\K[^"]+' "$SERVICE_DIR/CustomSettings.config" 2>/dev/null || echo "BC")
+    ASSEMBLY_CACHE="/usr/share/Microsoft/Microsoft Dynamics NAV/$NAV_DIR/Server/MicrosoftDynamicsNavServer\$${INSTANCE}/apps/assembly/release/${PLATFORM_VER}_1"
     mkdir -p "$ASSEMBLY_CACHE"
     R2R_SEEDED=0
     R2R_FAILED=0
@@ -654,7 +653,11 @@ PYEOF
                 -F "file=@$APP_FILE;type=application/octet-stream" \
                 "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
             echo "[entrypoint]   $APP_NAME $APP_VER: HTTP $HTTP"
-            REPUBLISH_OK=$((REPUBLISH_OK + 1))
+            if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ] || [ "$HTTP" = "204" ]; then
+                REPUBLISH_OK=$((REPUBLISH_OK + 1))
+            else
+                echo "[entrypoint]   WARN: failed to republish $APP_NAME $APP_VER (HTTP $HTTP)"
+            fi
         done <<< "$ORDERED_LIST"
 
         REPUBLISH_ELAPSED=$(( $(date +%s) - REPUBLISH_START ))
@@ -665,7 +668,6 @@ PYEOF
     # Publish test framework apps. These are needed for running AL tests.
     # BC pre-loads them as "global" apps but doesn't install for the tenant.
     # We cleared the stale global entries at DB setup so we can re-publish here.
-    TESTFW_START=$(date +%s)
     echo "[entrypoint] Publishing test framework..."
     # Use find to handle spaces in filenames (e.g. "Test Runner")
     find "$ARTIFACTS" -name "*.app" -type f \( \
