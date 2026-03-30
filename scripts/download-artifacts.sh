@@ -25,36 +25,25 @@ if [ $# -eq 2 ]; then
     PLATFORM_URL=$(echo "$APP_URL" | sed 's|/[^/]*$|/platform|')
 elif [ $# -eq 4 ]; then
     BC_TYPE="$1"; BC_VERSION="$2"; BC_COUNTRY="$3"; DEST="$4"
-    BASE_URL="https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net"
+    # bcartifacts.azureedge.net is the canonical public BC artifact CDN used by
+    # BcContainerHelper. Blobs are named with the user-facing version number
+    # (e.g. 27.3.45284.45861/w1), so prefix=27.3. correctly resolves CU3
+    # without cross-matching internal build numbers from other CUs.
+    BASE_URL="https://bcartifacts.azureedge.net"
 
-    # Resolve short version (e.g. "27.5") to full 4-part build number
-    # (e.g. "27.4.45366.45675") by querying the Azure CDN blob listing.
-    #
-    # IMPORTANT: BC's CDN uses internal build numbering that does NOT always
-    # match the user-visible minor version. For example, BC 27.3 (CU3) is
-    # stored internally as 27.2.42879.45046 and BC 27.5 (CU5) as 27.4.45366.x.
-    # This is by design — Microsoft's build pipeline assigns build numbers
-    # independently of the marketing CU number.
-    # We query with just the major version prefix (e.g. "27.") to capture all
-    # builds in that major release, then filter to only those blobs that the
-    # CDN associates with the requested minor (via "prefix=27.3" returning the
-    # appropriate build range) and pick the highest one.
+    # Resolve short version (e.g. "27.3") to full 4-part build number
+    # (e.g. "27.3.45284.45861") by querying the Azure CDN blob listing.
+    # Use a trailing dot so "27.3." does not match "27.30.x" or "27.31.x".
     if ! echo "$BC_VERSION" | grep -qP '^\d+\.\d+\.\d+'; then
         echo "[artifacts] Resolving version $BC_VERSION..."
         T_RESOLVE=$(_ms)
-        RESOLVED=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}" 2>/dev/null | \
+        RESOLVED=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}." 2>/dev/null | \
             grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -1 | cut -d/ -f1)
         if [ -z "$RESOLVED" ]; then
             echo "[artifacts] ERROR: Could not resolve version $BC_VERSION"
-            echo "[artifacts] Listing available versions matching prefix '${BC_VERSION}'..."
-            curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}" 2>/dev/null | \
+            echo "[artifacts] Listing available versions matching prefix '${BC_VERSION}.'..."
+            curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}." 2>/dev/null | \
                 grep -oP '<Name>\K[^<]+' | head -10
-            exit 1
-        fi
-        RESOLVED_MAJOR=$(echo "$RESOLVED" | cut -d. -f1)
-        INPUT_MAJOR=$(echo "$BC_VERSION" | cut -d. -f1)
-        if [ "$RESOLVED_MAJOR" != "$INPUT_MAJOR" ]; then
-            echo "[artifacts] ERROR: Resolved build $RESOLVED has unexpected major version (expected $INPUT_MAJOR)"
             exit 1
         fi
         echo "[artifacts] Resolved: $BC_VERSION → $RESOLVED ($(( $(_ms) - T_RESOLVE ))ms)"
