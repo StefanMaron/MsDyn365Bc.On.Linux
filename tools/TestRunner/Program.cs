@@ -54,7 +54,7 @@ async Task<int> RunTests()
     var tokenCapture = new MetadataTokenCapture();
 
     // Initial connection — used only for ClearTestResults before the loop.
-    var (rpc, ws) = await Connect(authBytes, tokenCapture, cts.Token);
+    var (rpc, ws, _) = await Connect(authBytes, tokenCapture, cts.Token);
     var formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
     if (formState == null) return 1;
 
@@ -83,9 +83,10 @@ async Task<int> RunTests()
     for (int iteration = 0; iteration < maxIterations; iteration++)
     {
         // Proactive reconnect before each RunNextTest.
+        CancellationTokenSource sessionEndedCts;
         try
         {
-            (rpc, ws) = await Connect(authBytes, tokenCapture, cts.Token);
+            (rpc, ws, sessionEndedCts) = await Connect(authBytes, tokenCapture, cts.Token);
             formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
             if (formState == null)
             {
@@ -102,8 +103,13 @@ async Task<int> RunTests()
         string testResultJson = "";
         try
         {
-            var actionCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
-            actionCts.CancelAfter(TimeSpan.FromMinutes(5));
+            // Link to both the overall timeout and the per-session "session ended" signal.
+            // BC sends ClearClientMetadataCache immediately before killing the WebSocket
+            // session for test isolation.  When we receive it we cancel actionCts, which
+            // aborts the in-flight RunNextTest call without waiting for a TCP-level close
+            // that may never arrive.
+            var actionCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, sessionEndedCts.Token);
+            actionCts.CancelAfter(TimeSpan.FromMinutes(3)); // hard fallback if notification never fires
 
             var result = await Invoke(rpc, formState, "RunNextTest", actionCts.Token);
             if (result?["DataSetState"] != null) formState = result["DataSetState"];
@@ -230,21 +236,22 @@ async Task<JToken?> Invoke(JsonRpc rpc, JToken? formState, string action, Cancel
         }, ct);
 }
 
-async Task<(JsonRpc, ClientWebSocket)> Connect(byte[] authBytes, MetadataTokenCapture tc, CancellationToken ct)
+async Task<(JsonRpc, ClientWebSocket, CancellationTokenSource)> Connect(byte[] authBytes, MetadataTokenCapture tc, CancellationToken ct)
 {
     Console.WriteLine($"Connecting to ws://{host}/ws/connect");
+    var sessionEndedCts = new CancellationTokenSource();
     var ws = new ClientWebSocket();
     ws.Options.SetRequestHeader("Authorization", $"Basic {Convert.ToBase64String(authBytes)}");
     await ws.ConnectAsync(new Uri($"ws://{host}/ws/connect"), ct);
     var rpc = new JsonRpc(new WebSocketMessageHandler(ws));
     rpc.TraceSource.Switch.Level = System.Diagnostics.SourceLevels.Verbose;
     rpc.TraceSource.Listeners.Add(tc);
-    rpc.AddLocalRpcTarget(new Callbacks());
+    rpc.AddLocalRpcTarget(new Callbacks(sessionEndedCts));
     rpc.StartListening();
     await rpc.InvokeWithCancellationAsync<JToken>("OpenConnection",
         new object[] { new { LCID = 1033, DefaultLCID = 1033, TimeZoneId = "UTC", Credentials = new { UserName = user, Password = password } } }, ct);
     Console.WriteLine("Connected.");
-    return (rpc, ws);
+    return (rpc, ws, sessionEndedCts);
 }
 
 async Task<JToken?> OpenTestPage(JsonRpc rpc, MetadataTokenCapture tc, string company, CancellationToken ct)
@@ -267,13 +274,21 @@ async Task<JToken?> OpenTestPage(JsonRpc rpc, MetadataTokenCapture tc, string co
 
 class Callbacks
 {
+    private readonly CancellationTokenSource _sessionEndedCts;
+
+    public Callbacks(CancellationTokenSource sessionEndedCts) => _sessionEndedCts = sessionEndedCts;
+
+    // BC sends ClearClientMetadataCache (and sometimes OnSessionTerminating) right before
+    // killing the WebSocket session during test isolation.  We use these as a cancellation
+    // signal so the in-flight RunNextTest Invoke doesn't hang until TCP-level timeout.
+    [JsonRpcMethod("ClearClientMetadataCache")] public Task ClearClientMetadataCache() { _sessionEndedCts.Cancel(); return Task.CompletedTask; }
+    [JsonRpcMethod("OnSessionTerminating")]     public Task OnSessionTerminating()      { _sessionEndedCts.Cancel(); return Task.CompletedTask; }
+
     [JsonRpcMethod("Confirm")] public Task Confirm(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("ProcessServerRequests")] public Task ProcessServerRequests(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("FormRunModal")] public Task FormRunModal(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("FormClose")] public Task FormClose(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("FormActivate")] public Task FormActivate(JToken r) => Task.CompletedTask;
-    [JsonRpcMethod("OnSessionTerminating")] public Task OnSessionTerminating() => Task.CompletedTask;
-    [JsonRpcMethod("ClearClientMetadataCache")] public Task ClearClientMetadataCache() => Task.CompletedTask;
     [JsonRpcMethod("SelectionMenu")] public Task SelectionMenu(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("FileActionDialog")] public Task FileActionDialog(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("FeedbackRequested")] public Task FeedbackRequested(JToken r) => Task.CompletedTask;

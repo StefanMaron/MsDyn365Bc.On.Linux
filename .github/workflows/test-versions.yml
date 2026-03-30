@@ -263,7 +263,7 @@ jobs:
         ./scripts/run-tests.sh \
           --app /tmp/testapp/SmokeTest.app \
           --codeunit-range 70000..70001 \
-          --timeout 5
+          --timeout 10
 
     - name: Summary
       if: always()
