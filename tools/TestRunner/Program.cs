@@ -104,31 +104,25 @@ async Task<int> RunTests()
         try
         {
             // BC kills the AL session after each test-codeunit run (test isolation).
-            // It does NOT always send a clean WebSocket close frame, so StreamJsonRpc's
-            // cancellation pathway (which tries to send $/cancelRequest over the dead TCP)
-            // also hangs.
+            // It does NOT send a clean WebSocket close frame, so the pending Invoke hangs
+            // indefinitely.  We use a watchdog task that aborts the WebSocket after a
+            // deadline — this interrupts the StreamJsonRpc receive loop and causes
+            // ConnectionLostException to be thrown on the pending InvokeWithCancellationAsync.
             //
-            // Solution: a watchdog Task directly disposes the JsonRpc object after
-            // a deadline.  JsonRpc.Dispose() immediately throws ConnectionLostException
-            // on all pending calls, regardless of the network state.
-            //
-            // The ClearClientMetadataCache / OnSessionTerminating callbacks (which also
-            // cancel sessionEndedCts) serve as a fast path when BC does send those
-            // notifications; the watchdog is the reliable fallback.
+            // IMPORTANT: we do NOT link the watchdog to sessionEndedCts.  BC sends
+            // ClearClientMetadataCache for reasons other than session termination (e.g.
+            // after app publish), which would immediately cancel a linked token and silently
+            // disarm the watchdog before it could fire.
             var capturedRpc = rpc;
-            using var watchdogCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, sessionEndedCts.Token);
-            _ = Task.Delay(TimeSpan.FromSeconds(180), watchdogCts.Token).ContinueWith(
-                _ =>
-                {
-                    Console.Error.WriteLine("  Watchdog: RunNextTest timeout — force-disposing connection");
-                    try { capturedRpc.Dispose(); } catch { }
-                },
-                CancellationToken.None,
-                TaskContinuationOptions.NotOnCanceled,
-                TaskScheduler.Default);
+            var capturedWs = ws;
+            _ = Task.Delay(TimeSpan.FromSeconds(180)).ContinueWith(_ =>
+            {
+                Console.Error.WriteLine("  Watchdog: aborting hung connection after 3 min");
+                try { capturedWs.Abort(); } catch { }
+                try { capturedRpc.Dispose(); } catch { }
+            });
 
             var result = await Invoke(rpc, formState, "RunNextTest", cts.Token);
-            watchdogCts.Cancel(); // session completed normally; disarm watchdog
             if (result?["DataSetState"] != null) formState = result["DataSetState"];
 
             // Try to read result while the connection is still alive.
@@ -296,10 +290,11 @@ class Callbacks
     public Callbacks(CancellationTokenSource sessionEndedCts) => _sessionEndedCts = sessionEndedCts;
 
     // BC sends ClearClientMetadataCache (and sometimes OnSessionTerminating) right before
-    // killing the WebSocket session during test isolation.  We use these as a cancellation
-    // signal so the in-flight RunNextTest Invoke doesn't hang until TCP-level timeout.
-    [JsonRpcMethod("ClearClientMetadataCache")] public Task ClearClientMetadataCache() { _sessionEndedCts.Cancel(); return Task.CompletedTask; }
-    [JsonRpcMethod("OnSessionTerminating")]     public Task OnSessionTerminating()      { _sessionEndedCts.Cancel(); return Task.CompletedTask; }
+    // killing the WebSocket session during test isolation.  We log receipt for diagnostics.
+    // NOTE: BC also sends ClearClientMetadataCache for other reasons (e.g. app publish),
+    // so receiving it does NOT reliably mean the session is ending.
+    [JsonRpcMethod("ClearClientMetadataCache")] public Task ClearClientMetadataCache() { Console.Error.WriteLine("  [notification] ClearClientMetadataCache received"); _sessionEndedCts.Cancel(); return Task.CompletedTask; }
+    [JsonRpcMethod("OnSessionTerminating")]     public Task OnSessionTerminating()      { Console.Error.WriteLine("  [notification] OnSessionTerminating received"); _sessionEndedCts.Cancel(); return Task.CompletedTask; }
 
     [JsonRpcMethod("Confirm")] public Task Confirm(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("ProcessServerRequests")] public Task ProcessServerRequests(JToken r) => Task.CompletedTask;
