@@ -37,12 +37,13 @@ elif [ $# -eq 4 ]; then
     if ! echo "$BC_VERSION" | grep -qP '^\d+\.\d+\.\d+'; then
         echo "[artifacts] Resolving version $BC_VERSION..."
         T_RESOLVE=$(_ms)
-        RESOLVED=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}." 2>/dev/null | \
+        # Use -L to follow any CDN redirect to the underlying blob storage
+        RESOLVED=$(curl -sfL "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}." 2>/dev/null | \
             grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -1 | cut -d/ -f1)
         if [ -z "$RESOLVED" ]; then
             echo "[artifacts] ERROR: Could not resolve version $BC_VERSION"
             echo "[artifacts] Listing available versions matching prefix '${BC_VERSION}.'..."
-            curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}." 2>/dev/null | \
+            curl -sfL "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}." 2>/dev/null | \
                 grep -oP '<Name>\K[^<]+' | head -10
             exit 1
         fi
