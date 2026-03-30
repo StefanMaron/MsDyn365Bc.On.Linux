@@ -22,6 +22,7 @@
 codeunit 50003 "Test Runner API"
 {
     Subtype = TestRunner;
+    TableNo = "Test Method Line"; // Required for suite runner: BC passes each codeunit line to OnRun
 
     var
         CurrCodeunitId: Integer;
@@ -48,15 +49,18 @@ codeunit 50003 "Test Runner API"
     end;
 
     trigger OnRun()
-    var
-        Log: Record "Log Table";
     begin
-        // Clear previous test logs before starting new test run
-        Log.DeleteAll(false);
-        Commit(); // Commit the deletion and prepare for test execution
-
-        ClearLastError();
-        TestCodeunitResult := Codeunit.Run(CurrCodeunitId);
+        if CurrCodeunitId > 0 then begin
+            // Direct single-codeunit run mode (SetCodeunitId was called)
+            ClearLastError();
+            TestCodeunitResult := Codeunit.Run(CurrCodeunitId);
+        end else if Rec."Test Codeunit" > 0 then begin
+            // Suite runner mode: BC passes each codeunit line to OnRun via Rec
+            ClearLastError();
+            TestCodeunitResult := Codeunit.Run(Rec."Test Codeunit");
+        end;
+        // Note: Log Table is cleared before the batch starts in RunCodeunit(), not here.
+        // Clearing here would wipe results from previous codeunits in the same suite run.
     end;
 
     procedure GetTestCodeunitResult(): Boolean
@@ -69,6 +73,7 @@ codeunit 50003 "Test Runner API"
     var
         Success: Boolean;
         ErrorText: Text;
+        EmptyLine: Record "Test Method Line";
     begin
         // Validate codeunit ID
         if CodeunitId <= 0 then
@@ -79,7 +84,7 @@ codeunit 50003 "Test Runner API"
         Commit(); // Commit any pending transactions before running
 
         this.SetCodeunitId(CodeunitId);
-        if this.Run() then
+        if this.Run(EmptyLine) then
             exit(StrSubstNo('SUCCESS: Codeunit %1 executed successfully', CodeunitId))
         else begin
             ErrorText := GetLastErrorText();

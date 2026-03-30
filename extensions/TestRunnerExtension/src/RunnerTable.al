@@ -46,15 +46,29 @@ table 50003 "Codeunit Run Request"
         }
 
         /// <summary>
-        /// The ID of the codeunit to execute.
+        /// The ID of the codeunit to execute (single codeunit mode).
         /// </summary>
         /// <remarks>
-        /// Must be set before calling RunCodeunit().
+        /// Used for single codeunit execution. Set either this OR CodeunitIds.
         /// No validation is performed - invalid IDs will result in Error status.
         /// </remarks>
         field(2; CodeunitId; Integer)
         {
             Caption = 'Codeunit Id';
+            DataClassification = SystemMetadata;
+        }
+
+        /// <summary>
+        /// Comma-separated list or range of codeunit IDs (batch mode).
+        /// </summary>
+        /// <remarks>
+        /// Supports ranges like "50000-99999" and comma-separated IDs like "76550,76551,76554".
+        /// When set, RunCodeunit() iterates over all matching IDs.
+        /// Takes precedence over CodeunitId when non-empty.
+        /// </remarks>
+        field(6; CodeunitIds; Text[250])
+        {
+            Caption = 'Codeunit Ids';
             DataClassification = SystemMetadata;
         }
 
@@ -164,6 +178,7 @@ page 50002 "Codeunit Run Requests"
             {
                 field(Id; Rec.Id) { Editable = false; }
                 field(CodeunitId; Rec.CodeunitId) { }
+                field(CodeunitIds; Rec.CodeunitIds) { }
                 field(Status; Rec.Status) { Editable = false; }
                 field(LastResult; Rec.LastResult) { Editable = false; }
                 field(LastExecutionUTC; Rec.LastExecutionUTC) { Editable = false; }
@@ -187,39 +202,82 @@ page 50002 "Codeunit Run Requests"
         }
     }
 
-    /// <summary>
-    /// Executes the codeunit specified in the CodeunitId field.
-    /// Service-enabled procedure callable via REST API.
-    /// </summary>
-    /// <returns>True if execution succeeded, False if it failed</returns>
-    /// <remarks>
-    /// REST API Endpoint:
-    /// POST .../codeunitRunRequests(guid'{id}')/Microsoft.NAV.runCodeunit
-    ///
-    /// Uses the MS Test Framework (codeunit 130451 - disabled isolation) via
-    /// Test Suite Runner. Creates an AL Test Suite, discovers test methods,
-    /// and runs through the proper test infrastructure with environment reset.
-    /// </remarks>
     [ServiceEnabled]
     procedure RunCodeunit(): Boolean
     var
         SuiteRunner: Codeunit "Test Suite Runner";
+        Log: Record "Log Table";
         ResultText: Text;
+        AllSuccess: Boolean;
+        IdList: List of [Text];
+        IdToken: Text;
+        RangeTokens: List of [Text];
+        StartId: Integer;
+        EndId: Integer;
+        CuId: Integer;
+        Passed: Integer;
+        Failed: Integer;
+        AddedAny: Boolean;
     begin
-        Rec.TestField(CodeunitId);
         if Rec.Status = Rec.Status::Running then
             Error('Already running.');
 
         Rec.Status := Rec.Status::Running;
         Rec.Modify(true);
-
-        ClearLastError();
         Commit();
 
-        // Use MS Test Framework via Test Suite Runner
-        SuiteRunner.InitSuite('LINUX');
-        SuiteRunner.AddTestCodeunit(Rec.CodeunitId);
-        ResultText := SuiteRunner.RunSingleCodeunit(Rec.CodeunitId);
+        AllSuccess := true;
+        SuiteRunner.InitSuite('LINUX'); // Uses TestRunnerAPI (50003) as runner — logs to Log Table
+
+        if Rec.CodeunitIds <> '' then begin
+            // Batch mode: clear Log Table before starting so we get clean results
+            Log.DeleteAll(false);
+            Commit();
+            // Batch mode: parse "76550,76551,76554" or "76550-76554"
+            // bc-test passes only actual test codeunit IDs discovered from AL source
+            IdList := Rec.CodeunitIds.Split(',');
+            foreach IdToken in IdList do begin
+                IdToken := IdToken.Trim();
+                if IdToken.Contains('-') then begin
+                    RangeTokens := IdToken.Split('-');
+                    if (RangeTokens.Count = 2) and Evaluate(StartId, RangeTokens.Get(1)) and Evaluate(EndId, RangeTokens.Get(2)) then
+                        for CuId := StartId to EndId do begin
+                            SuiteRunner.AddTestCodeunit(CuId);
+                            AddedAny := true;
+                        end;
+                end else
+                    if Evaluate(CuId, IdToken) then begin
+                        SuiteRunner.AddTestCodeunit(CuId);
+                        AddedAny := true;
+                    end;
+            end;
+
+            if not AddedAny then begin
+                Rec.Status := Rec.Status::Finished;
+                Rec.LastResult := 'No test codeunits found';
+                Rec.LastExecutionUTC := CurrentDateTime();
+                Rec.Modify(true);
+                exit(true);
+            end;
+
+            SuiteRunner.RunSuite(); // TestRunnerAPI.OnAfterTestRun populates Log Table
+
+            // Count results from Log Table
+            Log.SetRange(Success, true);
+            Passed := Log.Count();
+            Log.SetRange(Success, false);
+            Failed := Log.Count();
+
+            if Failed = 0 then
+                ResultText := 'Success'
+            else
+                ResultText := StrSubstNo('%1 test(s) failed', Failed);
+        end else begin
+            // Single mode — TestRunnerAPI.OnAfterTestRun populates Log Table
+            Rec.TestField(CodeunitId);
+            SuiteRunner.AddTestCodeunit(Rec.CodeunitId);
+            ResultText := SuiteRunner.RunSingleCodeunit(Rec.CodeunitId);
+        end;
 
         if ResultText = 'Success' then begin
             Rec.Status := Rec.Status::Finished;
@@ -227,10 +285,11 @@ page 50002 "Codeunit Run Requests"
         end else begin
             Rec.Status := Rec.Status::Error;
             Rec.LastResult := CopyStr(ResultText, 1, 250);
+            AllSuccess := false;
         end;
 
         Rec.LastExecutionUTC := CurrentDateTime();
         Rec.Modify(true);
-        exit(Rec.Status = Rec.Status::Finished);
+        exit(AllSuccess);
     end;
 }

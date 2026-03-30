@@ -31,10 +31,10 @@ codeunit 50004 "Test Suite Runner"
         if not ALTestSuite.Get(SuiteName) then begin
             ALTestSuite.Init();
             ALTestSuite.Name := SuiteName;
-            ALTestSuite."Test Runner Id" := 130451; // Isol. Disabled
+            ALTestSuite."Test Runner Id" := 50003; // TestRunnerAPI — logs results to Log Table via OnAfterTestRun
             ALTestSuite.Insert(true);
         end else begin
-            ALTestSuite."Test Runner Id" := 130451;
+            ALTestSuite."Test Runner Id" := 50003;
             ALTestSuite.Modify(true);
         end;
 
@@ -67,10 +67,13 @@ codeunit 50004 "Test Suite Runner"
         TestMethodLine.Name := CopyStr(Format(CodeunitId), 1, MaxStrLen(TestMethodLine.Name));
         TestMethodLine.Insert(true);
 
-        // Use Test Runner - Get Methods to discover test functions
+        // Use Test Runner - Get Methods to discover test functions.
+        // If this fails (e.g., metadata not found), gracefully skip — the runner
+        // will still execute the codeunit as a whole; individual test method lines
+        // simply won't be pre-populated (fine for running all tests).
         TestMethodLine."Skip Logging Results" := true;
         Commit();
-        Codeunit.Run(Codeunit::"Test Runner - Get Methods", TestMethodLine);
+        if not Codeunit.Run(Codeunit::"Test Runner - Get Methods", TestMethodLine) then;
     end;
 
     /// <summary>
@@ -116,11 +119,16 @@ codeunit 50004 "Test Suite Runner"
         TestMethodLine.SetRange("Line Type", TestMethodLine."Line Type"::Codeunit);
         TestMethodLine.SetRange(Run, true);
 
-        if not TestMethodLine.FindFirst() then
+        if not TestMethodLine.FindSet() then
             exit(true);
 
-        Commit();
-        Codeunit.Run(ALTestSuite."Test Runner Id", TestMethodLine);
+        // Run each test codeunit in sequence — the runner is called once per codeunit
+        // and BC fires OnAfterTestRun for each test function within it.
+        repeat
+            Commit();
+            Codeunit.Run(ALTestSuite."Test Runner Id", TestMethodLine);
+        until TestMethodLine.Next() = 0;
+
         exit(true);
     end;
 

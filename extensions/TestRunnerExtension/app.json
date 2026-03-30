@@ -2,9 +2,9 @@
     "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     "name": "Test Runner Extension",
     "publisher": "ALDirectCompile",
-    "version": "2.0.0.0",
+    "version": "2.0.3.0",
     "runtime": "16.0",
-    "target": "OnPrem",
+    "target": "Cloud",
     "dependencies": [
         {
             "id": "23de40a6-dfe8-4f80-80db-d70f83ce8caf",
@@ -14,6 +14,6 @@
         }
     ],
     "idRanges": [
-        { "from": 50002, "to": 50004 }
+        { "from": 50002, "to": 50005 }
     ]
 }

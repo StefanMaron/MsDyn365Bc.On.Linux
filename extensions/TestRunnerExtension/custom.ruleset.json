@@ -1,0 +1,9 @@
+{
+  "name": "bc-linux TestRunner Ruleset",
+  "rules": [
+    { "id": "PC0025", "action": "None", "justification": "ODataKeyFields uses custom Id/EntryNo for bc-test API compatibility" },
+    { "id": "PC0026", "action": "None", "justification": "SystemId/lastModifiedDateTime not required for internal test runner API" },
+    { "id": "AA0215", "action": "None", "justification": "File naming not enforced for internal dev tools" },
+    { "id": "AA0102", "action": "None", "justification": "Field control names use PascalCase for internal API" }
+  ]
+}
