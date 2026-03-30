@@ -18,8 +18,8 @@ using StreamJsonRpc;
 //   4. Output per-method results
 //
 // Note: The DEFAULT test suite must be pre-created (via SQL in run-tests.sh).
-// The WebSocket protocol does not support SaveValue for setting page variables
-// like CurrentSuiteName. This is an implementation detail — the external
+// The suite is opened by filtering TableView to Name=suiteName, which positions
+// the page on the correct record so OnOpenPage sets CurrentSuiteName correctly.
 // interface matches BcContainerHelper's behavior.
 
 var host = "localhost:7085";
@@ -232,7 +232,7 @@ async Task<JToken?> OpenTestPage(JsonRpc rpc, MetadataTokenCapture tc, string co
     var formCts = CancellationTokenSource.CreateLinkedTokenSource(ct); formCts.CancelAfter(TimeSpan.FromSeconds(30));
     var form = await rpc.InvokeWithCancellationAsync<JToken>("OpenForm",
         new object[] { new { HasMainForm = true, States = new[] { new {
-            FormId = 130455, TableView = new { TableId = 130450 }
+            FormId = 130455, TableView = new { TableId = 130450, View = $"WHERE(Name=CONST({suiteName}))" }
         } }, ControlIds = new string?[] { null }, VersionNumber = tc.MetadataToken, MainFormHandle = Guid.Empty } }, formCts.Token);
     if (form == null || form.Type == JTokenType.Null) { Console.Error.WriteLine("FAIL"); return null; }
     var state = form["States"]?[0];
