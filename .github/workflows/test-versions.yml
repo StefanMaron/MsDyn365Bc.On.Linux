@@ -304,7 +304,12 @@ jobs:
       run: |
         echo "=== BC v$BC_VERSION ==="
         echo "Build + start: ${BUILD_DURATION:-n/a}s"
-        docker compose logs bc 2>&1 | grep "\[entrypoint\]" | tail -5
+        echo ""
+        echo "=== Startup phase timing ==="
+        docker compose logs bc 2>&1 | grep "\[entrypoint\]" | grep -E "\[([0-9]+s)\]|Step [0-9]|NST startup|Republished|Total startup|Cleared|Generating|CRONUS|Artifacts already" || true
+        echo ""
+        echo "=== Last entrypoint messages ==="
+        docker compose logs bc 2>&1 | grep "\[entrypoint\]" | tail -10
 
   # Exercises the container's own artifact download path (no pre-cached artifacts).
   # This verifies the feature works and lets us measure in-container download speed
