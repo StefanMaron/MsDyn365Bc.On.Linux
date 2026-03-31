@@ -63,32 +63,91 @@ echo "TestRunner app: $(basename "$TEST_RUNNER_APP")"
 # --- Helper: run python3 safely (unset PYTHONHOME for AppImage compat) ---
 py3() { env -u PYTHONHOME -u PYTHONPATH python3 "$@"; }
 
-# --- Auto-detect company via OData ---
+# --- Auto-detect company and ID via OData ---
+# Try API v2.0 on both OData port and API port (BC serves APIs on different ports)
+COMPANIES_JSON=""
+for url in "${BASE_URL}/api/v2.0/companies" "http://localhost:7052/BC/api/v2.0/companies"; do
+    COMPANIES_JSON=$(curl -sf --max-time 10 -u "$AUTH" "$url" 2>/dev/null || true)
+    [ -n "$COMPANIES_JSON" ] && break
+done
+
+# Fallback: OData V4 endpoint (always on port 7048)
+if [ -z "$COMPANIES_JSON" ]; then
+    COMPANIES_JSON=$(curl -sf --max-time 10 -u "$AUTH" "${BASE_URL}/ODataV4/Company" 2>/dev/null || true)
+fi
+
+if [ -z "$COMPANIES_JSON" ]; then
+    echo "ERROR: Cannot reach BC. Is it running?"
+    echo "  Tried: ${BASE_URL}/api/v2.0/companies"
+    exit 1
+fi
+
+# Extract company name and ID (handle both 'name'/'Name' and 'id'/'SystemId' fields)
+# Use tab separator to handle company names with spaces
+COMPANY_AUTO=$(echo "$COMPANIES_JSON" | py3 -c "
+import sys, json
+data = json.load(sys.stdin)
+c = data['value'][0]
+print(c.get('name', c.get('Name', '')))
+" 2>/dev/null || true)
+
+COMPANY_ID=$(echo "$COMPANIES_JSON" | py3 -c "
+import sys, json
+data = json.load(sys.stdin)
+c = data['value'][0]
+print(c.get('id', c.get('SystemId', '')))
+" 2>/dev/null || true)
+
 if [ -z "$COMPANY" ]; then
-    COMPANY=$(curl -sf --max-time 10 -u "$AUTH" "${BASE_URL}/api/v2.0/companies" 2>/dev/null \
-        | py3 -c "import sys,json; print(json.load(sys.stdin)['value'][0]['name'])" 2>/dev/null || true)
-    [ -z "$COMPANY" ] && COMPANY="CRONUS International Ltd."
+    COMPANY="${COMPANY_AUTO:-CRONUS International Ltd.}"
 fi
 echo "Company: $COMPANY"
 
-# --- Get company ID ---
-COMPANY_ID=$(curl -sf --max-time 10 -u "$AUTH" "${BASE_URL}/api/v2.0/companies" 2>/dev/null \
-    | py3 -c "
+# If we got a name but no ID (OData V4 doesn't return GUID), look up ID via API
+if [ -z "$COMPANY_ID" ]; then
+    for url in "${BASE_URL}/api/v2.0/companies" "http://localhost:7052/BC/api/v2.0/companies"; do
+        COMPANY_ID=$(curl -sf --max-time 10 -u "$AUTH" "$url" 2>/dev/null \
+            | py3 -c "
 import sys, json
 name = sys.argv[1]
 for c in json.load(sys.stdin)['value']:
-    if c['name'] == name:
-        print(c['id']); break
+    if c.get('name', c.get('Name', '')) == name:
+        print(c.get('id', c.get('SystemId', ''))); break
 " "$COMPANY" 2>/dev/null || true)
+        [ -n "$COMPANY_ID" ] && break
+    done
+fi
 
 if [ -z "$COMPANY_ID" ]; then
     echo "ERROR: Could not get company ID for '$COMPANY'"
-    echo "  Is BC running? Check: curl -u $AUTH ${BASE_URL}/api/v2.0/companies"
+    echo "  The API v2.0 endpoint may not be available."
+    echo "  Check: curl -u $AUTH http://localhost:7052/BC/api/v2.0/companies"
     exit 1
 fi
 
 # --- Ensure TestRunnerExtension is published ---
-API_BASE="${BASE_URL}/api/custom/automation/v1.0/companies(${COMPANY_ID})"
+# Try custom API on both OData port and API port
+API_PORT_BASE=""
+for base in "${BASE_URL}" "http://localhost:7052/BC"; do
+    CHECK_URL="${base}/api/custom/automation/v1.0/companies(${COMPANY_ID})/codeunitRunRequests"
+    HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" "$CHECK_URL" 2>/dev/null || echo "000")
+    if [ "$HTTP" = "200" ]; then
+        API_PORT_BASE="$base"
+        break
+    fi
+done
+
+# If not found, we'll need to publish — pick the port that served the v2.0 API
+if [ -z "$API_PORT_BASE" ]; then
+    # Test which port serves APIs
+    for base in "${BASE_URL}" "http://localhost:7052/BC"; do
+        T=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -u "$AUTH" "${base}/api/v2.0/companies" 2>/dev/null || echo "000")
+        if [ "$T" = "200" ]; then API_PORT_BASE="$base"; break; fi
+    done
+    [ -z "$API_PORT_BASE" ] && API_PORT_BASE="$BASE_URL"
+fi
+
+API_BASE="${API_PORT_BASE}/api/custom/automation/v1.0/companies(${COMPANY_ID})"
 API_URL="${API_BASE}/codeunitRunRequests"
 
 echo -n "Checking TestRunner API... "
