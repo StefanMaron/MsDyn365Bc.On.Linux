@@ -507,22 +507,24 @@ exec 3>/tmp/bc-stdin
     # TODO: Selectively rename only the DLLs that cause Cecil type-forwarding issues.
     echo "[entrypoint] Patch #15: Skipped (merged assemblies handle type-forwarding)"
 
-    # -------------------------------------------------------------------------
-    # BC_CLEAR_ALL_APPS: republish all previously-installed extensions in
-    # dependency order, then fall through to test framework publishing below.
-    # -------------------------------------------------------------------------
-    if [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] && [ -f "/tmp/bc-apps-to-republish.tsv" ]; then
-        REPUBLISH_START=$(date +%s)
-        TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
-        echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS: republishing extensions in dependency order..."
+    # Publish test framework apps unless caller will handle all publishing.
+    # BC_SKIP_APP_PUBLISH=true: skip all publishing (caller manages extensions)
+    if [ "${BC_SKIP_APP_PUBLISH:-false}" = "true" ]; then
+        echo "[entrypoint] Skipping app publishing (BC_SKIP_APP_PUBLISH=true)"
+    else
+        # -------------------------------------------------------------------------
+        # BC_CLEAR_ALL_APPS: republish all previously-installed extensions in
+        # dependency order, then fall through to test framework publishing below.
+        # -------------------------------------------------------------------------
+        if [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] && [ -f "/tmp/bc-apps-to-republish.tsv" ]; then
+            REPUBLISH_START=$(date +%s)
+            TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
+            echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS: republishing extensions in dependency order..."
 
-        # Build a name→app-file map by scanning all .app files in artifacts.
-        # BC 27+ uses Ready-to-Run packages: the outer .app is a ZIP containing
-        # readytorunappmanifest.json with EmbeddedApp* keys. Older packages use
-        # NavxManifest.xml. Python handles both formats reliably.
-        APP_INDEX="/tmp/bc-app-index.tsv"
-        ARTIFACTS_VAL="$ARTIFACTS"
-        python3 << PYEOF > "$APP_INDEX"
+            # Build a name→app-file map by scanning all .app files in artifacts.
+            APP_INDEX="/tmp/bc-app-index.tsv"
+            ARTIFACTS_VAL="$ARTIFACTS"
+            python3 << PYEOF > "$APP_INDEX"
 import os, zipfile, json, re
 
 artifacts = "$ARTIFACTS_VAL"
@@ -555,15 +557,12 @@ for root, dirs, files in os.walk(artifacts):
             pass
 PYEOF
 
-        # Topological sort: read snapshot and dep graph, emit in dependency order.
-        # Uses a simple iterative approach: emit apps whose deps are already emitted.
-        TOPO_SCRIPT=$(cat <<'PYEOF'
+            TOPO_SCRIPT=$(cat <<'PYEOF'
 import sys, os
 
 snapshot_file = sys.argv[1]
 deps_file     = sys.argv[2]
 
-# Load snapshot: {pkg_id: (name, publisher, version)}
 apps = {}
 with open(snapshot_file) as f:
     for line in f:
@@ -576,7 +575,6 @@ with open(snapshot_file) as f:
         pkg_id, name, pub, ver = parts[0], parts[1], parts[2], parts[3]
         apps[pkg_id] = (name, pub, ver)
 
-# Load deps: {pkg_id: [dep_pkg_id, ...]}
 deps = {k: [] for k in apps}
 if os.path.exists(deps_file):
     with open(deps_file) as f:
@@ -591,7 +589,6 @@ if os.path.exists(deps_file):
             if pkg_id in deps:
                 deps[pkg_id].append(dep_id)
 
-# Topological sort (Kahn's algorithm)
 from collections import deque
 in_degree = {k: 0 for k in apps}
 reverse_deps = {k: [] for k in apps}
@@ -611,88 +608,82 @@ while queue:
         if in_degree[dependent] == 0:
             queue.append(dependent)
 
-# Any remaining (cycles) go at the end
 remaining = [k for k in apps if k not in order]
 order.extend(remaining)
 
-# Output: pkg_id TAB name TAB publisher TAB version
 for pkg_id in order:
     if pkg_id in apps:
         name, pub, ver = apps[pkg_id]
         print(f"{pkg_id}\t{name}\t{pub}\t{ver}")
 PYEOF
-        )
+            )
 
-        ORDERED_LIST=$(python3 -c "$TOPO_SCRIPT" "/tmp/bc-apps-to-republish.tsv" "/tmp/bc-app-deps.tsv" 2>/dev/null)
-        APP_COUNT=$(echo "$ORDERED_LIST" | grep -c $'\t' || echo 0)
-        echo "[entrypoint] Republishing $APP_COUNT extensions in dependency order..."
+            ORDERED_LIST=$(python3 -c "$TOPO_SCRIPT" "/tmp/bc-apps-to-republish.tsv" "/tmp/bc-app-deps.tsv" 2>/dev/null)
+            APP_COUNT=$(echo "$ORDERED_LIST" | grep -c $'\t' || echo 0)
+            echo "[entrypoint] Republishing $APP_COUNT extensions in dependency order..."
 
-        REPUBLISH_OK=0
-        REPUBLISH_SKIP=0
-        while IFS=$'\t' read -r PKG_ID APP_NAME APP_PUB APP_VER; do
-            [ -z "$APP_NAME" ] && continue
+            REPUBLISH_OK=0
+            REPUBLISH_SKIP=0
+            while IFS=$'\t' read -r PKG_ID APP_NAME APP_PUB APP_VER; do
+                [ -z "$APP_NAME" ] && continue
 
-            # Find matching .app file in the index (Name\tPublisher\tVersion\tPath)
-            # Try exact name+publisher+version first, then name+publisher (any version)
-            APP_FILE=""
-            APP_FILE=$(awk -F'\t' -v n="$APP_NAME" -v p="$APP_PUB" -v v="$APP_VER" \
-                '$1==n && $2==p && $3==v {print $4; exit}' "$APP_INDEX" 2>/dev/null)
-            if [ -z "$APP_FILE" ]; then
-                APP_FILE=$(awk -F'\t' -v n="$APP_NAME" -v p="$APP_PUB" \
-                    '$1==n && $2==p {print $4; exit}' "$APP_INDEX" 2>/dev/null)
-            fi
+                APP_FILE=""
+                APP_FILE=$(awk -F'\t' -v n="$APP_NAME" -v p="$APP_PUB" -v v="$APP_VER" \
+                    '$1==n && $2==p && $3==v {print $4; exit}' "$APP_INDEX" 2>/dev/null)
+                if [ -z "$APP_FILE" ]; then
+                    APP_FILE=$(awk -F'\t' -v n="$APP_NAME" -v p="$APP_PUB" \
+                        '$1==n && $2==p {print $4; exit}' "$APP_INDEX" 2>/dev/null)
+                fi
 
-            if [ -z "$APP_FILE" ] || [ ! -f "$APP_FILE" ]; then
-                echo "[entrypoint]   SKIP (no .app found): $APP_NAME $APP_VER by $APP_PUB"
-                REPUBLISH_SKIP=$((REPUBLISH_SKIP + 1))
-                continue
-            fi
+                if [ -z "$APP_FILE" ] || [ ! -f "$APP_FILE" ]; then
+                    echo "[entrypoint]   SKIP (no .app found): $APP_NAME $APP_VER by $APP_PUB"
+                    REPUBLISH_SKIP=$((REPUBLISH_SKIP + 1))
+                    continue
+                fi
 
-            HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 300 \
+                HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 300 \
+                    -u "admin:Admin123!" -X POST \
+                    -F "file=@$APP_FILE;type=application/octet-stream" \
+                    "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
+                echo "[entrypoint]   $APP_NAME $APP_VER: HTTP $HTTP"
+                if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ] || [ "$HTTP" = "204" ]; then
+                    REPUBLISH_OK=$((REPUBLISH_OK + 1))
+                else
+                    echo "[entrypoint]   WARN: failed to republish $APP_NAME $APP_VER (HTTP $HTTP)"
+                fi
+            done <<< "$ORDERED_LIST"
+
+            REPUBLISH_ELAPSED=$(( $(date +%s) - REPUBLISH_START ))
+            TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
+            echo "[entrypoint] [${TOTAL_ELAPSED}s] Republished $REPUBLISH_OK extensions, skipped $REPUBLISH_SKIP — republish took ${REPUBLISH_ELAPSED}s"
+        fi
+
+        # Publish test framework apps. These are needed for running AL tests.
+        echo "[entrypoint] Publishing test framework..."
+        find "$ARTIFACTS" -name "*.app" -type f \( \
+            -name "Microsoft_Test Runner_*" -o \
+            -name "Microsoft_Library Assert_*" -o \
+            -name "Microsoft_Library Variable Storage_*" -o \
+            -name "Microsoft_Permissions Mock_*" -o \
+            -name "Microsoft_Any_*" \
+        \) 2>/dev/null | sort | while read -r app; do
+            NAME=$(basename "$app")
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
                 -u "admin:Admin123!" -X POST \
-                -F "file=@$APP_FILE;type=application/octet-stream" \
+                -F "file=@$app;type=application/octet-stream" \
                 "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
-            echo "[entrypoint]   $APP_NAME $APP_VER: HTTP $HTTP"
-            if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ] || [ "$HTTP" = "204" ]; then
-                REPUBLISH_OK=$((REPUBLISH_OK + 1))
-            else
-                echo "[entrypoint]   WARN: failed to republish $APP_NAME $APP_VER (HTTP $HTTP)"
-            fi
-        done <<< "$ORDERED_LIST"
+            echo "[entrypoint]   $NAME: HTTP $HTTP"
+        done
 
-        REPUBLISH_ELAPSED=$(( $(date +%s) - REPUBLISH_START ))
-        TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
-        echo "[entrypoint] [${TOTAL_ELAPSED}s] Republished $REPUBLISH_OK extensions, skipped $REPUBLISH_SKIP — republish took ${REPUBLISH_ELAPSED}s"
-    fi
-
-    # Publish test framework apps. These are needed for running AL tests.
-    # BC pre-loads them as "global" apps but doesn't install for the tenant.
-    # We cleared the stale global entries at DB setup so we can re-publish here.
-    echo "[entrypoint] Publishing test framework..."
-    # Use find to handle spaces in filenames (e.g. "Test Runner")
-    find "$ARTIFACTS" -name "*.app" -type f \( \
-        -name "Microsoft_Test Runner_*" -o \
-        -name "Microsoft_Library Assert_*" -o \
-        -name "Microsoft_Library Variable Storage_*" -o \
-        -name "Microsoft_Permissions Mock_*" -o \
-        -name "Microsoft_Any_*" \
-    \) 2>/dev/null | sort | while read -r app; do
-        NAME=$(basename "$app")
-        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
-            -u "admin:Admin123!" -X POST \
-            -F "file=@$app;type=application/octet-stream" \
-            "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
-        echo "[entrypoint]   $NAME: HTTP $HTTP"
-    done
-
-    # Publish our TestRunner Extension (custom API for test execution, depends on MS Test Runner)
-    if [ -f /bc/testrunner/TestRunner.app ]; then
-        echo "[entrypoint] Publishing Test Runner Extension..."
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-            -u "admin:Admin123!" -X POST \
-            -F "file=@/bc/testrunner/TestRunner.app;type=application/octet-stream" \
-            "$DEV_URL/apps?SchemaUpdateMode=synchronize" 2>&1)
-        echo "[entrypoint] Test Runner Extension: HTTP $HTTP_CODE"
+        # Publish our TestRunner Extension (custom API for test execution, depends on MS Test Runner)
+        if [ -f /bc/testrunner/TestRunner.app ]; then
+            echo "[entrypoint] Publishing Test Runner Extension..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+                -u "admin:Admin123!" -X POST \
+                -F "file=@/bc/testrunner/TestRunner.app;type=application/octet-stream" \
+                "$DEV_URL/apps?SchemaUpdateMode=synchronize" 2>&1)
+            echo "[entrypoint] Test Runner Extension: HTTP $HTTP_CODE"
+        fi
     fi
     TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
     echo "[entrypoint] [${TOTAL_ELAPSED}s] Ready for extensions. Total startup: ${TOTAL_ELAPSED}s"
