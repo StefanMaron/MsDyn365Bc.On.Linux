@@ -17,4 +17,10 @@ artifacts/
 .vs/
 .vscode/
 *.code-workspace
+
+# AL development
+.alpackages/
+.dev/
+
+# TestRunner WebSocket client (deprecated)
 tools/TestRunner/lib/

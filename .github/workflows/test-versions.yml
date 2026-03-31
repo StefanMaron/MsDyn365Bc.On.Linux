@@ -238,9 +238,8 @@ jobs:
         }
         APPJSON
 
-        # Two codeunits with two tests each — exercises the multi-codeunit reconnect fix.
-        # Each codeunit run triggers a BC test-isolation session kill; the runner must
-        # reconnect and advance to the next codeunit for both to complete.
+        # Two codeunits with two tests each — verifies multi-codeunit test execution
+        # via the TestRunnerExtension REST API.
         cat > /tmp/testapp/SmokeTest.Codeunit.al << 'ALCODE'
         codeunit 70000 "BC Linux Smoke Test 1"
         {
@@ -322,12 +321,11 @@ jobs:
       env:
         BC_VERSION: ${{ matrix.bc_version }}
       run: |
-        echo "Running tests (2 codeunits × 2 methods — exercises multi-codeunit reconnect)..."
+        echo "Running tests (2 codeunits × 2 methods via REST API)..."
         ./scripts/run-tests.sh \
           --app /tmp/testapp/SmokeTest.app \
           --codeunit-range 70000..70001 \
-          --timeout 10 \
-          --codeunit-timeout 3
+          --timeout 10
 
     - name: Summary
       if: always()

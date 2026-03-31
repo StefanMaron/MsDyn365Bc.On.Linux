@@ -1,280 +1,277 @@
 #!/usr/bin/env bash
-# run-tests.sh — Run AL tests on a BC Linux container
+# run-tests.sh — Run AL tests on a BC Linux container via REST API
 #
-# Mirrors BcContainerHelper's Run-TestsInBcContainer interface.
-# Extensions must be published BEFORE calling this script.
+# Uses the TestRunnerExtension's OData API to execute tests. The extension
+# is auto-published if not already available.
 #
 # Usage:
 #   ./scripts/run-tests.sh [options]
 #
 # Options:
-#   --extension-id <guid>      Filter tests by extension ID
-#   --codeunit-range <range>   Codeunit ID range (e.g. "70000" or "70000..70010")
-#   --company <name>           Company name (default: auto-detect)
-#   --host <host:port>         BC client services host (default: localhost:7085)
-#   --test-runner <id>         Test runner codeunit ID (default: 130451)
-#   --suite-name <name>        Test suite name (default: DEFAULT)
+#   --app <path>               Test app file (for codeunit discovery via SymbolReference.json)
+#   --codeunit-range <range>   Codeunit ID range (e.g. "70000" or "70000..70001")
+#   --company <name>           Company name (default: auto-detect via OData)
+#   --base-url <url>           BC OData base URL (default: http://localhost:7048/BC)
+#   --dev-url <url>            BC Dev endpoint URL (default: http://localhost:7049/BC/dev)
+#   --auth <user:pass>         Authentication (default: admin:Admin123!)
 #   --timeout <minutes>        Overall timeout (default: 30)
-#   --codeunit-timeout <min>   Max time for one codeunit run before watchdog reconnects (default: 10)
-#   --disabled-tests <file>    Path to disabled tests JSON
-#   --sql-password <pw>        SA password for company auto-detect
+#   --test-runner-app <path>   Path to TestRunnerExtension .app (auto-detected from repo)
 
 set -uo pipefail
 
 # Defaults
-BC_HOST="localhost:7085"
+BASE_URL="http://localhost:7048/BC"
+DEV_URL="http://localhost:7049/BC/dev"
+AUTH="admin:Admin123!"
 COMPANY=""
-TEST_RUNNER_ID=130451
 CODEUNIT_RANGE=""
-EXTENSION_ID=""
+APP_FILE=""
 TIMEOUT_MIN=30
-CODEUNIT_TIMEOUT_MIN=10
-SUITE_NAME="DEFAULT"
-DISABLED_TESTS=""
-SQL_PASSWORD="${SA_PASSWORD:-Passw0rd123!}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-APP_FILE=""
+TEST_RUNNER_APP=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --app) APP_FILE="$2"; shift 2;;
-        --extension-id) EXTENSION_ID="$2"; shift 2;;
         --codeunit-range) CODEUNIT_RANGE="$2"; shift 2;;
         --company) COMPANY="$2"; shift 2;;
-        --host) BC_HOST="$2"; shift 2;;
-        --test-runner) TEST_RUNNER_ID="$2"; shift 2;;
-        --suite-name) SUITE_NAME="$2"; shift 2;;
+        --base-url) BASE_URL="$2"; shift 2;;
+        --dev-url) DEV_URL="$2"; shift 2;;
+        --auth) AUTH="$2"; shift 2;;
         --timeout) TIMEOUT_MIN="$2"; shift 2;;
-        --codeunit-timeout) CODEUNIT_TIMEOUT_MIN="$2"; shift 2;;
-        --disabled-tests) DISABLED_TESTS="$2"; shift 2;;
-        --sql-password) SQL_PASSWORD="$2"; shift 2;;
+        --test-runner-app) TEST_RUNNER_APP="$2"; shift 2;;
+        # Legacy options (accepted but ignored for backward compat)
+        --host|--test-runner|--suite-name|--codeunit-timeout|--extension-id|--disabled-tests|--sql-password) shift 2;;
         *) echo "Unknown option: $1"; exit 1;;
     esac
 done
 
-echo "=== BC Test Runner ==="
+echo "=== BC Test Runner (REST API) ==="
 
-if [ "$CODEUNIT_TIMEOUT_MIN" -ge "$TIMEOUT_MIN" ]; then
-    echo "WARNING: --codeunit-timeout ($CODEUNIT_TIMEOUT_MIN min) >= --timeout ($TIMEOUT_MIN min)." \
-         "The watchdog will fire at the same time as the overall timeout, leaving no room to reconnect for subsequent codeunits."
+# --- Find TestRunnerExtension .app ---
+if [ -z "$TEST_RUNNER_APP" ]; then
+    TEST_RUNNER_APP="$REPO_DIR/extensions/TestRunnerExtension/TestRunnerExtension.app"
 fi
+if [ ! -f "$TEST_RUNNER_APP" ]; then
+    echo "ERROR: TestRunnerExtension .app not found at $TEST_RUNNER_APP"
+    echo "  Provide --test-runner-app or place it in extensions/TestRunnerExtension/"
+    exit 1
+fi
+echo "TestRunner app: $(basename "$TEST_RUNNER_APP")"
 
-# --- Detect SQL container ---
-SQL_CONTAINER=$(cd "$REPO_DIR" && docker compose ps -q sql 2>/dev/null | head -1)
+# --- Helper: run python3 safely (unset PYTHONHOME for AppImage compat) ---
+py3() { env -u PYTHONHOME -u PYTHONPATH python3 "$@"; }
 
-# --- Auto-detect company if not specified ---
+# --- Auto-detect company via OData ---
 if [ -z "$COMPANY" ]; then
-    if [ -n "$SQL_CONTAINER" ]; then
-        COMPANY=$(docker exec -e "_QB=$(echo 'USE [CRONUS]; SELECT TOP 1 RTRIM([Name]) FROM [Company] ORDER BY [Name]' | base64 -w0)" \
-            "$SQL_CONTAINER" bash -c \
-            'echo "$_QB" | base64 -d | /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "'"$SQL_PASSWORD"'" -C -No -i /dev/stdin' \
-            2>/dev/null | grep -v "^-" | grep -v "^Changed" | grep -v "^$" | grep -v "^(" | grep -v "^[[:space:]]*$" | head -1 | sed 's/ *$//')
-    fi
+    COMPANY=$(curl -sf --max-time 10 -u "$AUTH" "${BASE_URL}/api/v2.0/companies" 2>/dev/null \
+        | py3 -c "import sys,json; print(json.load(sys.stdin)['value'][0]['name'])" 2>/dev/null || true)
     [ -z "$COMPANY" ] && COMPANY="CRONUS International Ltd."
 fi
 echo "Company: $COMPANY"
 
-# --- Ensure DEFAULT test suite exists ---
-# The WebSocket protocol does not support SaveValue for page variables,
-# so we create the suite via SQL. Page 130455 reads it on open.
-run_sql() {
-    docker exec -e "_QB=$(echo "$1" | base64 -w0)" "$SQL_CONTAINER" bash -c \
-        'echo "$_QB" | base64 -d | /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "'"$SQL_PASSWORD"'" -C -No -i /dev/stdin' 2>&1
-}
-
-TABLE_PREFIX="$(echo "${COMPANY}" | sed 's/\.//g')_\$"
-SUITE_TABLE="${TABLE_PREFIX}AL Test Suite\$23de40a6-dfe8-4f80-80db-d70f83ce8caf"
-METHOD_TABLE="${TABLE_PREFIX}Test Method Line\$23de40a6-dfe8-4f80-80db-d70f83ce8caf"
-
-echo "Ensuring DEFAULT test suite..."
-run_sql "
-USE [CRONUS];
-IF NOT EXISTS (SELECT 1 FROM [$SUITE_TABLE] WHERE [Name] = N'$SUITE_NAME')
-    INSERT INTO [$SUITE_TABLE]
-    ([Name],[Description],[Last Run],[Run Type],[Test Runner Id],[Stability Run],
-     [CC Tracking Type],[CC Track All Sessions],[CC Exporter ID],[CC Coverage Map],
-     [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
-    VALUES (N'$SUITE_NAME',N'','1753-01-01',0,$TEST_RUNNER_ID,0,0,0,0,0,
-            NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
-            GETUTCDATE(),'00000000-0000-0000-0000-000000000001');
-ELSE
-    UPDATE [$SUITE_TABLE] SET [Test Runner Id] = $TEST_RUNNER_ID WHERE [Name] = N'$SUITE_NAME';
-" > /dev/null 2>&1
-
-# Populate test suite with codeunit + function lines
-echo "Populating test suite..."
-run_sql "USE [CRONUS]; DELETE FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME';" > /dev/null 2>&1
-
-LINE_NO=10000
-insert_line() {
-    local CU_ID="$1" NAME="$2" FUNC="$3" LINE_TYPE="$4" LEVEL="$5"
-    run_sql "
-    USE [CRONUS];
-    SET IDENTITY_INSERT [$METHOD_TABLE] ON;
-    INSERT INTO [$METHOD_TABLE]
-    ([Test Suite],[Line No_],[Test Codeunit],[Name],[Function],[Run],[Result],[Line Type],
-     [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
-     [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
-     [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
-    VALUES (N'$SUITE_NAME',$LINE_NO,$CU_ID,N'$NAME',N'$FUNC',1,0,$LINE_TYPE,
-            '1753-01-01','1753-01-01',$LEVEL,N'',N'',0x,0x,0,N'',0x,
-            NEWID(),GETUTCDATE(),'00000000-0000-0000-0000-000000000001',
-            GETUTCDATE(),'00000000-0000-0000-0000-000000000001');
-    SET IDENTITY_INSERT [$METHOD_TABLE] OFF;
-    " > /dev/null 2>&1
-    LINE_NO=$((LINE_NO + 1))
-}
-
-# If --app is provided, parse SymbolReference.json for per-method lines
-APP_PARSED=false
-if [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
-    TEST_LINES=$(unzip -p "$APP_FILE" SymbolReference.json 2>/dev/null | env -u PYTHONHOME -u PYTHONPATH python3 -c "
+# --- Get company ID ---
+COMPANY_ID=$(curl -sf --max-time 10 -u "$AUTH" "${BASE_URL}/api/v2.0/companies" 2>/dev/null \
+    | py3 -c "
 import sys, json
-raw = sys.stdin.read()
-if not raw.strip():
-    sys.exit(0)
-data = json.loads(raw.lstrip('\ufeff'))
-def collect(node):
-    for cu in node.get('Codeunits', []):
-        props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
-        if props.get('Subtype') != 'Test': continue
-        print(f\"CU|{cu['Id']}|{cu['Name']}\")
-        for m in cu.get('Methods', []):
-            if any(a.get('Name','')=='Test' for a in m.get('Attributes',[])):
-                print(f\"FN|{cu['Id']}|{m['Name']}\")
-    for ns in node.get('Namespaces', []):
-        collect(ns)
-collect(data)
-" 2>/dev/null || true)
+name = sys.argv[1]
+for c in json.load(sys.stdin)['value']:
+    if c['name'] == name:
+        print(c['id']); break
+" "$COMPANY" 2>/dev/null || true)
 
-    if [ -n "$TEST_LINES" ]; then
-        TMPLINES=$(mktemp)
-        echo "$TEST_LINES" > "$TMPLINES"
-        while IFS='|' read -r TYPE ID NAME; do
-            [ -z "$TYPE" ] && continue
-            # Apply codeunit range filter
-            if [ -n "$CODEUNIT_RANGE" ] && [[ "$CODEUNIT_RANGE" != *".."* ]] && [ "$ID" != "$CODEUNIT_RANGE" ]; then
-                continue
-            fi
-            if [ "$TYPE" = "CU" ]; then
-                echo "  Codeunit $ID: $NAME"
-                insert_line "$ID" "$NAME" "" 0 0
-            else
-                echo "    - $NAME"
-                insert_line "$ID" "$NAME" "$NAME" 1 1
-            fi
-        done < "$TMPLINES"
-        rm -f "$TMPLINES"
-        APP_PARSED=true
-    else
-        echo "  SymbolReference.json had no test codeunits, falling back to SQL discovery..."
-    fi
-fi
-
-if [ "$APP_PARSED" = "false" ]; then
-    # Fallback: discover codeunits from Application Object Metadata (no per-method detail)
-    RANGE_FILTER=""
-    if [ -n "$CODEUNIT_RANGE" ]; then
-        if [[ "$CODEUNIT_RANGE" == *".."* ]]; then
-            FROM=$(echo "$CODEUNIT_RANGE" | cut -d. -f1)
-            TO=$(echo "$CODEUNIT_RANGE" | cut -d. -f3)
-            RANGE_FILTER="AND ao.[Object ID] BETWEEN $FROM AND $TO"
-        else
-            RANGE_FILTER="AND ao.[Object ID] = $CODEUNIT_RANGE"
-        fi
-    fi
-    run_sql "
-    USE [CRONUS];
-    SET IDENTITY_INSERT [$METHOD_TABLE] ON;
-    INSERT INTO [$METHOD_TABLE]
-    ([Test Suite],[Line No_],[Test Codeunit],[Name],[Function],[Run],[Result],[Line Type],
-     [Start Time],[Finish Time],[Level],[Error Message Preview],[Error Code],
-     [Error Message],[Error Call Stack],[Skip Logging Results],[Data Input Group Code],[Data Input],
-     [\$systemId],[\$systemCreatedAt],[\$systemCreatedBy],[\$systemModifiedAt],[\$systemModifiedBy])
-    SELECT N'$SUITE_NAME', ROW_NUMBER() OVER (ORDER BY ao.[Object ID]) * 10000,
-           ao.[Object ID], CAST(ao.[Object Name] AS nvarchar(250)),
-           N'', 1, 0, 0, '1753-01-01','1753-01-01', 0, N'', N'', 0x, 0x, 0, N'', 0x,
-           NEWID(), GETUTCDATE(), '00000000-0000-0000-0000-000000000001',
-           GETUTCDATE(), '00000000-0000-0000-0000-000000000001'
-    FROM [Application Object Metadata] ao
-    WHERE ao.[Object Type] = 5 AND ao.[Object Subtype] = 'Test' $RANGE_FILTER;
-    SET IDENTITY_INSERT [$METHOD_TABLE] OFF;
-    " > /dev/null 2>&1
-fi
-
-CU_COUNT=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 0" \
-    | grep -oE '^ +[0-9]+' | tr -d ' ' | tail -1)
-FUNC_COUNT=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 1" \
-    | grep -oE '^ +[0-9]+' | tr -d ' ' | tail -1)
-echo "  Test codeunits: ${CU_COUNT:-0}, Test methods: ${FUNC_COUNT:-0}"
-
-if [ "${CU_COUNT:-0}" = "0" ]; then
-    echo "ERROR: No test codeunits found"
+if [ -z "$COMPANY_ID" ]; then
+    echo "ERROR: Could not get company ID for '$COMPANY'"
+    echo "  Is BC running? Check: curl -u $AUTH ${BASE_URL}/api/v2.0/companies"
     exit 1
 fi
 
-# --- Build TestRunner ---
-TESTRUNNER_DIR="$REPO_DIR/tools/TestRunner"
-if [ ! -f "$TESTRUNNER_DIR/bin/Release/net8.0/TestRunner.dll" ]; then
-    echo "Building TestRunner..."
-    dotnet build "$TESTRUNNER_DIR" -c Release 2>&1 | tail -3
+# --- Ensure TestRunnerExtension is published ---
+API_BASE="${BASE_URL}/api/custom/automation/v1.0/companies(${COMPANY_ID})"
+API_URL="${API_BASE}/codeunitRunRequests"
+
+echo -n "Checking TestRunner API... "
+HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" "$API_URL" 2>/dev/null || echo "000")
+if [ "$HTTP" = "200" ]; then
+    echo "available"
+else
+    echo "not found (HTTP $HTTP), publishing extension..."
+    RESP=$(curl -s -w "\n%{http_code}" --max-time 120 -u "$AUTH" -X POST \
+        -F "file=@${TEST_RUNNER_APP};type=application/octet-stream" \
+        "${DEV_URL}/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
+    PUB_HTTP=$(echo "$RESP" | tail -1)
+    PUB_BODY=$(echo "$RESP" | head -n -1)
+    if [ "$PUB_HTTP" != "200" ] && [ "$PUB_HTTP" != "422" ]; then
+        echo "ERROR: Failed to publish TestRunnerExtension (HTTP $PUB_HTTP)"
+        echo "  $PUB_BODY"
+        exit 1
+    fi
+    echo "  Published (HTTP $PUB_HTTP)"
+
+    # Wait for BC to register the API endpoint
+    echo -n "  Waiting for API..."
+    for i in $(seq 1 30); do
+        sleep 2
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" "$API_URL" 2>/dev/null || echo "000")
+        [ "$HTTP" = "200" ] && break
+        echo -n "."
+    done
+    echo ""
+    if [ "$HTTP" != "200" ]; then
+        echo "ERROR: TestRunner API not available after 60s"
+        exit 1
+    fi
+    echo "  API ready"
 fi
 
-# --- Verify suite exists before running ---
-SUITE_CHECK=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$SUITE_TABLE] WHERE [Name] = N'$SUITE_NAME'" \
-    | grep -oE '^ +[0-9]+' | tr -d ' ' | tail -1)
-echo "  Suite '$SUITE_NAME' exists: ${SUITE_CHECK:-0} rows"
+# --- Discover test codeunit IDs ---
+CODEUNIT_IDS=""
 
-# --- Run tests via client services (page 130455) ---
-# RunNextTest triggers BC test execution. The session typically dies during test
-# execution (test isolation), so we ignore the exit code and read results from SQL.
-timeout "${TIMEOUT_MIN}m" dotnet run --project "$TESTRUNNER_DIR" --no-build -c Release -- \
-    --host "$BC_HOST" --company "$COMPANY" --suite "$SUITE_NAME" --timeout "$TIMEOUT_MIN" \
-    --codeunit-timeout "$CODEUNIT_TIMEOUT_MIN" \
-    --max-iterations $(( ${CU_COUNT:-100} + 2 )) 2>&1 || true
+# Priority 1: explicit --codeunit-range
+if [ -n "$CODEUNIT_RANGE" ]; then
+    if [[ "$CODEUNIT_RANGE" == *".."* ]]; then
+        # Convert AL-style "70000..70001" to API-style "70000-70001"
+        CODEUNIT_IDS=$(echo "$CODEUNIT_RANGE" | sed 's/\.\.\([0-9]\)/-\1/')
+    else
+        CODEUNIT_IDS="$CODEUNIT_RANGE"
+    fi
+fi
 
-sleep 2
+# Priority 2: discover from --app SymbolReference.json
+if [ -z "$CODEUNIT_IDS" ] && [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
+    echo "Discovering test codeunits from $(basename "$APP_FILE")..."
+    CODEUNIT_IDS=$(unzip -p "$APP_FILE" SymbolReference.json 2>/dev/null | py3 -c "
+import sys, json
+raw = sys.stdin.read()
+if not raw.strip(): sys.exit(0)
+data = json.loads(raw.lstrip('\ufeff'))
+ids = []
+def collect(node):
+    for cu in node.get('Codeunits', []):
+        props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
+        if props.get('Subtype') == 'Test':
+            ids.append(str(cu['Id']))
+    for ns in node.get('Namespaces', []):
+        collect(ns)
+collect(data)
+print(','.join(ids))
+" 2>/dev/null || true)
+fi
 
-# --- Read results from SQL ---
+if [ -z "$CODEUNIT_IDS" ]; then
+    echo "ERROR: No test codeunits found."
+    echo "  Provide --app <path> or --codeunit-range <range>"
+    exit 1
+fi
+
+CU_COUNT=$(echo "$CODEUNIT_IDS" | tr ',' '\n' | wc -l)
+echo "Test codeunits: $CODEUNIT_IDS ($CU_COUNT)"
+
+# --- Execute tests via REST API ---
+echo ""
+echo "=== Running Tests ==="
+
+# Create run request
+CREATE_RESP=$(curl -sf --max-time 30 -u "$AUTH" -X POST \
+    -H "Content-Type: application/json" \
+    -d "{\"CodeunitIds\": \"$CODEUNIT_IDS\"}" \
+    "$API_URL" 2>/dev/null || true)
+
+if [ -z "$CREATE_RESP" ]; then
+    echo "ERROR: Failed to create test run request"
+    exit 1
+fi
+
+REQUEST_ID=$(echo "$CREATE_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" 2>/dev/null || true)
+if [ -z "$REQUEST_ID" ]; then
+    echo "ERROR: Failed to parse run request response"
+    echo "  Response: $CREATE_RESP"
+    exit 1
+fi
+
+# Trigger execution (synchronous — blocks until tests complete or timeout)
+echo "Executing (timeout: ${TIMEOUT_MIN}m)..."
+START_TIME=$(date +%s)
+EXEC_RESP=$(curl -s -w "\n%{http_code}" --max-time $((TIMEOUT_MIN * 60)) \
+    -u "$AUTH" -X POST "${API_URL}(${REQUEST_ID})/Microsoft.NAV.runCodeunit" 2>/dev/null || true)
+EXEC_HTTP=$(echo "$EXEC_RESP" | tail -1)
+ELAPSED=$(( $(date +%s) - START_TIME ))
+
+# Read status
+STATUS_RESP=$(curl -sf --max-time 10 -u "$AUTH" "${API_URL}(${REQUEST_ID})" 2>/dev/null || true)
+STATUS=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('Status',''))" 2>/dev/null || true)
+RESULT=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('LastResult',''))" 2>/dev/null || true)
+
+# If trigger timed out, poll for completion
+if [ "$STATUS" = "Running" ] || [ "$STATUS" = "Pending" ]; then
+    echo "  Trigger returned HTTP $EXEC_HTTP after ${ELAPSED}s, polling..."
+    DEADLINE=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
+    while [ $(date +%s) -lt $DEADLINE ]; do
+        sleep 3
+        STATUS_RESP=$(curl -sf --max-time 10 -u "$AUTH" "${API_URL}(${REQUEST_ID})" 2>/dev/null || true)
+        STATUS=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('Status',''))" 2>/dev/null || true)
+        RESULT=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('LastResult',''))" 2>/dev/null || true)
+        case "$STATUS" in
+            Finished|Error) break ;;
+        esac
+        echo -n "."
+    done
+    echo ""
+fi
+
+TOTAL_ELAPSED=$(( $(date +%s) - START_TIME ))
+
+case "$STATUS" in
+    Finished) echo "Tests completed in ${TOTAL_ELAPSED}s ($RESULT)" ;;
+    Error)    echo "Tests completed in ${TOTAL_ELAPSED}s with failures ($RESULT)" ;;
+    *)        echo "ERROR: Tests did not complete (status: ${STATUS:-unknown}, HTTP: $EXEC_HTTP)"; exit 1 ;;
+esac
+
+# --- Read results from Log Table API ---
 echo ""
 echo "=== Test Results ==="
-FUNC_COUNT=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 1" \
-    | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+LOG_URL="${API_BASE}/logEntries?\$top=10000"
+LOGS=$(curl -sf --max-time 30 -u "$AUTH" "$LOG_URL" 2>/dev/null || true)
 
-if [ "${FUNC_COUNT:-0}" -gt 0 ]; then
-    run_sql "
-    USE [CRONUS];
-    SELECT CASE t.[Result] WHEN 2 THEN '  PASS' WHEN 1 THEN '  FAIL' WHEN 0 THEN '  ----' ELSE '  SKIP' END,
-           RTRIM(t.[Function]), t.[Test Codeunit],
-           RTRIM(CAST(t.[Error Message Preview] AS nvarchar(200)))
-    FROM [$METHOD_TABLE] t
-    WHERE t.[Test Suite] = N'$SUITE_NAME' AND t.[Line Type] = 1
-    ORDER BY t.[Test Codeunit], t.[Line No_];
-    "
-    PASSED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 1 AND [Result] = 2" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
-    FAILED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 1 AND [Result] = 1" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
-    SKIPPED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 1 AND [Result] NOT IN (1,2)" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
-else
-    run_sql "
-    USE [CRONUS];
-    SELECT CASE t.[Result] WHEN 2 THEN '  PASS' WHEN 1 THEN '  FAIL' WHEN 3 THEN '  EXEC' WHEN 0 THEN '  ----' ELSE '  ???' END,
-           RTRIM(t.[Name]), t.[Test Codeunit]
-    FROM [$METHOD_TABLE] t
-    WHERE t.[Test Suite] = N'$SUITE_NAME' AND t.[Line Type] = 0
-    ORDER BY t.[Test Codeunit];
-    "
-    PASSED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 0 AND [Result] IN (2,3)" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
-    FAILED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 0 AND [Result] = 1" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
-    SKIPPED=$(run_sql "USE [CRONUS]; SELECT COUNT(*) FROM [$METHOD_TABLE] WHERE [Test Suite] = N'$SUITE_NAME' AND [Line Type] = 0 AND [Result] = 0" | grep -oP '^\s+\d+' | tr -d ' ' | tail -1)
+if [ -z "$LOGS" ]; then
+    echo "WARNING: Could not retrieve test logs from API"
+    [ "$STATUS" = "Finished" ] && exit 0 || exit 1
 fi
 
-TOTAL=$(( ${PASSED:-0} + ${FAILED:-0} + ${SKIPPED:-0} ))
-echo ""
-echo "Results: $TOTAL total, ${PASSED:-0} passed, ${FAILED:-0} failed, ${SKIPPED:-0} skipped"
+echo "$LOGS" | py3 -c "
+import sys, json
 
-if [ "${FAILED:-0}" -gt 0 ]; then exit 1; fi
-if [ "${PASSED:-0}" -gt 0 ]; then exit 0; fi
-echo "ERROR: No tests executed"
-exit 1
+data = json.load(sys.stdin)
+logs = data.get('value', [])
+
+passed = 0
+failed = 0
+for l in logs:
+    success = l.get('success', False)
+    cu_name = l.get('codeunitName', 'Unknown')
+    fn_name = l.get('functionName', '')
+    error = l.get('errorMessage', '')
+
+    if success:
+        passed += 1
+        print(f'  PASS  {cu_name}::{fn_name}')
+    else:
+        failed += 1
+        line = f'  FAIL  {cu_name}::{fn_name}'
+        if error:
+            line += f' -- {error[:120]}'
+        print(line)
+
+total = passed + failed
+print(f'')
+print(f'Results: {total} total, {passed} passed, {failed} failed')
+
+if failed > 0:
+    sys.exit(1)
+elif passed > 0:
+    sys.exit(0)
+else:
+    print('ERROR: No tests executed')
+    sys.exit(1)
+"
