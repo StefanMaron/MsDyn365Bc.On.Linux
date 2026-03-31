@@ -270,7 +270,7 @@ RESULT=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdi
 # If trigger timed out, poll for completion
 if [ "$STATUS" = "Running" ] || [ "$STATUS" = "Pending" ]; then
     echo "  Trigger returned HTTP $EXEC_HTTP after ${ELAPSED}s, polling..."
-    DEADLINE=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
+    DEADLINE=$(( START_TIME + TIMEOUT_MIN * 60 ))
     while [ $(date +%s) -lt $DEADLINE ]; do
         sleep 3
         STATUS_RESP=$(curl -sf --max-time 10 -u "$AUTH" "${API_URL}(${REQUEST_ID})" 2>/dev/null || true)
