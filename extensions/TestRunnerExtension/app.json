@@ -2,7 +2,7 @@
     "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     "name": "Test Runner Extension",
     "publisher": "ALDirectCompile",
-    "version": "2.0.3.0",
+    "version": "2.1.0.0",
     "runtime": "16.0",
     "target": "Cloud",
     "dependencies": [

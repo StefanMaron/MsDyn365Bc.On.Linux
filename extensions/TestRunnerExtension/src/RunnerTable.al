@@ -66,7 +66,7 @@ table 50003 "Codeunit Run Request"
         /// When set, RunCodeunit() iterates over all matching IDs.
         /// Takes precedence over CodeunitId when non-empty.
         /// </remarks>
-        field(6; CodeunitIds; Text[250])
+        field(6; CodeunitIds; Text[2048])
         {
             Caption = 'Codeunit Ids';
             DataClassification = SystemMetadata;
