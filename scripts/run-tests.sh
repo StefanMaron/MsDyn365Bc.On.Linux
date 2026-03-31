@@ -224,8 +224,7 @@ if [ -z "$CODEUNIT_IDS" ]; then
     exit 1
 fi
 
-CU_COUNT=$(echo "$CODEUNIT_IDS" | tr ',' '\n' | wc -l)
-echo "Test codeunits: $CODEUNIT_IDS ($CU_COUNT)"
+echo "Test codeunits: $CODEUNIT_IDS"
 
 # --- Execute tests via REST API ---
 echo ""
