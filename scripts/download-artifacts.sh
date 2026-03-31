@@ -92,9 +92,10 @@ unzip -qo "$TMPDIR_DL/app.zip" -d "$DEST/app"
 PLATFORM_VERSION=$(python3 -c "import json; print(json.load(open('$DEST/app/manifest.json'))['platform'])" 2>/dev/null)
 echo "[artifacts] Platform version: $PLATFORM_VERSION"
 
-echo "[artifacts] Extracting platform (ServiceTier, ModernDev, applications, Test Assemblies)..."
+echo "[artifacts] Extracting platform (ServiceTier, ModernDev, WebClient, applications, Test Assemblies)..."
 # Selective extraction keeps only what the service tier needs (~50% of the zip)
-unzip -qo "$TMPDIR_DL/platform.zip" 'ServiceTier/*' 'ModernDev/*' 'applications/*' 'Test Assemblies/*' -d "$DEST/platform" 2>/dev/null || \
+# WebClient is needed for TestPage client DLLs (page testability in tests)
+unzip -qo "$TMPDIR_DL/platform.zip" 'ServiceTier/*' 'ModernDev/*' 'WebClient/*' 'applications/*' 'Test Assemblies/*' -d "$DEST/platform" 2>/dev/null || \
     unzip -qo "$TMPDIR_DL/platform.zip" -d "$DEST/platform"
 
 T_DONE=$(_ms)

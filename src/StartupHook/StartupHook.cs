@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -118,6 +119,8 @@ internal class StartupHook
         SetupStubWithResolver("System.Diagnostics.PerformanceCounter");
         SetupStubWithResolver("System.Security.Principal.Windows");
 
+        // Also handle assembly resolution for tenant ALCs (TestPageClient loads in non-default contexts)
+        AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;
         AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad;
         TryEagerPatch();
 
@@ -1451,12 +1454,62 @@ internal class StartupHook
         Console.WriteLine($"[StartupHook] {assemblyName} stub ready (via resolver)");
     }
 
+    // Map of TestPageClient dependency assemblies to the actual DLLs that contain them.
+    // TestPageClient.dll references these as separate assemblies, but on the server tier
+    // the types live in Client.UI.dll and Client.Builder.dll.
+    private static readonly Dictionary<string, string> _testPageClientRedirects = new()
+    {
+        ["Microsoft.Dynamics.Nav.Client.TestPageClient"] = "Microsoft.Dynamics.Nav.Client.TestPageClient.dll",
+        ["Microsoft.Dynamics.Nav.Client.Actions"] = "Microsoft.Dynamics.Nav.Client.UI.dll",
+        ["Microsoft.Dynamics.Nav.Client.Controls"] = "Microsoft.Dynamics.Nav.Client.UI.dll",
+        ["Microsoft.Dynamics.Nav.Client.DataBinder"] = "Microsoft.Dynamics.Nav.Client.UI.dll",
+        ["Microsoft.Dynamics.Nav.Client.FormBuilder"] = "Microsoft.Dynamics.Nav.Client.Builder.dll",
+        ["Microsoft.Dynamics.Nav.Client.Formatters.Decorators"] = "Microsoft.Dynamics.Nav.Client.UI.dll",
+    };
+
     private static Assembly? ResolveStubAssembly(AssemblyLoadContext context, AssemblyName name)
     {
         if (name.Name != null && _stubBytesMap.TryGetValue(name.Name, out var bytes))
         {
             Console.WriteLine($"[StartupHook] Providing {name.Name} stub via resolver");
             return Assembly.Load(bytes);
+        }
+
+        // Redirect TestPageClient dependencies to the actual service tier DLLs
+        if (name.Name != null && _testPageClientRedirects.TryGetValue(name.Name, out var targetDll))
+        {
+            foreach (var dir in new[] { "/bc/service", Path.GetDirectoryName(typeof(StartupHook).Assembly.Location) ?? "" })
+            {
+                var targetPath = Path.Combine(dir, targetDll);
+                if (File.Exists(targetPath))
+                {
+                    Console.WriteLine($"[StartupHook] Redirecting {name.Name} → {targetPath} (TestPage support)");
+                    return context.LoadFromAssemblyPath(targetPath);
+                }
+            }
+            Console.WriteLine($"[StartupHook] WARNING: Cannot redirect {name.Name} — {targetDll} not found");
+        }
+
+        return null;
+    }
+
+    private static Assembly? OnAssemblyResolve(object? sender, ResolveEventArgs args)
+    {
+        var name = new AssemblyName(args.Name);
+        // Log ALL resolve attempts to diagnose TestPageClient loading
+        if (name.Name != null && name.Name.Contains("Dynamics"))
+            Console.WriteLine($"[StartupHook] AssemblyResolve attempt: {name.Name} (from {args.RequestingAssembly?.GetName().Name ?? "?"})");
+        if (name.Name != null && _testPageClientRedirects.TryGetValue(name.Name, out var targetDll))
+        {
+            foreach (var dir in new[] { "/bc/service", Path.GetDirectoryName(typeof(StartupHook).Assembly.Location) ?? "" })
+            {
+                var targetPath = Path.Combine(dir, targetDll);
+                if (File.Exists(targetPath))
+                {
+                    Console.WriteLine($"[StartupHook] AssemblyResolve: {name.Name} → {targetPath}");
+                    return Assembly.LoadFrom(targetPath);
+                }
+            }
         }
         return null;
     }

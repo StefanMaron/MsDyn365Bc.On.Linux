@@ -1,0 +1,9 @@
+{
+  "name": "Test Runner Extension Ruleset",
+  "rules": [
+    { "id": "PC0025", "action": "None", "justification": "Using custom Id key fields for API compatibility with bc-test client" },
+    { "id": "PC0026", "action": "None", "justification": "SystemId/lastModifiedDateTime not required for internal test runner API" },
+    { "id": "AA0215", "action": "None", "justification": "File naming not enforced for internal tools" },
+    { "id": "AA0102", "action": "None", "justification": "Field control names use PascalCase for internal API" }
+  ]
+}

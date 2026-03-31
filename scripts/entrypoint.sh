@@ -133,6 +133,20 @@ else
     log_step "Service tier already set up."
 fi
 
+# Copy WebClient DLLs needed for TestPage (page testability in tests).
+# TestPageClient.dll depends on client framework DLLs that are only in WebClient.
+WC_DIR=$(find "$ARTIFACTS/platform/WebClient" -name "Microsoft.Dynamics.Nav.Client.Actions.dll" -printf "%h\n" 2>/dev/null | head -1)
+if [ -n "$WC_DIR" ] && [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Client.Actions.dll" ]; then
+    for dll in Microsoft.Dynamics.Nav.Client.Actions.dll \
+               Microsoft.Dynamics.Nav.Client.Controls.dll \
+               Microsoft.Dynamics.Nav.Client.DataBinder.dll \
+               Microsoft.Dynamics.Nav.Client.FormBuilder.dll \
+               Microsoft.Dynamics.Nav.Client.Formatters.Decorators.dll; do
+        [ -f "$WC_DIR/$dll" ] && cp "$WC_DIR/$dll" "$SERVICE_DIR/$dll"
+    done
+    echo "[entrypoint] Copied WebClient DLLs for TestPage support"
+fi
+
 # Override framework DLLs (must run every container start, not just first setup)
 cp /bc/hook/System.Security.Principal.Windows.dll /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.*/
 cp /bc/hook/Microsoft.AspNetCore.Server.HttpSys.dll /usr/share/dotnet/shared/Microsoft.AspNetCore.App/8.0.*/
