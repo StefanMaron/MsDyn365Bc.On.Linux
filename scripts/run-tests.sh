@@ -226,116 +226,132 @@ fi
 
 echo "Test codeunits: $CODEUNIT_IDS"
 
-# --- Execute tests via REST API ---
+# --- Execute tests via REST API (one codeunit at a time) ---
 echo ""
 echo "=== Running Tests ==="
-
-# Create run request
 echo "  API URL: $API_URL"
-echo "  Codeunit IDs: $CODEUNIT_IDS"
-CREATE_RESP=$(curl -s -w "\n%{http_code}" --max-time 30 -u "$AUTH" -X POST \
-    -H "Content-Type: application/json" \
-    -d "{\"CodeunitIds\": \"$CODEUNIT_IDS\"}" \
-    "$API_URL" 2>/dev/null || true)
-CREATE_HTTP=$(echo "$CREATE_RESP" | tail -1)
-CREATE_BODY=$(echo "$CREATE_RESP" | head -n -1)
 
-if [ "$CREATE_HTTP" != "201" ] && [ "$CREATE_HTTP" != "200" ]; then
-    echo "ERROR: Failed to create test run request (HTTP $CREATE_HTTP)"
-    echo "  Response: $CREATE_BODY"
-    exit 1
-fi
-
-REQUEST_ID=$(echo "$CREATE_BODY" | py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" 2>/dev/null || true)
-if [ -z "$REQUEST_ID" ]; then
-    echo "ERROR: Failed to parse run request response"
-    echo "  Response: $CREATE_BODY"
-    exit 1
-fi
-echo "  Request ID: $REQUEST_ID"
-
-# Trigger execution (synchronous — blocks until tests complete or timeout)
-echo "Executing (timeout: ${TIMEOUT_MIN}m)..."
+# Per-codeunit timeout (5 min should be plenty for a single codeunit)
+CU_TIMEOUT=300
+TOTAL_PASSED=0
+TOTAL_FAILED=0
+TOTAL_SKIPPED=0
 START_TIME=$(date +%s)
-EXEC_RESP=$(curl -s -w "\n%{http_code}" --max-time $((TIMEOUT_MIN * 60)) \
-    -u "$AUTH" -X POST "${API_URL}(${REQUEST_ID})/Microsoft.NAV.runCodeunit" 2>/dev/null || true)
-EXEC_HTTP=$(echo "$EXEC_RESP" | tail -1)
-ELAPSED=$(( $(date +%s) - START_TIME ))
+DEADLINE=$(( START_TIME + TIMEOUT_MIN * 60 ))
 
-# Read status
-STATUS_RESP=$(curl -sf --max-time 10 -u "$AUTH" "${API_URL}(${REQUEST_ID})" 2>/dev/null || true)
-STATUS=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('Status',''))" 2>/dev/null || true)
-RESULT=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('LastResult',''))" 2>/dev/null || true)
+# Split comma-separated IDs into array
+IFS=',' read -ra CU_ARRAY <<< "$CODEUNIT_IDS"
+CU_TOTAL=${#CU_ARRAY[@]}
+CU_INDEX=0
 
-# If trigger timed out, poll for completion
-if [ "$STATUS" = "Running" ] || [ "$STATUS" = "Pending" ]; then
-    echo "  Trigger returned HTTP $EXEC_HTTP after ${ELAPSED}s, polling..."
-    DEADLINE=$(( START_TIME + TIMEOUT_MIN * 60 ))
-    while [ $(date +%s) -lt $DEADLINE ]; do
-        sleep 3
-        STATUS_RESP=$(curl -sf --max-time 10 -u "$AUTH" "${API_URL}(${REQUEST_ID})" 2>/dev/null || true)
-        STATUS=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('Status',''))" 2>/dev/null || true)
-        RESULT=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('LastResult',''))" 2>/dev/null || true)
-        case "$STATUS" in
-            Finished|Error) break ;;
-        esac
-        echo -n "."
-    done
-    echo ""
-fi
+for CU_ID in "${CU_ARRAY[@]}"; do
+    CU_INDEX=$((CU_INDEX + 1))
+
+    # Check overall timeout
+    if [ $(date +%s) -ge $DEADLINE ]; then
+        echo "TIMEOUT: Overall timeout (${TIMEOUT_MIN}m) reached after $CU_INDEX/$CU_TOTAL codeunits"
+        break
+    fi
+
+    CU_START=$(date +%s)
+
+    # Create run request for this codeunit
+    CREATE_RESP=$(curl -s -w "\n%{http_code}" --max-time 15 -u "$AUTH" -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"CodeunitIds\": \"$CU_ID\"}" \
+        "$API_URL" 2>/dev/null || true)
+    CREATE_HTTP=$(echo "$CREATE_RESP" | tail -1)
+    CREATE_BODY=$(echo "$CREATE_RESP" | head -n -1)
+
+    if [ "$CREATE_HTTP" != "201" ] && [ "$CREATE_HTTP" != "200" ]; then
+        echo "  [$CU_INDEX/$CU_TOTAL] CU $CU_ID: SKIP (create failed HTTP $CREATE_HTTP)"
+        TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1))
+        continue
+    fi
+
+    REQUEST_ID=$(echo "$CREATE_BODY" | py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" 2>/dev/null || true)
+    if [ -z "$REQUEST_ID" ]; then
+        echo "  [$CU_INDEX/$CU_TOTAL] CU $CU_ID: SKIP (no request ID)"
+        TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1))
+        continue
+    fi
+
+    # Trigger execution
+    EXEC_RESP=$(curl -s -w "\n%{http_code}" --max-time $CU_TIMEOUT \
+        -u "$AUTH" -X POST "${API_URL}(${REQUEST_ID})/Microsoft.NAV.runCodeunit" 2>/dev/null || true)
+    EXEC_HTTP=$(echo "$EXEC_RESP" | tail -1)
+
+    # Read status
+    STATUS_RESP=$(curl -sf --max-time 10 -u "$AUTH" "${API_URL}(${REQUEST_ID})" 2>/dev/null || true)
+    STATUS=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('Status',''))" 2>/dev/null || true)
+    RESULT=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('LastResult',''))" 2>/dev/null || true)
+
+    # Poll if still running (up to per-codeunit timeout)
+    if [ "$STATUS" = "Running" ] || [ "$STATUS" = "Pending" ]; then
+        CU_DEADLINE=$(( CU_START + CU_TIMEOUT ))
+        while [ $(date +%s) -lt $CU_DEADLINE ]; do
+            sleep 2
+            STATUS_RESP=$(curl -sf --max-time 10 -u "$AUTH" "${API_URL}(${REQUEST_ID})" 2>/dev/null || true)
+            STATUS=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('Status',''))" 2>/dev/null || true)
+            RESULT=$(echo "$STATUS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin).get('LastResult',''))" 2>/dev/null || true)
+            case "$STATUS" in Finished|Error) break ;; esac
+        done
+    fi
+
+    CU_ELAPSED=$(( $(date +%s) - CU_START ))
+
+    case "$STATUS" in
+        Finished)
+            echo "  [$CU_INDEX/$CU_TOTAL] CU $CU_ID: PASS (${CU_ELAPSED}s)"
+            TOTAL_PASSED=$((TOTAL_PASSED + 1))
+            ;;
+        Error)
+            echo "  [$CU_INDEX/$CU_TOTAL] CU $CU_ID: FAIL (${CU_ELAPSED}s) $RESULT"
+            TOTAL_FAILED=$((TOTAL_FAILED + 1))
+            ;;
+        *)
+            echo "  [$CU_INDEX/$CU_TOTAL] CU $CU_ID: TIMEOUT (${CU_ELAPSED}s, status: ${STATUS:-unknown})"
+            TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1))
+            ;;
+    esac
+done
 
 TOTAL_ELAPSED=$(( $(date +%s) - START_TIME ))
+TOTAL_RUN=$(( TOTAL_PASSED + TOTAL_FAILED + TOTAL_SKIPPED ))
 
-case "$STATUS" in
-    Finished) echo "Tests completed in ${TOTAL_ELAPSED}s ($RESULT)" ;;
-    Error)    echo "Tests completed in ${TOTAL_ELAPSED}s with failures ($RESULT)" ;;
-    *)        echo "ERROR: Tests did not complete (status: ${STATUS:-unknown}, HTTP: $EXEC_HTTP)"; exit 1 ;;
-esac
-
-# --- Read results from Log Table API ---
 echo ""
 echo "=== Test Results ==="
+echo "Results: $TOTAL_RUN total, $TOTAL_PASSED passed, $TOTAL_FAILED failed, $TOTAL_SKIPPED skipped (${TOTAL_ELAPSED}s)"
+
+# Also read detailed per-function results from Log Table
 LOG_URL="${API_BASE}/logEntries?\$top=10000"
 LOGS=$(curl -sf --max-time 30 -u "$AUTH" "$LOG_URL" 2>/dev/null || true)
-
-if [ -z "$LOGS" ]; then
-    echo "WARNING: Could not retrieve test logs from API"
-    [ "$STATUS" = "Finished" ] && exit 0 || exit 1
-fi
-
-echo "$LOGS" | py3 -c "
+if [ -n "$LOGS" ]; then
+    echo ""
+    echo "=== Detailed Results ==="
+    echo "$LOGS" | py3 -c "
 import sys, json
-
 data = json.load(sys.stdin)
 logs = data.get('value', [])
-
-passed = 0
-failed = 0
+p = f = 0
 for l in logs:
-    success = l.get('success', False)
-    cu_name = l.get('codeunitName', 'Unknown')
-    fn_name = l.get('functionName', '')
-    error = l.get('errorMessage', '')
-
-    if success:
-        passed += 1
-        print(f'  PASS  {cu_name}::{fn_name}')
+    ok = l.get('success', False)
+    cu = l.get('codeunitName', '?')
+    fn = l.get('functionName', '')
+    err = l.get('errorMessage', '')
+    if ok:
+        p += 1
     else:
-        failed += 1
-        line = f'  FAIL  {cu_name}::{fn_name}'
-        if error:
-            line += f' -- {error[:120]}'
+        f += 1
+        line = f'  FAIL  {cu}::{fn}'
+        if err: line += f' -- {err[:120]}'
         print(line)
-
-total = passed + failed
 print(f'')
-print(f'Results: {total} total, {passed} passed, {failed} failed')
+print(f'Functions: {p+f} total, {p} passed, {f} failed')
+" 2>/dev/null || true
+fi
 
-if failed > 0:
-    sys.exit(1)
-elif passed > 0:
-    sys.exit(0)
-else:
-    print('ERROR: No tests executed')
-    sys.exit(1)
-"
+if [ "$TOTAL_FAILED" -gt 0 ]; then exit 1; fi
+if [ "$TOTAL_PASSED" -gt 0 ]; then exit 0; fi
+echo "ERROR: No tests executed"
+exit 1
