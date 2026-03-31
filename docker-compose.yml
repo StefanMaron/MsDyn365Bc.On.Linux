@@ -35,6 +35,7 @@ services:
       BC_TYPE: ${BC_TYPE:-sandbox}
       SA_PASSWORD: ${SA_PASSWORD:-Passw0rd123!}
       BC_CLEAR_ALL_APPS: ${BC_CLEAR_ALL_APPS:-false}
+      BC_SKIP_APP_PUBLISH: ${BC_SKIP_APP_PUBLISH:-false}
       SQL_SERVER: sql
     volumes:
       - bc-artifacts:/bc/artifacts

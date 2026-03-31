@@ -417,34 +417,39 @@ exec 3>/tmp/bc-stdin
     # TODO: Selectively rename only the DLLs that cause Cecil type-forwarding issues.
     echo "[entrypoint] Patch #15: Skipped (merged assemblies handle type-forwarding)"
 
-    # Publish test framework apps. These are needed for running AL tests.
-    # BC pre-loads them as "global" apps but doesn't install for the tenant.
-    # We cleared the stale global entries at DB setup so we can re-publish here.
-    echo "[entrypoint] Publishing test framework..."
-    # Use find to handle spaces in filenames (e.g. "Test Runner")
-    find "$ARTIFACTS" -name "*.app" -type f \( \
-        -name "Microsoft_Test Runner_*" -o \
-        -name "Microsoft_Library Assert_*" -o \
-        -name "Microsoft_Library Variable Storage_*" -o \
-        -name "Microsoft_Permissions Mock_*" -o \
-        -name "Microsoft_Any_*" \
-    \) 2>/dev/null | sort | while read -r app; do
-        NAME=$(basename "$app")
-        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
-            -u "admin:Admin123!" -X POST \
-            -F "file=@$app;type=application/octet-stream" \
-            "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
-        echo "[entrypoint]   $NAME: HTTP $HTTP"
-    done
+    # Publish test framework apps unless caller will handle all publishing.
+    # BC_SKIP_APP_PUBLISH=true: skip all publishing (caller manages extensions)
+    if [ "${BC_SKIP_APP_PUBLISH:-false}" = "true" ]; then
+        echo "[entrypoint] Skipping app publishing (BC_SKIP_APP_PUBLISH=true)"
+    else
+        # BC pre-loads them as "global" apps but doesn't install for the tenant.
+        # We cleared the stale global entries at DB setup so we can re-publish here.
+        echo "[entrypoint] Publishing test framework..."
+        # Use find to handle spaces in filenames (e.g. "Test Runner")
+        find "$ARTIFACTS" -name "*.app" -type f \( \
+            -name "Microsoft_Test Runner_*" -o \
+            -name "Microsoft_Library Assert_*" -o \
+            -name "Microsoft_Library Variable Storage_*" -o \
+            -name "Microsoft_Permissions Mock_*" -o \
+            -name "Microsoft_Any_*" \
+        \) 2>/dev/null | sort | while read -r app; do
+            NAME=$(basename "$app")
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
+                -u "admin:Admin123!" -X POST \
+                -F "file=@$app;type=application/octet-stream" \
+                "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
+            echo "[entrypoint]   $NAME: HTTP $HTTP"
+        done
 
-    # Publish our TestRunner Extension (custom API for test execution, depends on MS Test Runner)
-    if [ -f /bc/testrunner/TestRunner.app ]; then
-        echo "[entrypoint] Publishing Test Runner Extension..."
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-            -u "admin:Admin123!" -X POST \
-            -F "file=@/bc/testrunner/TestRunner.app;type=application/octet-stream" \
-            "$DEV_URL/apps?SchemaUpdateMode=synchronize" 2>&1)
-        echo "[entrypoint] Test Runner Extension: HTTP $HTTP_CODE"
+        # Publish our TestRunner Extension (custom API for test execution, depends on MS Test Runner)
+        if [ -f /bc/testrunner/TestRunner.app ]; then
+            echo "[entrypoint] Publishing Test Runner Extension..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+                -u "admin:Admin123!" -X POST \
+                -F "file=@/bc/testrunner/TestRunner.app;type=application/octet-stream" \
+                "$DEV_URL/apps?SchemaUpdateMode=synchronize" 2>&1)
+            echo "[entrypoint] Test Runner Extension: HTTP $HTTP_CODE"
+        fi
     fi
     echo "[entrypoint] Ready for extensions."
     touch /tmp/bc-ready
