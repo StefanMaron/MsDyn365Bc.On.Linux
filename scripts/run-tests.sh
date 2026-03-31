@@ -101,7 +101,7 @@ print(c.get('id', c.get('SystemId', '')))
 if [ -z "$COMPANY" ]; then
     COMPANY="${COMPANY_AUTO:-CRONUS International Ltd.}"
 fi
-echo "Company: $COMPANY"
+echo "Company: $COMPANY (ID: ${COMPANY_ID:-none})"
 
 # If we got a name but no ID (OData V4 doesn't return GUID), look up ID via API
 if [ -z "$COMPANY_ID" ]; then
@@ -232,22 +232,28 @@ echo ""
 echo "=== Running Tests ==="
 
 # Create run request
-CREATE_RESP=$(curl -sf --max-time 30 -u "$AUTH" -X POST \
+echo "  API URL: $API_URL"
+echo "  Codeunit IDs: $CODEUNIT_IDS"
+CREATE_RESP=$(curl -s -w "\n%{http_code}" --max-time 30 -u "$AUTH" -X POST \
     -H "Content-Type: application/json" \
     -d "{\"CodeunitIds\": \"$CODEUNIT_IDS\"}" \
     "$API_URL" 2>/dev/null || true)
+CREATE_HTTP=$(echo "$CREATE_RESP" | tail -1)
+CREATE_BODY=$(echo "$CREATE_RESP" | head -n -1)
 
-if [ -z "$CREATE_RESP" ]; then
-    echo "ERROR: Failed to create test run request"
+if [ "$CREATE_HTTP" != "201" ] && [ "$CREATE_HTTP" != "200" ]; then
+    echo "ERROR: Failed to create test run request (HTTP $CREATE_HTTP)"
+    echo "  Response: $CREATE_BODY"
     exit 1
 fi
 
-REQUEST_ID=$(echo "$CREATE_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" 2>/dev/null || true)
+REQUEST_ID=$(echo "$CREATE_BODY" | py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" 2>/dev/null || true)
 if [ -z "$REQUEST_ID" ]; then
     echo "ERROR: Failed to parse run request response"
-    echo "  Response: $CREATE_RESP"
+    echo "  Response: $CREATE_BODY"
     exit 1
 fi
+echo "  Request ID: $REQUEST_ID"
 
 # Trigger execution (synchronous — blocks until tests complete or timeout)
 echo "Executing (timeout: ${TIMEOUT_MIN}m)..."

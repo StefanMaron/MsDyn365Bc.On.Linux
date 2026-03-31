@@ -43,8 +43,8 @@ COPY --from=builder /build/output/DrawingStub.dll /bc/addins-overlay/System.Draw
 COPY scripts/ /bc/scripts/
 RUN chmod +x /bc/scripts/*.sh
 
-# Copy test runner extension (optional)
-COPY extensions/TestRunnerExtension/TestRunner.app /bc/testrunner/TestRunner.app
+# Copy test runner extension (REST API for test execution)
+COPY extensions/TestRunnerExtension/TestRunnerExtension.app /bc/testrunner/TestRunner.app
 
 ENV DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll
 EXPOSE 7045-7054 7083 7085-7089
