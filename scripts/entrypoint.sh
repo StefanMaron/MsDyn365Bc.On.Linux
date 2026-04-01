@@ -343,10 +343,11 @@ fi
 $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1 WHERE tenantid = 'default';" 2>/dev/null
 
 # Clear pre-installed apps before BC starts.
-# BC_CLEAR_ALL_APPS=true: clear ALL apps and republish them dynamically after NST starts
-#   (allows NST to start clean — no extension sync/compile on first boot)
-# Default: only clear test framework apps (Test Runner, Library Assert, etc.)
-if [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ]; then
+# BC_CLEAR_ALL_APPS=true:      clear ALL apps, republish ALL dynamically after NST starts (~300s)
+# BC_CLEAR_ALL_APPS=deps-only: clear ALL apps, republish ONLY test framework after NST starts (~30s)
+#   (caller is responsible for publishing the actual dependency chain via dev endpoint)
+# Default (false):             only clear test framework apps (Test Runner, Library Assert, etc.)
+if [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] || [ "${BC_CLEAR_ALL_APPS:-false}" = "deps-only" ]; then
     # Snapshot the full list of published apps + dependency graph BEFORE clearing,
     # so we can republish them after NST starts.
     log_step "BC_CLEAR_ALL_APPS=true: snapshotting installed extensions..."
@@ -546,7 +547,10 @@ exec 3>/tmp/bc-stdin
         # BC_CLEAR_ALL_APPS: republish all previously-installed extensions in
         # dependency order, then fall through to test framework publishing below.
         # -------------------------------------------------------------------------
-        if [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] && [ -f "/tmp/bc-apps-to-republish.tsv" ]; then
+        if [ "${BC_CLEAR_ALL_APPS:-false}" = "deps-only" ]; then
+            TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
+            echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS=deps-only: skipping full republish (caller will publish dependency chain)"
+        elif [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] && [ -f "/tmp/bc-apps-to-republish.tsv" ]; then
             REPUBLISH_START=$(date +%s)
             TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
             echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS: republishing extensions in dependency order..."
