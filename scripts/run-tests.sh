@@ -222,6 +222,12 @@ ODATA_HOST="${BC_HOST}:7052"
 AUTH_USER="${AUTH%%:*}"
 AUTH_PASS="${AUTH#*:}"
 
+# Calculate max iterations: each codeunit needs ~2 iterations (run + reconnect after isolation)
+IFS=',' read -ra CU_ARRAY <<< "$CODEUNIT_IDS"
+NUM_CODEUNITS=${#CU_ARRAY[@]}
+MAX_ITER=$(( NUM_CODEUNITS * 3 + 20 ))
+echo "Executing $NUM_CODEUNITS codeunits via WebSocket (max $MAX_ITER iterations)..."
+
 dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
     --host "$WS_HOST" \
     --odata-host "$ODATA_HOST" \
@@ -231,7 +237,7 @@ dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
     --suite "DEFAULT" \
     --timeout "$TIMEOUT_MIN" \
     --codeunit-timeout 10 \
-    --max-iterations 500
+    --max-iterations "$MAX_ITER"
 EXIT_CODE=$?
 
 # The TestRunner already reads and prints results via OData.

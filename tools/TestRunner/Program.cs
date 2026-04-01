@@ -137,10 +137,11 @@ async Task<int> RunTests()
     // Limit iterations to roughly 2x the number of codeunits (each codeunit = 1 run + 1 reconnect)
     // plus extra buffer for the "All tests executed" detection.
     int numCodeunits = string.IsNullOrEmpty(codeunitFilter) ? 100 : codeunitFilter.Split(',').Length;
-    int effectiveMaxIterations = Math.Min(maxIterations, numCodeunits * 3 + 5);
+    // With test isolation (runner 130451), each codeunit kills the session.
+    // We need ~2 iterations per codeunit: one that runs + one empty reconnect.
+    int effectiveMaxIterations = Math.Min(maxIterations, numCodeunits * 3 + 10);
 
     Log($"Running tests via WebSocket ({numCodeunits} codeunits, max {effectiveMaxIterations} iterations)...");
-    int consecutiveEmpty = 0;  // track consecutive empty results to detect "done"
     for (int iteration = 0; iteration < effectiveMaxIterations; iteration++)
     {
         // Proactive reconnect before each RunNextTest.
@@ -193,21 +194,6 @@ async Task<int> RunTests()
         if (allDone)
         {
             Log("All tests executed (page confirmed)");
-            break;
-        }
-
-        // Track consecutive "empty" iterations (session dropped without new result).
-        // If RunNextTest throws ConnectionLost and testResultJson is empty, a codeunit ran.
-        // If we get empty results on reconnect without a session kill, all tests are done.
-        if (string.IsNullOrEmpty(testResultJson) && !allDone)
-            consecutiveEmpty++;
-        else
-            consecutiveEmpty = 0;
-
-        // After 3 consecutive empty iterations, assume all tests completed.
-        if (consecutiveEmpty >= 3)
-        {
-            Log("No more pending tests (3 consecutive empty results)");
             break;
         }
 
