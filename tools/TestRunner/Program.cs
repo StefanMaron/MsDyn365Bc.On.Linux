@@ -125,7 +125,6 @@ async Task<int> RunTests()
     // BC tracks which codeunit to run next in the Test Method Line table, so a
     // fresh session always advances to the next pending codeunit.
     int totalPassed = 0, totalFailed = 0, totalSkipped = 0;
-    var allResults = new List<JObject>();
     var startTime = DateTime.UtcNow;
 
     Console.WriteLine("\n=== Running Tests ===");
@@ -150,18 +149,9 @@ async Task<int> RunTests()
         }
 
         string testResultJson = "";
+        bool allDone = false;
         try
         {
-            // BC kills the AL session after each test-codeunit run (test isolation).
-            // It does NOT send a clean WebSocket close frame, so the pending Invoke hangs
-            // indefinitely.  We use a watchdog task that aborts the WebSocket after a
-            // deadline — this interrupts the StreamJsonRpc receive loop and causes
-            // ConnectionLostException to be thrown on the pending InvokeWithCancellationAsync.
-            //
-            // IMPORTANT: we do NOT link the watchdog to sessionEndedCts.  BC sends
-            // ClearClientMetadataCache for reasons other than session termination (e.g.
-            // after app publish), which would immediately cancel a linked token and silently
-            // disarm the watchdog before it could fire.
             var capturedRpc = rpc;
             var capturedWs = ws;
             _ = Task.Delay(TimeSpan.FromMinutes(codeunitTimeoutMin)).ContinueWith(_ =>
@@ -176,91 +166,95 @@ async Task<int> RunTests()
 
             // Try to read result while the connection is still alive.
             testResultJson = await ReadTestResultJson(rpc, formState!, cts.Token);
+            if (testResultJson == "All tests executed.")
+                allDone = true;
         }
         catch (Exception ex) when (ex is ConnectionLostException || ex is RemoteInvocationException || ex is OperationCanceledException)
         {
             // Expected: BC killed the session after the codeunit finished (test isolation).
-            // The result is committed to the Test Method Line table; the next iteration
-            // will reconnect and RunNextTest will advance to the next codeunit.
-            Console.Error.WriteLine($"  Session ended after codeunit (expected): {ex.Message[..Math.Min(60, ex.Message.Length)]}");
-            try { rpc.Dispose(); ws.Dispose(); } catch { }
-            await Task.Delay(500, CancellationToken.None);
-            continue;
+            Console.Error.WriteLine($"  Session ended after codeunit (expected)");
         }
 
         try { rpc.Dispose(); ws.Dispose(); } catch { }
 
-        if (testResultJson == "All tests executed.")
+        if (allDone)
         {
-            Console.WriteLine("All tests executed.");
+            Console.WriteLine("  All tests executed (page confirmed).");
             break;
         }
 
-        // Empty means the connection died after RunNextTest returned but before
-        // GetPage could read the result.  The codeunit results are already
-        // committed to the Test Method Line table.  Continue so the next
-        // iteration reconnects and advances to the next codeunit.
-        if (string.IsNullOrEmpty(testResultJson))
-        {
-            Console.Error.WriteLine("  TestResultJson empty (connection dropped after run) — continuing");
-            continue;
-        }
-
-        try
-        {
-            var parsed = JObject.Parse(testResultJson);
-            allResults.Add(parsed);
-            ProcessResult(parsed, ref totalPassed, ref totalFailed, ref totalSkipped);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"  Could not parse result JSON: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
-        }
+        await Task.Delay(500, CancellationToken.None);
     }
 
+    // Read final results from DB via OData — this is reliable regardless of
+    // whether the WebSocket session survived long enough to return TestResultJson.
     var elapsed = DateTime.UtcNow - startTime;
     Console.WriteLine($"\n=== Test Results ({elapsed.TotalSeconds:F0}s) ===");
-    foreach (var r in allResults)
-    {
-        var cu = r["codeUnit"]?.Value<int>() ?? 0;
-        var name = r["name"]?.ToString() ?? "";
-        var trs = r["testResults"] as JArray;
-        if (trs != null)
-            foreach (var tr in trs)
-            {
-                var method = tr["method"]?.ToString() ?? "";
-                var res = tr["result"]?.Value<int>() ?? 0;
-                var status = res == 2 ? "PASS" : res == 1 ? "FAIL" : "SKIP";
-                var msg = tr["message"]?.ToString() ?? "";
-                Console.Write($"  {status}  {cu} {name}::{method}");
-                if (res == 1 && msg.Length > 0) Console.Write($" — {msg[..Math.Min(120, msg.Length)]}");
-                Console.WriteLine();
-            }
-        else
-        {
-            var res = r["result"]?.Value<int>() ?? 0;
-            Console.WriteLine($"  {(res == 2 ? "PASS" : res == 1 ? "FAIL" : "SKIP")}  {cu} {name}");
-        }
-    }
-    int total = totalPassed + totalFailed + totalSkipped;
-    Console.WriteLine($"\nResults: {total} total, {totalPassed} passed, {totalFailed} failed, {totalSkipped} skipped");
-
-    return totalFailed > 0 ? 1 : (totalPassed > 0 ? 0 : 1);
+    return await ReadAndPrintResultsViaOData(authBytes, cts.Token);
 }
 
-void ProcessResult(JObject r, ref int passed, ref int failed, ref int skipped)
+async Task<int> ReadAndPrintResultsViaOData(byte[] authBytes, CancellationToken ct)
 {
-    var cu = r["codeUnit"]?.Value<int>() ?? 0;
-    var name = r["name"]?.ToString() ?? "";
-    var trs = r["testResults"] as JArray;
-    Console.Write($"  Codeunit {cu} {name} ");
-    if (trs != null && trs.Count > 0)
+    int totalPassed = 0, totalFailed = 0, totalSkipped = 0;
+    try
     {
-        int p = 0, f = 0, s = 0;
-        foreach (var tr in trs) { var res = tr["result"]?.Value<int>() ?? 0; if (res == 2) { p++; passed++; } else if (res == 1) { f++; failed++; } else { s++; skipped++; } }
-        Console.WriteLine($"({p} passed, {f} failed, {s} skipped)");
+        using var http = new HttpClient();
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Basic", Convert.ToBase64String(authBytes));
+        var apiBase = $"http://{odataHost}/BC/api/custom/automation/v1.0";
+
+        // Get company ID
+        var compResp = await http.GetStringAsync($"{apiBase}/companies?$filter=name eq '{Uri.EscapeDataString(company)}'");
+        var compId = JObject.Parse(compResp)["value"]?[0]?["id"]?.ToString();
+        if (compId == null) { Console.Error.WriteLine("Could not find company via OData"); return 1; }
+
+        // Read test results from Test Method Line table via OData
+        var filter = Uri.EscapeDataString($"testSuite eq 'DEFAULT' and lineType eq 'Function'");
+        var resultResp = await http.GetStringAsync($"{apiBase}/companies({compId})/testResults?$filter={filter}&$top=5000");
+        var results = JObject.Parse(resultResp)["value"] as JArray;
+        if (results == null || results.Count == 0)
+        {
+            Console.Error.WriteLine("No test results found via OData");
+            return 1;
+        }
+
+        int? lastCu = null;
+        foreach (var r in results)
+        {
+            var cuId = r["testCodeunit"]?.Value<int>() ?? 0;
+            var name = r["name"]?.ToString() ?? "";
+            var fn = r["functionName"]?.ToString() ?? "";
+            var result = r["result"]?.ToString() ?? "";
+            var errMsg = r["errorMessagePreview"]?.ToString() ?? "";
+
+            // Print codeunit header on change
+            if (lastCu != cuId)
+            {
+                if (lastCu != null) Console.WriteLine();
+                Console.WriteLine($"  Codeunit {cuId}: {name}");
+                lastCu = cuId;
+            }
+
+            var status = result switch { "Success" => "PASS", "Failure" => "FAIL", _ => "SKIP" };
+            // Result enum: " " = 0 (not run), Success = 2, Failure = 1, Skipped = 3
+            if (result == "Success" || result == "2") { totalPassed++; status = "PASS"; }
+            else if (result == "Failure" || result == "1") { totalFailed++; status = "FAIL"; }
+            else { totalSkipped++; status = "SKIP"; }
+
+            Console.Write($"    {status}  {fn}");
+            if (status == "FAIL" && errMsg.Length > 0)
+                Console.Write($" — {errMsg[..Math.Min(200, errMsg.Length)]}");
+            Console.WriteLine();
+        }
     }
-    else { var res = r["result"]?.Value<int>() ?? 0; if (res == 2) { passed++; Console.WriteLine("PASS"); } else if (res == 1) { failed++; Console.WriteLine("FAIL"); } else { skipped++; Console.WriteLine("SKIP"); } }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"OData result read failed: {ex.Message[..Math.Min(120, ex.Message.Length)]}");
+    }
+
+    int total = totalPassed + totalFailed + totalSkipped;
+    Console.WriteLine($"\nResults: {total} total, {totalPassed} passed, {totalFailed} failed, {totalSkipped} skipped");
+    return totalFailed > 0 ? 1 : (totalPassed > 0 ? 0 : 1);
 }
 
 async Task<string> ReadTestResultJson(JsonRpc rpc, JToken formState, CancellationToken ct)

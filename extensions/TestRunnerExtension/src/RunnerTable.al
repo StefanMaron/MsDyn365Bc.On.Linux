@@ -222,11 +222,9 @@ page 50002 "Codeunit Run Requests"
         if Rec.CodeunitIds = '' then
             exit(false);
 
-        // Use InitSuiteKeep to create suite without clearing, then set runner to
-        // 130451 (Isol. Codeunit) for proper test isolation via WebSocket execution.
+        // Use runner 130451 (Isol. Codeunit) for proper test isolation.
+        // Results are stored in Test Method Line (read via testResults OData API).
         SuiteRunner.InitSuite('DEFAULT');
-
-        // Override the runner to 130451 for WebSocket/page 130455 compatibility
         OverrideSuiteRunner('DEFAULT', 130451);
 
         // Parse comma-separated IDs and ranges (same as RunCodeunit)
