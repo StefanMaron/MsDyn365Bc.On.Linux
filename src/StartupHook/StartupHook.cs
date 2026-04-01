@@ -290,8 +290,21 @@ internal class StartupHook
             _kernel32StubHandle = NativeLibrary.Load(stubPath);
             Console.WriteLine("[StartupHook] Loaded Win32 stubs (kernel32/user32/advapi32/...)");
 
-            // Intercept kernel32.dll resolution for ALL assemblies
+            // Intercept kernel32.dll resolution for ALL assemblies in default ALC
             AssemblyLoadContext.Default.ResolvingUnmanagedDll += ResolveWin32Stubs;
+
+            // Also register on non-default ALCs (tenant ALCs, etc.) as they load assemblies.
+            // Framework.UI.dll loads in tenant ALCs and its P/Invokes (user32!ToUnicodeEx etc.)
+            // won't fire the Default ALC resolver.
+            var registeredAlcs = new HashSet<AssemblyLoadContext> { AssemblyLoadContext.Default };
+            AppDomain.CurrentDomain.AssemblyLoad += (sender, args) =>
+            {
+                var alc = AssemblyLoadContext.GetLoadContext(args.LoadedAssembly);
+                if (alc != null && registeredAlcs.Add(alc))
+                {
+                    alc.ResolvingUnmanagedDll += ResolveWin32Stubs;
+                }
+            };
         }
         catch (Exception ex)
         {
