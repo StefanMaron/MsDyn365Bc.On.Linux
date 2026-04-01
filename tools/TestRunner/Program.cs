@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
@@ -72,11 +73,13 @@ async Task<int> RunTests()
             using var http = new HttpClient();
             http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
                 "Basic", Convert.ToBase64String(authBytes));
-            // Discover company ID first, then create request and call SetupSuite
+            // Discover company ID via standard API
+            var compResp = await http.GetStringAsync($"http://{odataHost}/BC/api/v2.0/companies");
+            var companies = JObject.Parse(compResp)["value"] as JArray ?? new JArray();
+            var compId = companies.FirstOrDefault(c => c["name"]?.ToString() == company)?["id"]?.ToString()
+                ?? companies.FirstOrDefault()?["id"]?.ToString()
+                ?? "dcfa9b8e-552b-f111-9f23-7ced8d3f0294";
             var apiBase = $"http://{odataHost}/BC/api/custom/automation/v1.0";
-            var compResp = await http.GetAsync($"{apiBase}/companies?$filter=name eq '{Uri.EscapeDataString(company)}'");
-            var compJson = JObject.Parse(await compResp.Content.ReadAsStringAsync());
-            var compId = compJson["value"]?[0]?["id"]?.ToString() ?? "dcfa9b8e-552b-f111-9f23-7ced8d3f0294";
 
             // Create a run request with CodeunitIds
             var body = new StringContent(
@@ -204,8 +207,10 @@ async Task<int> ReadAndPrintResultsViaOData(byte[] authBytes, CancellationToken 
         var apiBase = $"http://{odataHost}/BC/api/custom/automation/v1.0";
 
         // Get company ID
-        var compResp = await http.GetStringAsync($"{apiBase}/companies?$filter=name eq '{Uri.EscapeDataString(company)}'");
-        var compId = JObject.Parse(compResp)["value"]?[0]?["id"]?.ToString();
+        var compResp = await http.GetStringAsync($"http://{odataHost}/BC/api/v2.0/companies");
+        var companies = JObject.Parse(compResp)["value"] as JArray ?? new JArray();
+        var compId = companies.FirstOrDefault(c => c["name"]?.ToString() == company)?["id"]?.ToString()
+            ?? companies.FirstOrDefault()?["id"]?.ToString();
         if (compId == null) { Console.Error.WriteLine("Could not find company via OData"); return 1; }
 
         // Read test results from Test Method Line table via OData
