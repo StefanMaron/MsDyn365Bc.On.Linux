@@ -24,9 +24,10 @@ RUN mkdir -p /build/output/refasm && \
 # Runtime stage: minimal image
 FROM mcr.microsoft.com/dotnet/aspnet:8.0
 
-# Install tools for artifact download and SQL setup
+# Install tools for artifact download and SQL setup + en_US locale
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl unzip python3 gnupg && \
+        curl unzip python3 gnupg locales && \
+    sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen && \
     curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql.list && \
     ACCEPT_EULA=Y apt-get update && ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18 && \
@@ -47,7 +48,9 @@ RUN chmod +x /bc/scripts/*.sh
 # Copy test runner extension (REST API for test execution)
 COPY extensions/TestRunnerExtension/TestRunnerExtension.app /bc/testrunner/TestRunner.app
 
-ENV DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll
+ENV DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8
 EXPOSE 7045-7054 7083 7085-7089
 
 ENTRYPOINT ["/bc/scripts/entrypoint.sh"]

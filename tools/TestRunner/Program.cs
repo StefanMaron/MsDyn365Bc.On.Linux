@@ -381,11 +381,20 @@ class Callbacks
     [JsonRpcMethod("FormRunModal")] public async Task FormRunModal(JToken r) => await AckCallback("FormRunModal");
     [JsonRpcMethod("FormClose")] public async Task FormClose(JToken r) => await AckCallback("FormClose");
     [JsonRpcMethod("FormActivate")] public async Task FormActivate(JToken r) => await AckCallback("FormActivate");
-    [JsonRpcMethod("SelectionMenu")] public async Task SelectionMenu(JToken r) => await AckCallback("SelectionMenu");
+    // StrMenu: respond with option 1 (first choice). Many tests trigger privacy consent
+    // dialogs — selecting the first option ("Allow Always") lets them proceed.
+    [JsonRpcMethod("SelectionMenu")] public async Task SelectionMenu(JToken r)
+    {
+        if (Rpc != null)
+            try { await Rpc.InvokeAsync("EndClientCall", new object?[] { 1 }); } catch { }
+    }
     [JsonRpcMethod("FileActionDialog")] public async Task FileActionDialog(JToken r) => await AckCallback("FileActionDialog");
     [JsonRpcMethod("FeedbackRequested")] public async Task FeedbackRequested(JToken r) => await AckCallback("FeedbackRequested");
     [JsonRpcMethod("CreateDotNetHandle")] public async Task CreateDotNetHandle(JToken r) => await AckCallback("CreateDotNetHandle");
     [JsonRpcMethod("GetDotNetObject")] public async Task GetDotNetObject(JToken r) => await AckCallback("GetDotNetObject");
+    // Dialog callbacks — BC sends these when AL code opens/closes dialogs
+    [JsonRpcMethod("CloseDialog")] public async Task CloseDialog(JToken r) => await AckCallback("CloseDialog");
+    [JsonRpcMethod("OpenDialog")] public async Task OpenDialog(JToken r) => await AckCallback("OpenDialog");
     [JsonRpcMethod("DisposeAutomationObject")] public Task DisposeAutomationObject(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("InvokeAutomationMethod")] public Task InvokeAutomationMethod(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("DataSetPageReady")] public Task DataSetPageReady(JToken r) => Task.CompletedTask;
