@@ -28,6 +28,7 @@ COMPANY=""
 CODEUNIT_RANGE=""
 APP_FILE=""
 TIMEOUT_MIN=30
+DISABLED_TESTS_DIR=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_RUNNER_APP=""
@@ -42,7 +43,8 @@ while [[ $# -gt 0 ]]; do
         --auth) AUTH="$2"; shift 2;;
         --timeout) TIMEOUT_MIN="$2"; shift 2;;
         --test-runner-app) TEST_RUNNER_APP="$2"; shift 2;;
-        --host|--test-runner|--suite-name|--codeunit-timeout|--extension-id|--disabled-tests|--sql-password) shift 2;;
+        --disabled-tests) DISABLED_TESTS_DIR="$2"; shift 2;;
+        --host|--test-runner|--suite-name|--codeunit-timeout|--extension-id|--sql-password) shift 2;;
         *) echo "Unknown option: $1"; exit 1;;
     esac
 done
@@ -208,6 +210,56 @@ else
     exit 1
 fi
 
+# === Disable Known-Failing Tests ===
+if [ -n "$DISABLED_TESTS_DIR" ] && [ -d "$DISABLED_TESTS_DIR" ]; then
+    # Read all DisabledTests JSON files and convert to "codeunitId:method,..." format
+    # BCApps format: [{"codeunitId": 132920, "method": "TestName"}, ...]
+    DISABLED_ENTRIES=$(find "$DISABLED_TESTS_DIR" -name "*.json" -exec cat {} + | py3 -c "
+import sys, json
+entries = json.load(sys.stdin)
+if not isinstance(entries, list):
+    entries = [entries]
+# Build compact format: codeunitId:method pairs
+pairs = []
+for e in entries:
+    cu = e.get('codeunitId', 0)
+    method = e.get('method', e.get('Method', ''))
+    if cu and method:
+        pairs.append(f'{cu}:{method}')
+# Split into chunks of max 2000 chars (API field limit)
+chunks = []
+current = ''
+for p in pairs:
+    if len(current) + len(p) + 1 > 2000:
+        chunks.append(current)
+        current = p
+    else:
+        current = f'{current},{p}' if current else p
+if current:
+    chunks.append(current)
+for c in chunks:
+    print(c)
+" 2>/dev/null)
+
+    if [ -n "$DISABLED_ENTRIES" ]; then
+        DISABLED_COUNT=0
+        while IFS= read -r CHUNK; do
+            # Create a request and call DisableTests
+            DIS_RESP=$(curl -s --max-time 15 -u "$AUTH" -X POST \
+                -H "Content-Type: application/json" \
+                -d "{\"CodeunitIds\": \"$CHUNK\"}" \
+                "${API_BASE}/codeunitRunRequests" 2>/dev/null)
+            DIS_ID=$(echo "$DIS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" 2>/dev/null || true)
+            if [ -n "$DIS_ID" ]; then
+                curl -s -o /dev/null --max-time 30 -u "$AUTH" -X POST \
+                    "${API_BASE}/codeunitRunRequests(${DIS_ID})/Microsoft.NAV.disableTests" 2>/dev/null
+                DISABLED_COUNT=$((DISABLED_COUNT + 1))
+            fi
+        done <<< "$DISABLED_ENTRIES"
+        echo "Disabled tests: $DISABLED_COUNT chunk(s) from $(find "$DISABLED_TESTS_DIR" -name "*.json" | wc -l) file(s)"
+    fi
+fi
+
 # === Execute Tests via WebSocket ===
 echo ""
 echo "=== Running Tests ==="
@@ -235,6 +287,7 @@ dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
     --user "$AUTH_USER" \
     --password "$AUTH_PASS" \
     --suite "DEFAULT" \
+    --codeunit-filter "$CODEUNIT_IDS" \
     --timeout "$TIMEOUT_MIN" \
     --codeunit-timeout 10 \
     --max-iterations "$MAX_ITER"

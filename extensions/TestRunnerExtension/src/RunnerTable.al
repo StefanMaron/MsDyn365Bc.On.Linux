@@ -247,6 +247,47 @@ page 50002 "Codeunit Run Requests"
         exit(true);
     end;
 
+    /// <summary>
+    /// Disables specific test methods in the DEFAULT suite.
+    /// DisabledTests field format: "codeunitId:method,codeunitId:method,..."
+    /// Use "*" as method to disable the entire codeunit.
+    /// Called after SetupSuite to exclude known-failing tests.
+    /// </summary>
+    [ServiceEnabled]
+    procedure DisableTests(): Boolean
+    var
+        SuiteRunner: Codeunit "Test Suite Runner";
+        EntryList: List of [Text];
+        Entry: Text;
+        ColonPos: Integer;
+        CuIdText: Text;
+        MethodName: Text;
+        CuId: Integer;
+        DisabledCount: Integer;
+    begin
+        if Rec.CodeunitIds = '' then
+            exit(false);
+
+        // CodeunitIds field is repurposed here to carry "codeunitId:method,..." pairs
+        SuiteRunner.InitSuiteKeep('DEFAULT');
+        EntryList := Rec.CodeunitIds.Split(',');
+        foreach Entry in EntryList do begin
+            ColonPos := Entry.IndexOf(':');
+            if ColonPos > 0 then begin
+                CuIdText := Entry.Substring(1, ColonPos - 1);
+                MethodName := Entry.Substring(ColonPos + 1);
+                if Evaluate(CuId, CuIdText) then begin
+                    SuiteRunner.DisableTestMethod(CuId, MethodName);
+                    DisabledCount += 1;
+                end;
+            end;
+        end;
+
+        Rec.LastResult := StrSubstNo('Disabled %1 tests', DisabledCount);
+        Rec.Modify(true);
+        exit(true);
+    end;
+
     local procedure OverrideSuiteRunner(SuiteName: Code[10]; RunnerId: Integer)
     var
         ALTestSuite: Record "AL Test Suite";
