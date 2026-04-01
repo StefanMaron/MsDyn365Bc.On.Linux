@@ -44,6 +44,24 @@ codeunit 50004 "Test Suite Runner"
     end;
 
     /// <summary>
+    /// Sets the suite name without clearing existing methods.
+    /// Used by the WS Test Runner page which manages its own lifecycle.
+    /// </summary>
+    procedure InitSuiteKeep(Name: Code[10])
+    var
+        ALTestSuite: Record "AL Test Suite";
+    begin
+        SuiteName := Name;
+
+        if not ALTestSuite.Get(SuiteName) then begin
+            ALTestSuite.Init();
+            ALTestSuite.Name := SuiteName;
+            ALTestSuite."Test Runner Id" := 130451;
+            ALTestSuite.Insert(true);
+        end;
+    end;
+
+    /// <summary>
     /// Adds a test codeunit to the suite. Uses codeunit 130452 (Test Runner - Get Methods)
     /// to discover all test methods in the codeunit.
     /// </summary>
