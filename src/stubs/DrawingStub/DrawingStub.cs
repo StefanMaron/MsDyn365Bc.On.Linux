@@ -56,6 +56,18 @@ namespace System.Drawing
         Rotate180FlipXY = RotateNoneFlipNone, Rotate270FlipXY = Rotate90FlipNone,
     }
 
+    public sealed class Icon : IDisposable
+    {
+        public Icon(Stream stream) { }
+        public Icon(Stream stream, int width, int height) { }
+        public Icon(string fileName) { }
+        public Icon(Icon original, int width, int height) { }
+        public int Width => 32;
+        public int Height => 32;
+        public Bitmap ToBitmap() => new Bitmap(Width, Height);
+        public void Dispose() { }
+    }
+
     public sealed class Bitmap : Image
     {
         public Bitmap(int width, int height) { }
