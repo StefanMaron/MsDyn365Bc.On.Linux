@@ -21,12 +21,33 @@ class Program
     {
         if (args.Length < 1)
         {
-            Console.WriteLine("Usage: PatchNclTestPage <Nav.Ncl.dll> [output.dll]");
+            Console.WriteLine("Usage: PatchNclTestPage <command> <input.dll> [output.dll]");
+            Console.WriteLine("Commands: ncl     - Patch Nav.Ncl.dll (Assembly.Load → LoadFrom)");
+            Console.WriteLine("          client  - Patch TestPageClient.dll (Async=true → false)");
             return 1;
         }
 
-        string inputPath = args[0];
-        string outputPath = args.Length > 1 ? args[1] : inputPath;
+        // Support both old (just file path) and new (command + path) syntax
+        string command, inputPath, outputPath;
+        if (args[0].EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+        {
+            command = "ncl";
+            inputPath = args[0];
+            outputPath = args.Length > 1 ? args[1] : inputPath;
+        }
+        else
+        {
+            command = args[0];
+            inputPath = args.Length > 1 ? args[1] : "";
+            outputPath = args.Length > 2 ? args[2] : inputPath;
+        }
+
+        if (command == "client")
+            return PatchTestPageClient.Run(inputPath, outputPath);
+        if (command == "types")
+            return PatchNavTypes.Run(inputPath, outputPath);
+
+        // Default: patch Nav.Ncl.dll
 
         if (!File.Exists(inputPath))
         {

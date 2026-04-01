@@ -199,6 +199,22 @@ if [ -f /bc/patched/Mono.Cecil.dll ]; then
     log_step "Applied patched Mono.Cecil.dll (CheckFileName empty path fix)"
 fi
 
+# Patch TestPage support: fix assembly loading and async deadlock
+# Nav.Ncl.dll: Assembly.Load (version-qualified) → Assembly.LoadFrom (file path)
+# TestPageClient.dll: CommunicationBroker Async=true → false (prevents dispatcher deadlock)
+if [ -f /bc/tools/patcher/PatchNclTestPage.dll ]; then
+    PATCHER="dotnet /bc/tools/patcher/PatchNclTestPage.dll"
+    if $PATCHER ncl "$SERVICE_DIR/Microsoft.Dynamics.Nav.Ncl.dll" 2>&1 | tail -1; then
+        log_step "Patched Nav.Ncl.dll (TestPage Assembly.Load → LoadFrom)"
+    fi
+    if $PATCHER client "$SERVICE_DIR/Microsoft.Dynamics.Nav.Client.TestPageClient.dll" 2>&1 | tail -1; then
+        log_step "Patched TestPageClient.dll (Async=true → false)"
+    fi
+    if $PATCHER types "$SERVICE_DIR/Microsoft.Dynamics.Nav.Types.dll" 2>&1 | tail -1; then
+        log_step "Patched Nav.Types.dll (TestClientProxy Assembly.Load → LoadFrom)"
+    fi
+fi
+
 # Fix Add-Ins directory case (Linux is case-sensitive, BC expects "Add-Ins")
 if [ -d "$SERVICE_DIR/Add-ins" ] && [ ! -d "$SERVICE_DIR/Add-Ins" ]; then
     mv "$SERVICE_DIR/Add-ins" "$SERVICE_DIR/Add-Ins"

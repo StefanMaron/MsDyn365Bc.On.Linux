@@ -11,8 +11,9 @@ RUN cd src/StartupHook && dotnet publish -c Release -o /build/output/hook
 
 RUN cp /build/src/stubs/DrawingStub/bin/Release/net8.0/System.Drawing.Common.dll /build/output/DrawingStub.dll
 
-# Publish MergeNetstandard as self-contained tool
+# Publish tools
 RUN cd src/tools/MergeNetstandard && dotnet publish -c Release -o /build/output/tools 2>&1 | tail -3
+RUN cd src/tools/PatchNclTestPage && dotnet publish -c Release -o /build/output/tools/patcher 2>&1 | tail -3
 
 # Copy .NET 8 reference assemblies from SDK (needed for Cecil type resolution)
 RUN mkdir -p /build/output/refasm && \

@@ -171,10 +171,18 @@ int16_t GetKeyState(int nVirtKey) { return 0; }
 uint32_t MapVirtualKeyExW(uint32_t uCode, uint32_t uMapType, intptr_t dwhkl) { return 0; }
 uint32_t MapVirtualKeyEx(uint32_t uCode, uint32_t uMapType, intptr_t dwhkl) { return 0; }
 
-// ToUnicodeEx: returns 0 (no translation)
+// ToUnicodeEx: returns 1 with a space character (null-terminated).
+// KeyboardMapper.ClearKeyboardBuffer loops until this returns 1,
+// so returning 0 causes an infinite loop.
 int ToUnicodeEx(uint32_t wVirtKey, uint32_t wScanCode, const uint8_t* lpKeyState,
                 uint16_t* pwszBuff, int cchBuff, uint32_t wFlags, intptr_t dwhkl) {
-    return 0;
+    if (cchBuff > 1) {
+        pwszBuff[0] = (uint16_t)' ';
+        pwszBuff[1] = 0;
+    } else if (cchBuff > 0) {
+        pwszBuff[0] = 0;
+    }
+    return 1;
 }
 
 // =============================================================================
