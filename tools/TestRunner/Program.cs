@@ -70,6 +70,17 @@ async Task<int> RunTests()
     }
     catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
 
+    // GetTestMethods populates the Test Method Line table with individual test functions.
+    // Without this, RunNextTest has no functions to run.
+    Console.Write("Populating test methods... ");
+    try
+    {
+        var r = await Invoke(rpc, formState, "GetTestMethods", cts.Token);
+        if (r?["DataSetState"] != null) formState = r["DataSetState"];
+        Console.WriteLine("OK");
+    }
+    catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
+
     rpc.Dispose(); ws.Dispose();
 
     // RunNextTest loop — reconnect BEFORE every call (mirrors BcContainerHelper's
@@ -259,7 +270,9 @@ async Task<(JsonRpc, ClientWebSocket, CancellationTokenSource)> Connect(byte[] a
     var rpc = new JsonRpc(new WebSocketMessageHandler(ws));
     rpc.TraceSource.Switch.Level = System.Diagnostics.SourceLevels.Verbose;
     rpc.TraceSource.Listeners.Add(tc);
-    rpc.AddLocalRpcTarget(new Callbacks(sessionEndedCts));
+    var callbacks = new Callbacks(sessionEndedCts);
+    rpc.AddLocalRpcTarget(callbacks);
+    callbacks.Rpc = rpc;
     rpc.StartListening();
     await rpc.InvokeWithCancellationAsync<JToken>("OpenConnection",
         new object[] { new { LCID = 1033, DefaultLCID = 1033, TimeZoneId = "UTC", Credentials = new { UserName = user, Password = password } } }, ct);
@@ -288,26 +301,41 @@ async Task<JToken?> OpenTestPage(JsonRpc rpc, MetadataTokenCapture tc, string co
 class Callbacks
 {
     private readonly CancellationTokenSource _sessionEndedCts;
+    public JsonRpc? Rpc { get; set; }
 
     public Callbacks(CancellationTokenSource sessionEndedCts) => _sessionEndedCts = sessionEndedCts;
 
-    // BC sends ClearClientMetadataCache (and sometimes OnSessionTerminating) right before
-    // killing the WebSocket session during test isolation.  We log receipt for diagnostics.
-    // NOTE: BC also sends ClearClientMetadataCache for other reasons (e.g. app publish),
-    // so receiving it does NOT reliably mean the session is ending.
-    [JsonRpcMethod("ClearClientMetadataCache")] public Task ClearClientMetadataCache() { Console.Error.WriteLine("  [notification] ClearClientMetadataCache received"); _sessionEndedCts.Cancel(); return Task.CompletedTask; }
-    [JsonRpcMethod("OnSessionTerminating")]     public Task OnSessionTerminating()      { Console.Error.WriteLine("  [notification] OnSessionTerminating received"); _sessionEndedCts.Cancel(); return Task.CompletedTask; }
+    // BC's client callback protocol: server sends a JSON-RPC call to the client,
+    // then blocks on a ResultWaiter. The client must:
+    //   1. Handle the callback (return from the JSON-RPC method)
+    //   2. Call EndClientCall on the server to unblock the ResultWaiter
+    // Without step 2, the server hangs forever.
+    private async Task AckCallback(string name)
+    {
+        Console.Error.WriteLine($"  [callback] {name} — sending EndClientCall");
+        if (Rpc != null)
+        {
+            try { await Rpc.InvokeAsync("EndClientCall", new object?[] { null }); }
+            catch { /* connection may be closing */ }
+        }
+    }
 
-    [JsonRpcMethod("Confirm")] public Task Confirm(JToken r) => Task.CompletedTask;
-    [JsonRpcMethod("ProcessServerRequests")] public Task ProcessServerRequests(JToken r) => Task.CompletedTask;
-    [JsonRpcMethod("FormRunModal")] public Task FormRunModal(JToken r) => Task.CompletedTask;
-    [JsonRpcMethod("FormClose")] public Task FormClose(JToken r) => Task.CompletedTask;
-    [JsonRpcMethod("FormActivate")] public Task FormActivate(JToken r) => Task.CompletedTask;
-    [JsonRpcMethod("SelectionMenu")] public Task SelectionMenu(JToken r) => Task.CompletedTask;
-    [JsonRpcMethod("FileActionDialog")] public Task FileActionDialog(JToken r) => Task.CompletedTask;
-    [JsonRpcMethod("FeedbackRequested")] public Task FeedbackRequested(JToken r) => Task.CompletedTask;
-    [JsonRpcMethod("CreateDotNetHandle")] public Task CreateDotNetHandle(JToken r) => Task.CompletedTask;
-    [JsonRpcMethod("GetDotNetObject")] public Task GetDotNetObject(JToken r) => Task.CompletedTask;
+    [JsonRpcMethod("ClearClientMetadataCache")]
+    public async Task ClearClientMetadataCache() => await AckCallback("ClearClientMetadataCache");
+
+    [JsonRpcMethod("OnSessionTerminating")]
+    public Task OnSessionTerminating() { Console.Error.WriteLine("  [notification] OnSessionTerminating received"); _sessionEndedCts.Cancel(); return Task.CompletedTask; }
+
+    [JsonRpcMethod("Confirm")] public async Task Confirm(JToken r) => await AckCallback("Confirm");
+    [JsonRpcMethod("ProcessServerRequests")] public async Task ProcessServerRequests(JToken r) => await AckCallback("ProcessServerRequests");
+    [JsonRpcMethod("FormRunModal")] public async Task FormRunModal(JToken r) => await AckCallback("FormRunModal");
+    [JsonRpcMethod("FormClose")] public async Task FormClose(JToken r) => await AckCallback("FormClose");
+    [JsonRpcMethod("FormActivate")] public async Task FormActivate(JToken r) => await AckCallback("FormActivate");
+    [JsonRpcMethod("SelectionMenu")] public async Task SelectionMenu(JToken r) => await AckCallback("SelectionMenu");
+    [JsonRpcMethod("FileActionDialog")] public async Task FileActionDialog(JToken r) => await AckCallback("FileActionDialog");
+    [JsonRpcMethod("FeedbackRequested")] public async Task FeedbackRequested(JToken r) => await AckCallback("FeedbackRequested");
+    [JsonRpcMethod("CreateDotNetHandle")] public async Task CreateDotNetHandle(JToken r) => await AckCallback("CreateDotNetHandle");
+    [JsonRpcMethod("GetDotNetObject")] public async Task GetDotNetObject(JToken r) => await AckCallback("GetDotNetObject");
     [JsonRpcMethod("DisposeAutomationObject")] public Task DisposeAutomationObject(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("InvokeAutomationMethod")] public Task InvokeAutomationMethod(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("DataSetPageReady")] public Task DataSetPageReady(JToken r) => Task.CompletedTask;
