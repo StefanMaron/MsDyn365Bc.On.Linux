@@ -231,8 +231,8 @@ async Task PrintLiveResults(byte[] authBytes, int codeunitsRun, int numCodeunits
         if (compId == null) return;
 
         var apiBase = $"http://{odataHost}/BC/api/custom/automation/v1.0/companies({compId})";
-        // Read only function-level results that have a result (completed)
-        var filter = Uri.EscapeDataString("testSuite eq 'DEFAULT' and lineType eq 'Function'");
+        // Read only function-level results that have actually completed (not " "/empty)
+        var filter = Uri.EscapeDataString("testSuite eq 'DEFAULT' and lineType eq 'Function' and result ne ' '");
         var resp = await http.GetStringAsync($"{apiBase}/testResults?$filter={filter}&$top=5000");
         var results = JObject.Parse(resp)["value"] as JArray;
         if (results == null) return;
