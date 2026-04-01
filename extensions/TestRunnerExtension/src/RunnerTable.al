@@ -202,6 +202,63 @@ page 50002 "Codeunit Run Requests"
         }
     }
 
+    /// <summary>
+    /// Sets up the test suite (creates suite, discovers test methods) without running.
+    /// Used by the WebSocket test runner to populate the suite before executing via
+    /// page 130455 which requires a client session for TestPage support.
+    /// </summary>
+    [ServiceEnabled]
+    procedure SetupSuite(): Boolean
+    var
+        SuiteRunner: Codeunit "Test Suite Runner";
+        IdList: List of [Text];
+        IdText: Text;
+        CuId: Integer;
+        RangeStart: Integer;
+        RangeEnd: Integer;
+        i: Integer;
+        DashPos: Integer;
+    begin
+        if Rec.CodeunitIds = '' then
+            exit(false);
+
+        // Use InitSuiteKeep to create suite without clearing, then set runner to
+        // 130451 (Isol. Codeunit) for proper test isolation via WebSocket execution.
+        SuiteRunner.InitSuite('DEFAULT');
+
+        // Override the runner to 130451 for WebSocket/page 130455 compatibility
+        OverrideSuiteRunner('DEFAULT', 130451);
+
+        // Parse comma-separated IDs and ranges (same as RunCodeunit)
+        IdList := Rec.CodeunitIds.Split(',');
+        foreach IdText in IdList do begin
+            DashPos := IdText.IndexOf('-');
+            if DashPos > 0 then begin
+                if Evaluate(RangeStart, IdText.Substring(1, DashPos - 1)) and
+                   Evaluate(RangeEnd, IdText.Substring(DashPos + 1)) then
+                    for i := RangeStart to RangeEnd do
+                        SuiteRunner.AddTestCodeunit(i);
+            end else
+                if Evaluate(CuId, IdText) then
+                    SuiteRunner.AddTestCodeunit(CuId);
+        end;
+
+        Rec.Status := Rec.Status::Pending;
+        Rec.LastResult := 'Suite ready';
+        Rec.Modify(true);
+        exit(true);
+    end;
+
+    local procedure OverrideSuiteRunner(SuiteName: Code[10]; RunnerId: Integer)
+    var
+        ALTestSuite: Record "AL Test Suite";
+    begin
+        if ALTestSuite.Get(SuiteName) then begin
+            ALTestSuite."Test Runner Id" := RunnerId;
+            ALTestSuite.Modify(true);
+        end;
+    end;
+
     [ServiceEnabled]
     procedure RunCodeunit(): Boolean
     var

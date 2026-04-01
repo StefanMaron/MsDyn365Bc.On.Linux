@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -23,23 +25,27 @@ using StreamJsonRpc;
 // the page on the correct record so OnOpenPage sets CurrentSuiteName correctly.
 
 var host = "localhost:7085";
+var odataHost = "localhost:7052"; // OData API host for suite setup
 var company = "CRONUS International Ltd.";
 var user = "admin";
 var password = "Admin123!";
 var timeoutMin = 30;
 var codeunitTimeoutMin = 10; // max time for a single RunNextTest call (per codeunit)
 var suiteName = "DEFAULT";
+var codeunitFilter = ""; // comma-separated codeunit IDs or ranges
 var maxIterations = 500;
 
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i] == "--host" && i + 1 < args.Length) host = args[++i];
+    else if (args[i] == "--odata-host" && i + 1 < args.Length) odataHost = args[++i];
     else if (args[i] == "--company" && i + 1 < args.Length) company = args[++i];
     else if (args[i] == "--user" && i + 1 < args.Length) user = args[++i];
     else if (args[i] == "--password" && i + 1 < args.Length) password = args[++i];
     else if (args[i] == "--timeout" && i + 1 < args.Length) timeoutMin = int.Parse(args[++i]);
     else if (args[i] == "--codeunit-timeout" && i + 1 < args.Length) codeunitTimeoutMin = int.Parse(args[++i]);
     else if (args[i] == "--suite" && i + 1 < args.Length) suiteName = args[++i];
+    else if (args[i] == "--codeunit-filter" && i + 1 < args.Length) codeunitFilter = args[++i];
     else if (args[i] == "--max-iterations" && i + 1 < args.Length) maxIterations = int.Parse(args[++i]);
     else if (!args[i].StartsWith("--")) host = args[i];
 }
@@ -55,6 +61,47 @@ async Task<int> RunTests()
     var cts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMin));
     var tokenCapture = new MetadataTokenCapture();
 
+    // Step 0: If --codeunit-filter is set, populate the test suite via OData API.
+    // This creates the suite, discovers test methods via codeunit 130452, and sets
+    // everything up so RunNextTest on page 130455 has work to do.
+    if (!string.IsNullOrEmpty(codeunitFilter))
+    {
+        Console.Write($"Setting up suite '{suiteName}' via OData (codeunits: {codeunitFilter})... ");
+        try
+        {
+            using var http = new HttpClient();
+            http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Basic", Convert.ToBase64String(authBytes));
+            // Discover company ID first, then create request and call SetupSuite
+            var apiBase = $"http://{odataHost}/BC/api/custom/automation/v1.0";
+            var compResp = await http.GetAsync($"{apiBase}/companies?$filter=name eq '{Uri.EscapeDataString(company)}'");
+            var compJson = JObject.Parse(await compResp.Content.ReadAsStringAsync());
+            var compId = compJson["value"]?[0]?["id"]?.ToString() ?? "dcfa9b8e-552b-f111-9f23-7ced8d3f0294";
+
+            // Create a run request with CodeunitIds
+            var body = new StringContent(
+                $"{{\"CodeunitIds\": \"{codeunitFilter}\"}}",
+                Encoding.UTF8, "application/json");
+            var resp = await http.PostAsync($"{apiBase}/companies({compId})/codeunitRunRequests", body);
+            if (resp.IsSuccessStatusCode)
+            {
+                var json = JObject.Parse(await resp.Content.ReadAsStringAsync());
+                var reqId = json["Id"]?.ToString();
+                // Call SetupSuite (populates suite + methods, does NOT run tests)
+                var setupResp = await http.PostAsync(
+                    $"{apiBase}/companies({compId})/codeunitRunRequests({reqId})/Microsoft.NAV.setupSuite",
+                    null);
+                if (setupResp.IsSuccessStatusCode)
+                    Console.WriteLine("OK");
+                else
+                    Console.Error.WriteLine($"SetupSuite: {setupResp.StatusCode} - {await setupResp.Content.ReadAsStringAsync()}");
+            }
+            else
+                Console.Error.WriteLine($"FAIL ({resp.StatusCode})");
+        }
+        catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
+    }
+
     // Initial connection — used only for ClearTestResults before the loop.
     var (rpc, ws, _) = await Connect(authBytes, tokenCapture, cts.Token);
     var formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
@@ -65,17 +112,6 @@ async Task<int> RunTests()
     try
     {
         var r = await Invoke(rpc, formState, "ClearTestResults", cts.Token);
-        if (r?["DataSetState"] != null) formState = r["DataSetState"];
-        Console.WriteLine("OK");
-    }
-    catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
-
-    // GetTestMethods populates the Test Method Line table with individual test functions.
-    // Without this, RunNextTest has no functions to run.
-    Console.Write("Populating test methods... ");
-    try
-    {
-        var r = await Invoke(rpc, formState, "GetTestMethods", cts.Token);
         if (r?["DataSetState"] != null) formState = r["DataSetState"];
         Console.WriteLine("OK");
     }
