@@ -35,6 +35,7 @@ var codeunitTimeoutMin = 10; // max time for a single RunNextTest call (per code
 var suiteName = "DEFAULT";
 var codeunitFilter = ""; // comma-separated codeunit IDs or ranges
 var maxIterations = 500;
+var verbose = false;
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -48,8 +49,12 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--suite" && i + 1 < args.Length) suiteName = args[++i];
     else if (args[i] == "--codeunit-filter" && i + 1 < args.Length) codeunitFilter = args[++i];
     else if (args[i] == "--max-iterations" && i + 1 < args.Length) maxIterations = int.Parse(args[++i]);
+    else if (args[i] == "--verbose" || args[i] == "-v") verbose = true;
     else if (!args[i].StartsWith("--")) host = args[i];
 }
+
+// Verbose logging — only shown with --verbose
+void Log(string msg) { if (verbose) Console.Error.WriteLine(msg); }
 
 int exitCode = 1;
 try { exitCode = await RunTests(); }
@@ -67,7 +72,7 @@ async Task<int> RunTests()
     // everything up so RunNextTest on page 130455 has work to do.
     if (!string.IsNullOrEmpty(codeunitFilter))
     {
-        Console.Write($"Setting up suite '{suiteName}' via OData (codeunits: {codeunitFilter})... ");
+        Log($"Setting up suite '{suiteName}' via OData (codeunits: {codeunitFilter})...");
         try
         {
             using var http = new HttpClient();
@@ -95,14 +100,14 @@ async Task<int> RunTests()
                     $"{apiBase}/companies({compId})/codeunitRunRequests({reqId})/Microsoft.NAV.setupSuite",
                     null);
                 if (setupResp.IsSuccessStatusCode)
-                    Console.WriteLine("OK");
+                    Log("Suite setup OK");
                 else
-                    Console.Error.WriteLine($"SetupSuite: {setupResp.StatusCode} - {await setupResp.Content.ReadAsStringAsync()}");
+                    Log($"SetupSuite: {setupResp.StatusCode} - {await setupResp.Content.ReadAsStringAsync()}");
             }
             else
-                Console.Error.WriteLine($"FAIL ({resp.StatusCode})");
+                Log($"Suite setup FAIL ({resp.StatusCode})");
         }
-        catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
+        catch (Exception ex) { Log($"Suite setup warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
     }
 
     // Initial connection — used only for ClearTestResults before the loop.
@@ -111,14 +116,14 @@ async Task<int> RunTests()
     if (formState == null) return 1;
 
     // ClearTestResults once, before the loop.
-    Console.Write("Clearing previous results... ");
+    Log("Clearing previous results...");
     try
     {
         var r = await Invoke(rpc, formState, "ClearTestResults", cts.Token);
         if (r?["DataSetState"] != null) formState = r["DataSetState"];
-        Console.WriteLine("OK");
+        Log("Clear OK");
     }
-    catch (Exception ex) { Console.Error.WriteLine($"warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
+    catch (Exception ex) { Log($"Clear warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
 
     rpc.Dispose(); ws.Dispose();
 
@@ -127,11 +132,16 @@ async Task<int> RunTests()
     // session (test isolation), so ConnectionLostException is the normal outcome.
     // BC tracks which codeunit to run next in the Test Method Line table, so a
     // fresh session always advances to the next pending codeunit.
-    int totalPassed = 0, totalFailed = 0, totalSkipped = 0;
     var startTime = DateTime.UtcNow;
 
-    Console.WriteLine("\n=== Running Tests ===");
-    for (int iteration = 0; iteration < maxIterations; iteration++)
+    // Limit iterations to roughly 2x the number of codeunits (each codeunit = 1 run + 1 reconnect)
+    // plus extra buffer for the "All tests executed" detection.
+    int numCodeunits = string.IsNullOrEmpty(codeunitFilter) ? 100 : codeunitFilter.Split(',').Length;
+    int effectiveMaxIterations = Math.Min(maxIterations, numCodeunits * 3 + 5);
+
+    Log($"Running tests via WebSocket ({numCodeunits} codeunits, max {effectiveMaxIterations} iterations)...");
+    int consecutiveEmpty = 0;  // track consecutive empty results to detect "done"
+    for (int iteration = 0; iteration < effectiveMaxIterations; iteration++)
     {
         // Proactive reconnect before each RunNextTest.
         CancellationTokenSource sessionEndedCts;
@@ -141,13 +151,13 @@ async Task<int> RunTests()
             formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
             if (formState == null)
             {
-                Console.Error.WriteLine("  Could not open test page after reconnect");
+                Log("Could not open test page after reconnect");
                 break;
             }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"  Reconnect failed: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
+            Log($"Reconnect failed: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
             break;
         }
 
@@ -159,7 +169,7 @@ async Task<int> RunTests()
             var capturedWs = ws;
             _ = Task.Delay(TimeSpan.FromMinutes(codeunitTimeoutMin)).ContinueWith(_ =>
             {
-                Console.Error.WriteLine($"  Watchdog: aborting hung connection after {codeunitTimeoutMin} min (--codeunit-timeout)");
+                Log($"Watchdog: aborting hung connection after {codeunitTimeoutMin} min");
                 try { capturedWs.Abort(); } catch { }
                 try { capturedRpc.Dispose(); } catch { }
             });
@@ -175,14 +185,29 @@ async Task<int> RunTests()
         catch (Exception ex) when (ex is ConnectionLostException || ex is RemoteInvocationException || ex is OperationCanceledException)
         {
             // Expected: BC killed the session after the codeunit finished (test isolation).
-            Console.Error.WriteLine($"  Session ended after codeunit (expected)");
+            Log("Session ended after codeunit (expected)");
         }
 
         try { rpc.Dispose(); ws.Dispose(); } catch { }
 
         if (allDone)
         {
-            Console.WriteLine("  All tests executed (page confirmed).");
+            Log("All tests executed (page confirmed)");
+            break;
+        }
+
+        // Track consecutive "empty" iterations (session dropped without new result).
+        // If RunNextTest throws ConnectionLost and testResultJson is empty, a codeunit ran.
+        // If we get empty results on reconnect without a session kill, all tests are done.
+        if (string.IsNullOrEmpty(testResultJson) && !allDone)
+            consecutiveEmpty++;
+        else
+            consecutiveEmpty = 0;
+
+        // After 3 consecutive empty iterations, assume all tests completed.
+        if (consecutiveEmpty >= 3)
+        {
+            Log("No more pending tests (3 consecutive empty results)");
             break;
         }
 
@@ -297,7 +322,7 @@ async Task<JToken?> Invoke(JsonRpc rpc, JToken? formState, string action, Cancel
 
 async Task<(JsonRpc, ClientWebSocket, CancellationTokenSource)> Connect(byte[] authBytes, MetadataTokenCapture tc, CancellationToken ct)
 {
-    Console.WriteLine($"Connecting to ws://{host}/ws/connect");
+    Log($"Connecting to ws://{host}/ws/connect");
     var sessionEndedCts = new CancellationTokenSource();
     var ws = new ClientWebSocket();
     ws.Options.SetRequestHeader("Authorization", $"Basic {Convert.ToBase64String(authBytes)}");
@@ -311,24 +336,24 @@ async Task<(JsonRpc, ClientWebSocket, CancellationTokenSource)> Connect(byte[] a
     rpc.StartListening();
     await rpc.InvokeWithCancellationAsync<JToken>("OpenConnection",
         new object[] { new { LCID = 1033, DefaultLCID = 1033, TimeZoneId = "UTC", Credentials = new { UserName = user, Password = password } } }, ct);
-    Console.WriteLine("Connected.");
+    Log("Connected.");
     return (rpc, ws, sessionEndedCts);
 }
 
 async Task<JToken?> OpenTestPage(JsonRpc rpc, MetadataTokenCapture tc, string company, CancellationToken ct)
 {
     try { await rpc.InvokeWithCancellationAsync<JToken>("OpenCompany", new object[] { company, false }, ct); }
-    catch (RemoteInvocationException ex) { Console.Error.WriteLine($"  OpenCompany: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
+    catch (RemoteInvocationException ex) { Log($"OpenCompany: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
 
-    Console.Write($"Opening page 130455 (suite={suiteName})... ");
+    Log($"Opening page 130455 (suite={suiteName})...");
     var formCts = CancellationTokenSource.CreateLinkedTokenSource(ct); formCts.CancelAfter(TimeSpan.FromSeconds(30));
     var form = await rpc.InvokeWithCancellationAsync<JToken>("OpenForm",
         new object[] { new { HasMainForm = true, States = new[] { new {
             FormId = 130455, TableView = new { TableId = 130450, View = $"WHERE(Name=CONST({suiteName}))" }
         } }, ControlIds = new string?[] { null }, VersionNumber = tc.MetadataToken, MainFormHandle = Guid.Empty } }, formCts.Token);
-    if (form == null || form.Type == JTokenType.Null) { Console.Error.WriteLine("FAIL"); return null; }
+    if (form == null || form.Type == JTokenType.Null) { Log("OpenForm failed"); return null; }
     var state = form["States"]?[0];
-    Console.WriteLine($"OK ({state?["ServerFormHandle"]})");
+    Log($"Page opened ({state?["ServerFormHandle"]})");
     try { var pg = await rpc.InvokeWithCancellationAsync<JToken>("GetPage", new object[] { new { PageSize = 50, IncludeMoreDataInformation = true, IncludeNonRowData = true }, state! }, ct); if (pg?["State"] != null) state = pg["State"]; } catch { }
     return state;
 }
@@ -347,7 +372,7 @@ class Callbacks
     // Without step 2, the server hangs forever.
     private async Task AckCallback(string name)
     {
-        Console.Error.WriteLine($"  [callback] {name} — sending EndClientCall");
+        // EndClientCall is silent by default — it fires frequently during test execution
         if (Rpc != null)
         {
             try { await Rpc.InvokeAsync("EndClientCall", new object?[] { null }); }
@@ -359,7 +384,7 @@ class Callbacks
     public async Task ClearClientMetadataCache() => await AckCallback("ClearClientMetadataCache");
 
     [JsonRpcMethod("OnSessionTerminating")]
-    public Task OnSessionTerminating() { Console.Error.WriteLine("  [notification] OnSessionTerminating received"); _sessionEndedCts.Cancel(); return Task.CompletedTask; }
+    public Task OnSessionTerminating() { _sessionEndedCts.Cancel(); return Task.CompletedTask; }
 
     [JsonRpcMethod("Confirm")] public async Task Confirm(JToken r) => await AckCallback("Confirm");
     [JsonRpcMethod("ProcessServerRequests")] public async Task ProcessServerRequests(JToken r) => await AckCallback("ProcessServerRequests");

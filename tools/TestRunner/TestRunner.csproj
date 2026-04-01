@@ -3,7 +3,7 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
-    <NoWarn>VSTHRD200</NoWarn>
+    <NoWarn>VSTHRD103;VSTHRD105;VSTHRD200;CS0219</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="StreamJsonRpc" Version="2.19.*" />
