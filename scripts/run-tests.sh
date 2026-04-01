@@ -212,23 +212,28 @@ fi
 
 # === Disable Known-Failing Tests ===
 if [ -n "$DISABLED_TESTS_DIR" ] && [ -d "$DISABLED_TESTS_DIR" ]; then
-    # Read all DisabledTests JSON files and convert to "codeunitId:method,..." format
-    # BCApps format: [{"codeunitId": 132920, "method": "TestName"}, ...]
-    DISABLED_ENTRIES=$(find "$DISABLED_TESTS_DIR" -name "*.json" -exec cat {} + | py3 -c "
-import sys, json
-entries = json.load(sys.stdin)
-if not isinstance(entries, list):
-    entries = [entries]
-# Build compact format: codeunitId:method pairs
+    # Read each DisabledTests JSON file individually (concatenating produces invalid JSON)
+    # BCApps format per file: [{"codeunitId": 132920, "method": "TestName"}, ...]
+    DISABLED_ENTRIES=$(py3 -c "
+import json, glob, os, sys
+
 pairs = []
-for e in entries:
-    cu = e.get('codeunitId', 0)
-    method = e.get('method', e.get('Method', ''))
-    if cu and method:
-        pairs.append(f'{cu}:{method}')
+for f in sorted(glob.glob(os.path.join(sys.argv[1], '*.json'))):
+    try:
+        with open(f) as fh:
+            entries = json.load(fh)
+        if not isinstance(entries, list):
+            entries = [entries]
+        for e in entries:
+            cu = e.get('codeunitId', 0)
+            method = e.get('method', e.get('Method', ''))
+            if cu and method:
+                pairs.append(f'{cu}:{method}')
+    except Exception as ex:
+        pass
+
 # Split into chunks of max 2000 chars (API field limit)
-chunks = []
-current = ''
+chunks, current = [], ''
 for p in pairs:
     if len(current) + len(p) + 1 > 2000:
         chunks.append(current)
@@ -239,7 +244,8 @@ if current:
     chunks.append(current)
 for c in chunks:
     print(c)
-" 2>/dev/null)
+" "$DISABLED_TESTS_DIR" 2>/dev/null)
+    echo "Parsed disabled tests from $(find "$DISABLED_TESTS_DIR" -name '*.json' | wc -l) files"
 
     if [ -n "$DISABLED_ENTRIES" ]; then
         DISABLED_COUNT=0
