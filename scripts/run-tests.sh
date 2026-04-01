@@ -280,6 +280,9 @@ NUM_CODEUNITS=${#CU_ARRAY[@]}
 MAX_ITER=$(( NUM_CODEUNITS * 3 + 20 ))
 echo "Executing $NUM_CODEUNITS codeunits via WebSocket (max $MAX_ITER iterations)..."
 
+# Note: do NOT pass --codeunit-filter here — the suite is already set up via OData.
+# Passing it would re-trigger SetupSuite which clears test results.
+# We pass --num-codeunits for correct progress display only.
 dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
     --host "$WS_HOST" \
     --odata-host "$ODATA_HOST" \
@@ -287,7 +290,7 @@ dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
     --user "$AUTH_USER" \
     --password "$AUTH_PASS" \
     --suite "DEFAULT" \
-    --codeunit-filter "$CODEUNIT_IDS" \
+    --num-codeunits "$NUM_CODEUNITS" \
     --timeout "$TIMEOUT_MIN" \
     --codeunit-timeout 10 \
     --max-iterations "$MAX_ITER"

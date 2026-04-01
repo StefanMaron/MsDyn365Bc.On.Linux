@@ -35,6 +35,7 @@ var codeunitTimeoutMin = 10; // max time for a single RunNextTest call (per code
 var suiteName = "DEFAULT";
 var codeunitFilter = ""; // comma-separated codeunit IDs or ranges
 var maxIterations = 500;
+var numCodeunitsOverride = 0; // explicit codeunit count for progress display
 var verbose = false;
 
 for (int i = 0; i < args.Length; i++)
@@ -49,6 +50,7 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--suite" && i + 1 < args.Length) suiteName = args[++i];
     else if (args[i] == "--codeunit-filter" && i + 1 < args.Length) codeunitFilter = args[++i];
     else if (args[i] == "--max-iterations" && i + 1 < args.Length) maxIterations = int.Parse(args[++i]);
+    else if (args[i] == "--num-codeunits" && i + 1 < args.Length) numCodeunitsOverride = int.Parse(args[++i]);
     else if (args[i] == "--verbose" || args[i] == "-v") verbose = true;
     else if (!args[i].StartsWith("--")) host = args[i];
 }
@@ -139,7 +141,9 @@ async Task<int> RunTests()
 
     // Limit iterations to roughly 2x the number of codeunits (each codeunit = 1 run + 1 reconnect)
     // plus extra buffer for the "All tests executed" detection.
-    int numCodeunits = string.IsNullOrEmpty(codeunitFilter) ? 100 : codeunitFilter.Split(',').Length;
+    int numCodeunits = numCodeunitsOverride > 0 ? numCodeunitsOverride
+        : !string.IsNullOrEmpty(codeunitFilter) ? codeunitFilter.Split(',').Length
+        : 100;
     // With test isolation (runner 130451), each codeunit kills the session.
     // We need ~2 iterations per codeunit: one that runs + one empty reconnect.
     int effectiveMaxIterations = Math.Min(maxIterations, numCodeunits * 3 + 10);
