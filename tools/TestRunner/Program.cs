@@ -142,6 +142,7 @@ async Task<int> RunTests()
     int effectiveMaxIterations = Math.Min(maxIterations, numCodeunits * 3 + 10);
 
     Log($"Running tests via WebSocket ({numCodeunits} codeunits, max {effectiveMaxIterations} iterations)...");
+    int codeunitsRun = 0;
     for (int iteration = 0; iteration < effectiveMaxIterations; iteration++)
     {
         // Proactive reconnect before each RunNextTest.
@@ -186,7 +187,10 @@ async Task<int> RunTests()
         catch (Exception ex) when (ex is ConnectionLostException || ex is RemoteInvocationException || ex is OperationCanceledException)
         {
             // Expected: BC killed the session after the codeunit finished (test isolation).
-            Log("Session ended after codeunit (expected)");
+            codeunitsRun++;
+            // Always print progress (even in non-verbose mode) so the user sees activity
+            Console.Error.WriteLine($"  [{codeunitsRun}/{numCodeunits}] Codeunit completed ({(DateTime.UtcNow - startTime).TotalSeconds:F0}s)");
+            Console.Error.Flush();
         }
 
         try { rpc.Dispose(); ws.Dispose(); } catch { }
