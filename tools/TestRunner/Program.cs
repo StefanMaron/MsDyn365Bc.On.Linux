@@ -280,8 +280,7 @@ async Task PrintLiveResults(byte[] authBytes, int codeunitsRun, int numCodeunits
             {
                 var fn = r["functionName"]?.ToString() ?? "";
                 var result = r["result"]?.ToString() ?? "";
-                var errMsg = r["errorMessage"]?.ToString() ?? r["errorMessagePreview"]?.ToString() ?? "";
-                var callStack = r["errorCallStack"]?.ToString() ?? "";
+                var errMsg = r["errorMessagePreview"]?.ToString() ?? "";
 
                 // Count for summary
                 if (result == "Success" || result == "2") livePassed++;
@@ -294,16 +293,6 @@ async Task PrintLiveResults(byte[] authBytes, int codeunitsRun, int numCodeunits
                 if (status == "FAIL" && errMsg.Length > 0)
                     Console.Write($" — {errMsg[..Math.Min(200, errMsg.Length)]}");
                 Console.WriteLine();
-                // Print call stack for failures (indented, up to 10 lines)
-                if (status == "FAIL" && callStack.Length > 0)
-                {
-                    foreach (var line in callStack.Split('\n').Take(10))
-                    {
-                        var trimmed = line.Trim();
-                        if (trimmed.Length > 0)
-                            Console.WriteLine($"           {trimmed[..Math.Min(120, trimmed.Length)]}");
-                    }
-                }
             }
 
             printedCodeunits.Add(cuId);
