@@ -59,6 +59,8 @@ for (int i = 0; i < args.Length; i++)
 var printedCodeunits = new HashSet<int>();
 // Track pass/fail/skip counts during live printing (avoids slow final OData read)
 int livePassed = 0, liveFailed = 0, liveSkipped = 0;
+// Track how many OData results we've already read (for $skip)
+int odataResultsSeen = 0;
 // Cached across calls — avoid re-resolving company ID and recreating HttpClient
 HttpClient? cachedHttp = null;
 string? cachedCompanyId = null;
@@ -245,18 +247,14 @@ async Task PrintLiveResults(byte[] authBytes, int codeunitsRun, int numCodeunits
         }
 
         var apiBase = $"http://{odataHost}/BC/api/custom/automation/v1.0/companies({cachedCompanyId})";
-        // Fetch only results for codeunits we haven't printed yet
-        var filter = "testSuite eq 'DEFAULT' and lineType eq 'Function' and result ne ' '";
-        if (printedCodeunits.Count > 0)
-        {
-            // Exclude already-printed codeunits to minimize data transfer
-            foreach (var id in printedCodeunits)
-                filter += $" and testCodeunit ne {id}";
-        }
-        var url = $"{apiBase}/testResults?$filter={Uri.EscapeDataString(filter)}&$top=500";
+        // Only fetch new results using $skip — results are ordered by primary key (insertion order)
+        var filter = Uri.EscapeDataString("testSuite eq 'DEFAULT' and lineType eq 'Function' and result ne ' '");
+        var url = $"{apiBase}/testResults?$filter={filter}&$top=500&$skip={odataResultsSeen}";
         var resp = await cachedHttp.GetStringAsync(url);
         var results = JObject.Parse(resp)["value"] as JArray;
         if (results == null || results.Count == 0) return;
+
+        odataResultsSeen += results.Count;
 
         // Group new results by codeunit for per-codeunit duration header
         var byCu = new Dictionary<int, List<JToken>>();
