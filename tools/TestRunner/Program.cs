@@ -59,6 +59,11 @@ for (int i = 0; i < args.Length; i++)
 var printedCodeunits = new HashSet<int>();
 // Track pass/fail/skip counts during live printing (avoids slow final OData read)
 int livePassed = 0, liveFailed = 0, liveSkipped = 0;
+// Track how many OData results we've already read (for $skip optimization)
+int odataResultsSeen = 0;
+// Cached across calls — avoid re-resolving company ID and recreating HttpClient
+HttpClient? cachedHttp = null;
+string? cachedCompanyId = null;
 
 // Verbose logging — only shown with --verbose
 void Log(string msg) { if (verbose) Console.Error.WriteLine(msg); }
@@ -226,29 +231,37 @@ async Task PrintLiveResults(byte[] authBytes, int codeunitsRun, int numCodeunits
 {
     try
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-            "Basic", Convert.ToBase64String(authBytes));
+        // Reuse HttpClient and company ID across calls
+        if (cachedHttp == null)
+        {
+            cachedHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            cachedHttp.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                "Basic", Convert.ToBase64String(authBytes));
+        }
+        if (cachedCompanyId == null)
+        {
+            var compResp = await cachedHttp.GetStringAsync($"http://{odataHost}/BC/api/v2.0/companies");
+            cachedCompanyId = JObject.Parse(compResp)["value"]?.FirstOrDefault(c => c["name"]?.ToString() == company)?["id"]?.ToString()
+                ?? JObject.Parse(compResp)["value"]?.FirstOrDefault()?["id"]?.ToString();
+            if (cachedCompanyId == null) return;
+        }
 
-        var compResp = await http.GetStringAsync($"http://{odataHost}/BC/api/v2.0/companies");
-        var compId = JObject.Parse(compResp)["value"]?.FirstOrDefault(c => c["name"]?.ToString() == company)?["id"]?.ToString()
-            ?? JObject.Parse(compResp)["value"]?.FirstOrDefault()?["id"]?.ToString();
-        if (compId == null) return;
-
-        var apiBase = $"http://{odataHost}/BC/api/custom/automation/v1.0/companies({compId})";
-        // Read only function-level results that have actually completed (not " "/empty)
+        var apiBase = $"http://{odataHost}/BC/api/custom/automation/v1.0/companies({cachedCompanyId})";
+        // Only fetch new results — skip ones we've already processed
         var filter = Uri.EscapeDataString("testSuite eq 'DEFAULT' and lineType eq 'Function' and result ne ' '");
-        var resp = await http.GetStringAsync($"{apiBase}/testResults?$filter={filter}&$top=5000");
+        var url = $"{apiBase}/testResults?$filter={filter}&$top=500&$skip={odataResultsSeen}";
+        var resp = await cachedHttp.GetStringAsync(url);
         var results = JObject.Parse(resp)["value"] as JArray;
-        if (results == null) return;
+        if (results == null || results.Count == 0) return;
 
-        // Group results by codeunit so we can compute per-codeunit duration for the header
+        odataResultsSeen += results.Count;
+
+        // Group new results by codeunit for per-codeunit duration header
         var byCu = new Dictionary<int, List<JToken>>();
         var cuOrder = new List<int>();
         foreach (var r in results)
         {
             var cuId = r["testCodeunit"]?.Value<int>() ?? 0;
-            if (printedCodeunits.Contains(cuId)) continue;
             if (!byCu.ContainsKey(cuId)) { byCu[cuId] = new List<JToken>(); cuOrder.Add(cuId); }
             byCu[cuId].Add(r);
         }
@@ -310,7 +323,7 @@ async Task PrintLiveResults(byte[] authBytes, int codeunitsRun, int numCodeunits
         }
         Console.Out.Flush();
     }
-    catch { /* OData read failed — silent, results will be printed at the end */ }
+    catch { /* OData read failed — silent */ }
 }
 
 
