@@ -57,6 +57,8 @@ for (int i = 0; i < args.Length; i++)
 
 // Track which codeunits have been printed live (shared between RunTests and PrintLiveResults)
 var printedCodeunits = new HashSet<int>();
+// Track pass/fail/skip counts during live printing (avoids slow final OData read)
+int livePassed = 0, liveFailed = 0, liveSkipped = 0;
 
 // Verbose logging — only shown with --verbose
 void Log(string msg) { if (verbose) Console.Error.WriteLine(msg); }
@@ -211,17 +213,19 @@ async Task<int> RunTests()
         await Task.Delay(500, CancellationToken.None);
     }
 
-    // Print final summary from OData (also catches any codeunits not printed live)
+    // Print summary from live counts — no final OData read needed (saves ~3.5 minutes)
     var elapsed = DateTime.UtcNow - startTime;
-    Console.WriteLine();
-    return await ReadAndPrintResultsViaOData(authBytes, elapsed, printedCodeunits, cts.Token);
+    int total = livePassed + liveFailed + liveSkipped;
+    Console.WriteLine($"\n=== Results ({elapsed.TotalSeconds:F0}s) ===");
+    Console.WriteLine($"{total} total, {livePassed} passed, {liveFailed} failed, {liveSkipped} skipped");
+    return liveFailed > 0 ? 1 : (livePassed > 0 ? 0 : 1);
 }
 
 async Task PrintLiveResults(byte[] authBytes, int codeunitsRun, int numCodeunits, DateTime startTime)
 {
     try
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
             "Basic", Convert.ToBase64String(authBytes));
 
@@ -237,108 +241,77 @@ async Task PrintLiveResults(byte[] authBytes, int codeunitsRun, int numCodeunits
         var results = JObject.Parse(resp)["value"] as JArray;
         if (results == null) return;
 
-        // Group by codeunit and print only new ones
-        int? lastCu = null;
+        // Group results by codeunit so we can compute per-codeunit duration for the header
+        var byCu = new Dictionary<int, List<JToken>>();
+        var cuOrder = new List<int>();
         foreach (var r in results)
         {
             var cuId = r["testCodeunit"]?.Value<int>() ?? 0;
-            var name = r["name"]?.ToString() ?? "";
-            var fn = r["functionName"]?.ToString() ?? "";
-            var result = r["result"]?.ToString() ?? "";
-            var errMsg = r["errorMessagePreview"]?.ToString() ?? "";
-
             if (printedCodeunits.Contains(cuId)) continue;
+            if (!byCu.ContainsKey(cuId)) { byCu[cuId] = new List<JToken>(); cuOrder.Add(cuId); }
+            byCu[cuId].Add(r);
+        }
 
-            if (lastCu != cuId)
+        foreach (var cuId in cuOrder)
+        {
+            var funcs = byCu[cuId];
+            var cuName = funcs[0]["name"]?.ToString() ?? "";
+
+            // Compute per-codeunit duration from min(startTime) to max(finishTime)
+            DateTime? cuStart = null, cuEnd = null;
+            foreach (var r in funcs)
             {
-                if (lastCu != null) printedCodeunits.Add(lastCu.Value);
-                lastCu = cuId;
-                var secs = (DateTime.UtcNow - startTime).TotalSeconds;
-                Console.WriteLine($"  [{codeunitsRun}/{numCodeunits}] Codeunit {cuId}: {name} ({secs:F0}s)");
+                var s = r["startTime"]?.Value<DateTime?>();
+                var e = r["finishTime"]?.Value<DateTime?>();
+                if (s.HasValue && (!cuStart.HasValue || s < cuStart)) cuStart = s;
+                if (e.HasValue && (!cuEnd.HasValue || e > cuEnd)) cuEnd = e;
+            }
+            var durationStr = "";
+            if (cuStart.HasValue && cuEnd.HasValue)
+            {
+                var secs = (cuEnd.Value - cuStart.Value).TotalSeconds;
+                durationStr = $" ({secs:F1}s)";
             }
 
-            var status = (result == "Success" || result == "2") ? "PASS"
-                : (result == "Failure" || result == "1") ? "FAIL" : "SKIP";
-            Console.Write($"    {status}  {fn}");
-            if (status == "FAIL" && errMsg.Length > 0)
-                Console.Write($" — {errMsg[..Math.Min(150, errMsg.Length)]}");
-            Console.WriteLine();
+            Console.WriteLine($"  [{codeunitsRun}/{numCodeunits}] Codeunit {cuId}: {cuName}{durationStr}");
+
+            foreach (var r in funcs)
+            {
+                var fn = r["functionName"]?.ToString() ?? "";
+                var result = r["result"]?.ToString() ?? "";
+                var errMsg = r["errorMessage"]?.ToString() ?? r["errorMessagePreview"]?.ToString() ?? "";
+                var callStack = r["errorCallStack"]?.ToString() ?? "";
+
+                // Count for summary
+                if (result == "Success" || result == "2") livePassed++;
+                else if (result == "Failure" || result == "1") liveFailed++;
+                else liveSkipped++;
+
+                var status = (result == "Success" || result == "2") ? "PASS"
+                    : (result == "Failure" || result == "1") ? "FAIL" : "SKIP";
+                Console.Write($"    {status}  {fn}");
+                if (status == "FAIL" && errMsg.Length > 0)
+                    Console.Write($" — {errMsg[..Math.Min(200, errMsg.Length)]}");
+                Console.WriteLine();
+                // Print call stack for failures (indented, up to 10 lines)
+                if (status == "FAIL" && callStack.Length > 0)
+                {
+                    foreach (var line in callStack.Split('\n').Take(10))
+                    {
+                        var trimmed = line.Trim();
+                        if (trimmed.Length > 0)
+                            Console.WriteLine($"           {trimmed[..Math.Min(120, trimmed.Length)]}");
+                    }
+                }
+            }
+
+            printedCodeunits.Add(cuId);
         }
-        if (lastCu != null) printedCodeunits.Add(lastCu.Value);
         Console.Out.Flush();
     }
     catch { /* OData read failed — silent, results will be printed at the end */ }
 }
 
-async Task<int> ReadAndPrintResultsViaOData(byte[] authBytes, TimeSpan elapsed, HashSet<int> printedCodeunits, CancellationToken ct)
-{
-    int totalPassed = 0, totalFailed = 0, totalSkipped = 0;
-    try
-    {
-        using var http = new HttpClient();
-        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-            "Basic", Convert.ToBase64String(authBytes));
-        var apiBase = $"http://{odataHost}/BC/api/custom/automation/v1.0";
-
-        // Get company ID
-        var compResp = await http.GetStringAsync($"http://{odataHost}/BC/api/v2.0/companies");
-        var companies = JObject.Parse(compResp)["value"] as JArray ?? new JArray();
-        var compId = companies.FirstOrDefault(c => c["name"]?.ToString() == company)?["id"]?.ToString()
-            ?? companies.FirstOrDefault()?["id"]?.ToString();
-        if (compId == null) { Console.Error.WriteLine("Could not find company via OData"); return 1; }
-
-        // Read test results from Test Method Line table via OData
-        var filter = Uri.EscapeDataString($"testSuite eq 'DEFAULT' and lineType eq 'Function'");
-        var resultResp = await http.GetStringAsync($"{apiBase}/companies({compId})/testResults?$filter={filter}&$top=5000");
-        var results = JObject.Parse(resultResp)["value"] as JArray;
-        if (results == null || results.Count == 0)
-        {
-            Console.Error.WriteLine("No test results found via OData");
-            return 1;
-        }
-
-        // Count all results; only print codeunits not already printed live
-        int? lastCu = null;
-        foreach (var r in results)
-        {
-            var cuId = r["testCodeunit"]?.Value<int>() ?? 0;
-            var fn = r["functionName"]?.ToString() ?? "";
-            var name = r["name"]?.ToString() ?? "";
-            var result = r["result"]?.ToString() ?? "";
-            var errMsg = r["errorMessagePreview"]?.ToString() ?? "";
-
-            // Count everything
-            if (result == "Success" || result == "2") totalPassed++;
-            else if (result == "Failure" || result == "1") totalFailed++;
-            else totalSkipped++;
-
-            // Only print codeunits that weren't already shown during live execution
-            if (printedCodeunits.Contains(cuId)) continue;
-
-            if (lastCu != cuId)
-            {
-                lastCu = cuId;
-                Console.WriteLine($"  Codeunit {cuId}: {name}");
-            }
-
-            var status = (result == "Success" || result == "2") ? "PASS"
-                : (result == "Failure" || result == "1") ? "FAIL" : "SKIP";
-            Console.Write($"    {status}  {fn}");
-            if (status == "FAIL" && errMsg.Length > 0)
-                Console.Write($" — {errMsg[..Math.Min(150, errMsg.Length)]}");
-            Console.WriteLine();
-        }
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine($"OData result read failed: {ex.Message[..Math.Min(120, ex.Message.Length)]}");
-    }
-
-    int total = totalPassed + totalFailed + totalSkipped;
-    Console.WriteLine($"\n=== Results ({elapsed.TotalSeconds:F0}s) ===");
-    Console.WriteLine($"{total} total, {totalPassed} passed, {totalFailed} failed, {totalSkipped} skipped");
-    return totalFailed > 0 ? 1 : (totalPassed > 0 ? 0 : 1);
-}
 
 async Task<string> ReadTestResultJson(JsonRpc rpc, JToken formState, CancellationToken ct)
 {
