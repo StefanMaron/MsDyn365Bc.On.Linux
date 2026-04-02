@@ -304,10 +304,11 @@ if [ "$DB_EXISTS" != "1" ]; then
         exit 1
     fi
 
-    # Get logical file names
-    FILELIST=$($SQLCMD -h -1 -Q "RESTORE FILELISTONLY FROM DISK='$BAK_PATH'" 2>/dev/null)
-    DATA_NAME=$(echo "$FILELIST" | head -1 | awk '{print $1}')
-    LOG_NAME=$(echo "$FILELIST" | head -2 | tail -1 | awk '{print $1}')
+    # Get logical file names (may contain spaces, e.g. "Demo Database BC (29-0)_Data")
+    # Use tab-separated output to reliably parse
+    DATA_NAME=$($SQLCMD -h -1 -s $'\t' -W -Q "SET NOCOUNT ON; RESTORE FILELISTONLY FROM DISK='$BAK_PATH'" 2>/dev/null | head -1 | cut -f1)
+    LOG_NAME=$($SQLCMD -h -1 -s $'\t' -W -Q "SET NOCOUNT ON; RESTORE FILELISTONLY FROM DISK='$BAK_PATH'" 2>/dev/null | head -2 | tail -1 | cut -f1)
+    log_step "DB logical names: data='$DATA_NAME' log='$LOG_NAME'"
 
     $SQLCMD -Q "
         RESTORE DATABASE [CRONUS] FROM DISK='$BAK_PATH'
