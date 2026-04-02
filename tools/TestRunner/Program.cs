@@ -204,9 +204,10 @@ async Task<int> RunTests()
 
         try { rpc.Dispose(); ws.Dispose(); } catch { }
 
-        if (allDone)
+        if (allDone || codeunitsRun >= numCodeunits)
         {
-            Log("All tests executed (page confirmed)");
+            if (allDone) Log("All tests executed (page confirmed)");
+            else Log($"All {numCodeunits} codeunits executed — stopping");
             break;
         }
 
