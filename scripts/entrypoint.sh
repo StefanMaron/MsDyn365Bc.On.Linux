@@ -415,7 +415,7 @@ SQLEOF
     REMOVED=$($SQLCMD_DB -h -1 -W -i "$SELECTIVE_SQL" 2>&1) || true
     log_step "Selective clear result:"
     echo "$REMOVED" | while read -r line; do
-        [ -n "$line" ] && echo "[entrypoint]   $line"
+        [ -n "$line" ] && echo "[entrypoint]   $line" || true
     done
     TOTAL_AFTER=$($SQLCMD_DB -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM [Published Application];" 2>/dev/null | tr -d '[:space:]')
     TOTAL_AFTER="${TOTAL_AFTER:-0}"
