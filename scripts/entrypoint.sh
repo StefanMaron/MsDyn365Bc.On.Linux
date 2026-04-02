@@ -412,13 +412,14 @@ DELETE FROM [Published Application] WHERE [Package ID] NOT IN (SELECT [Package I
 DROP TABLE #keep;
 SQLEOF
     fi
-    REMOVED=$($SQLCMD_DB -h -1 -W -i "$SELECTIVE_SQL" 2>&1)
+    REMOVED=$($SQLCMD_DB -h -1 -W -i "$SELECTIVE_SQL" 2>&1) || true
     log_step "Selective clear result:"
     echo "$REMOVED" | while read -r line; do
         [ -n "$line" ] && echo "[entrypoint]   $line"
     done
     TOTAL_AFTER=$($SQLCMD_DB -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM [Published Application];" 2>/dev/null | tr -d '[:space:]')
-    log_step "Selective clear: $TOTAL_BEFORE → $TOTAL_AFTER apps (removed $((TOTAL_BEFORE - TOTAL_AFTER)))"
+    TOTAL_AFTER="${TOTAL_AFTER:-0}"
+    log_step "Selective clear: ${TOTAL_BEFORE:-?} → ${TOTAL_AFTER} apps (removed $((${TOTAL_BEFORE:-0} - ${TOTAL_AFTER})))"
     # Export keep list for R2R pre-seed filtering
     export BC_KEEP_APP_IDS_FOR_R2R="$KEEP_IDS"
 elif [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] || [ "${BC_CLEAR_ALL_APPS:-false}" = "deps-only" ]; then
