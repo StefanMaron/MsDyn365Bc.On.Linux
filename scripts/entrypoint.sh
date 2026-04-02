@@ -346,8 +346,82 @@ $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1 WHERE tenantid 
 # BC_CLEAR_ALL_APPS=true:      clear ALL apps, republish ALL dynamically after NST starts (~300s)
 # BC_CLEAR_ALL_APPS=deps-only: clear ALL apps, republish ONLY test framework after NST starts (~30s)
 #   (caller is responsible for publishing the actual dependency chain via dev endpoint)
+# BC_CLEAR_ALL_APPS=selective: keep only apps whose App ID is in BC_KEEP_APP_IDS + test framework
+#   (BC_KEEP_APP_IDS=comma-separated lowercase app IDs from sort-apps-by-deps.py)
+# BC_CLEAR_ALL_APPS=none:      don't clear ANY apps — keep stock extensions intact (~0s)
+#   (caller publishes only what it needs to override via forcesync)
 # Default (false):             only clear test framework apps (Test Runner, Library Assert, etc.)
-if [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] || [ "${BC_CLEAR_ALL_APPS:-false}" = "deps-only" ]; then
+if [ "${BC_CLEAR_ALL_APPS:-false}" = "none" ]; then
+    log_step "BC_CLEAR_ALL_APPS=none: keeping all pre-installed extensions"
+elif [ "${BC_CLEAR_ALL_APPS:-false}" = "selective" ]; then
+    # Selective clearing: keep only apps in BC_KEEP_APP_IDS + hardcoded test framework/system apps.
+    # This is much faster than clearing everything because BC only compiles ~10 kept apps on startup.
+    TOTAL_BEFORE=$($SQLCMD_DB -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM [Published Application];" 2>/dev/null | tr -d '[:space:]')
+    log_step "BC_CLEAR_ALL_APPS=selective: $TOTAL_BEFORE apps installed, filtering..."
+
+    # Build the keep list: BC_KEEP_APP_IDS (from caller) + hardcoded test framework names
+    # BC_KEEP_APP_IDS are App IDs (stable across versions), not Package IDs
+    KEEP_IDS="${BC_KEEP_APP_IDS:-}"
+
+    # Hardcoded: test framework apps (always needed for test execution)
+    # These are kept by name since their IDs may vary across versions
+    KEEP_NAMES="'Test Runner','Library Assert','Library Variable Storage','Permissions Mock','Any'"
+
+    # Build SQL IN clause from BC_KEEP_APP_IDS (comma-separated lowercase GUIDs)
+    KEEP_SQL=""
+    if [ -n "$KEEP_IDS" ]; then
+        KEEP_SQL=$(echo "$KEEP_IDS" | tr ',' '\n' | sed "s/^.*$/'\0'/" | paste -sd,)
+    fi
+
+    # Delete apps NOT in the keep list
+    # Write SQL to a temp file to avoid shell quoting issues with large multi-statement batches
+    # Write SQL to temp file — avoids shell quoting issues with large multi-statement batches.
+    # Use a temp table to hold the Package IDs to keep (avoids repeating the subquery).
+    SELECTIVE_SQL="/tmp/selective-clear.sql"
+    if [ -n "$KEEP_SQL" ]; then
+        cat > "$SELECTIVE_SQL" << SQLEOF
+SET NOCOUNT ON;
+SELECT 'KEEP: ' + [Name] FROM [Published Application]
+WHERE LOWER(CONVERT(VARCHAR(36), [ID])) IN ($KEEP_SQL)
+   OR [Name] IN ($KEEP_NAMES);
+
+SELECT [Package ID] INTO #keep FROM [Published Application]
+WHERE LOWER(CONVERT(VARCHAR(36), [ID])) IN ($KEEP_SQL) OR [Name] IN ($KEEP_NAMES);
+
+DELETE FROM [NAV App Installed App] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [NAV App Tenant App] WHERE [App Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [NAV App Dependencies] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [NAV App Published App] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [Installed Application] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [Inplace Installed Application] WHERE [Runtime Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [Published Application] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DROP TABLE #keep;
+SQLEOF
+    else
+        log_step "WARN: BC_KEEP_APP_IDS is empty, keeping only test framework by name"
+        cat > "$SELECTIVE_SQL" << SQLEOF
+SET NOCOUNT ON;
+SELECT [Package ID] INTO #keep FROM [Published Application] WHERE [Name] IN ($KEEP_NAMES);
+DELETE FROM [NAV App Installed App] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [NAV App Tenant App] WHERE [App Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [NAV App Dependencies] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [NAV App Published App] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [Installed Application] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [Inplace Installed Application] WHERE [Runtime Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [Published Application] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DROP TABLE #keep;
+SQLEOF
+    fi
+    REMOVED=$($SQLCMD_DB -h -1 -W -i "$SELECTIVE_SQL" 2>&1)
+    log_step "Selective clear result:"
+    echo "$REMOVED" | while read -r line; do
+        [ -n "$line" ] && echo "[entrypoint]   $line"
+    done
+    TOTAL_AFTER=$($SQLCMD_DB -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM [Published Application];" 2>/dev/null | tr -d '[:space:]')
+    log_step "Selective clear: $TOTAL_BEFORE → $TOTAL_AFTER apps (removed $((TOTAL_BEFORE - TOTAL_AFTER)))"
+    # Export keep list for R2R pre-seed filtering
+    export BC_KEEP_APP_IDS_FOR_R2R="$KEEP_IDS"
+elif [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] || [ "${BC_CLEAR_ALL_APPS:-false}" = "deps-only" ]; then
     # Snapshot the full list of published apps + dependency graph BEFORE clearing,
     # so we can republish them after NST starts.
     log_step "BC_CLEAR_ALL_APPS=true: snapshotting installed extensions..."
@@ -456,16 +530,35 @@ if [ -n "$PLATFORM_VER" ]; then
     ASSEMBLY_CACHE="/usr/share/Microsoft/Microsoft Dynamics NAV/$NAV_DIR/Server/MicrosoftDynamicsNavServer\$${INSTANCE}/apps/assembly/release/${PLATFORM_VER}_1"
     mkdir -p "$ASSEMBLY_CACHE"
     R2R_SEEDED=0
+    R2R_FILTERED=0
     R2R_FAILED=0
     while IFS= read -r -d '' appfile; do
-        python3 - "$appfile" "$ASSEMBLY_CACHE" << 'PYEOF' && R2R_SEEDED=$((R2R_SEEDED + 1)) || R2R_FAILED=$((R2R_FAILED + 1))
-import sys, zipfile, os
+        python3 - "$appfile" "$ASSEMBLY_CACHE" "${BC_KEEP_APP_IDS_FOR_R2R:-}" << 'PYEOF' && R2R_SEEDED=$((R2R_SEEDED + 1)) || { [ $? -eq 2 ] && R2R_FILTERED=$((R2R_FILTERED + 1)) || R2R_FAILED=$((R2R_FAILED + 1)); }
+import sys, zipfile, os, json, re
 
 app_path, dest = sys.argv[1], sys.argv[2]
+keep_ids = set(sys.argv[3].split(',')) if len(sys.argv) > 3 and sys.argv[3] else set()
+
 try:
     z = zipfile.ZipFile(app_path)
+    names = z.namelist()
+
+    # If selective filtering is active, check this app's ID against the keep list
+    if keep_ids:
+        app_id = None
+        if 'readytorunappmanifest.json' in names:
+            m = json.loads(z.read('readytorunappmanifest.json'))
+            app_id = m.get('EmbeddedAppId', '').lower().strip('{}')
+        elif 'NavxManifest.xml' in names:
+            xml = z.read('NavxManifest.xml').decode('utf-8', errors='replace')
+            match = re.search(r'(?:App)?Id\s*=\s*"([^"]+)"', xml, re.IGNORECASE)
+            if match:
+                app_id = match.group(1).lower().strip('{}')
+        if app_id and app_id not in keep_ids:
+            sys.exit(2)  # filtered out — not an error
+
     extracted = 0
-    for name in z.namelist():
+    for name in names:
         if 'publishedartifacts/' not in name:
             continue
         basename = os.path.basename(name)
@@ -481,7 +574,11 @@ except Exception:
     sys.exit(1)
 PYEOF
     done < <(find "$ARTIFACTS/app/Extensions" -name "*.app" -type f -print0 2>/dev/null)
-    log_step "R2R DLL cache seeded: $R2R_SEEDED apps extracted, $R2R_FAILED skipped — cache: $ASSEMBLY_CACHE"
+    if [ "$R2R_FILTERED" -gt 0 ]; then
+        log_step "R2R DLL cache seeded: $R2R_SEEDED apps extracted, $R2R_FILTERED filtered (selective), $R2R_FAILED skipped"
+    else
+        log_step "R2R DLL cache seeded: $R2R_SEEDED apps extracted, $R2R_FAILED skipped — cache: $ASSEMBLY_CACHE"
+    fi
 else
     log_step "WARN: Could not determine platform version; skipping R2R pre-seed"
 fi
@@ -547,7 +644,10 @@ exec 3>/tmp/bc-stdin
         # BC_CLEAR_ALL_APPS: republish all previously-installed extensions in
         # dependency order, then fall through to test framework publishing below.
         # -------------------------------------------------------------------------
-        if [ "${BC_CLEAR_ALL_APPS:-false}" = "deps-only" ]; then
+        if [ "${BC_CLEAR_ALL_APPS:-false}" = "selective" ]; then
+            TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
+            echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS=selective: kept apps already in DB, skipping republish (caller will publish overrides)"
+        elif [ "${BC_CLEAR_ALL_APPS:-false}" = "deps-only" ]; then
             TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
             echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS=deps-only: skipping full republish (caller will publish dependency chain)"
         elif [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] && [ -f "/tmp/bc-apps-to-republish.tsv" ]; then

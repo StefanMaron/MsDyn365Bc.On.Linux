@@ -37,6 +37,8 @@ services:
       SA_PASSWORD: ${SA_PASSWORD:-Passw0rd123!}
       BC_CLEAR_ALL_APPS: ${BC_CLEAR_ALL_APPS:-false}
       BC_SKIP_APP_PUBLISH: ${BC_SKIP_APP_PUBLISH:-false}
+      BC_KEEP_APP_IDS: ${BC_KEEP_APP_IDS:-}
+      BC_ARTIFACT_URL: ${BC_ARTIFACT_URL:-}
       SQL_SERVER: sql
     volumes:
       - ${BC_ARTIFACTS_DIR:-bc-artifacts}:/bc/artifacts
