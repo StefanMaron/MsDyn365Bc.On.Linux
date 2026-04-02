@@ -185,33 +185,26 @@ jobs:
           python3 -c "import json,sys; print(json.load(sys.stdin)['value'][0]['Name'])" 2>/dev/null)
         echo "  Company:  $COMPANY"
 
-    - name: Download symbols
+    - name: Prepare symbols from artifacts
       env:
         BC_VERSION: ${{ matrix.bc_version }}
       run: |
-        AUTH="admin:Admin123!"
-        INSTANCE="BC"
-        DEV="http://localhost:7049/$INSTANCE/dev"
         mkdir -p symbols
+        ARTIFACT_DIR="./artifact-cache/$BC_VERSION"
 
-        echo "=== Downloading symbols ==="
-        # System.app (platform symbols — always available)
-        curl -sf --max-time 30 -u "$AUTH" \
-          "$DEV/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
-          -o symbols/System.app
-        echo "  System.app: $(stat -c%s symbols/System.app) bytes"
+        echo "=== Copying symbols from cached artifacts ==="
+        # System.app from platform
+        SYSTEM_APP=$(find "$ARTIFACT_DIR/platform/ModernDev" -name "System.app" 2>/dev/null | head -1)
+        [ -n "$SYSTEM_APP" ] && cp "$SYSTEM_APP" symbols/System.app
+        echo "  System.app: $(stat -c%s symbols/System.app 2>/dev/null || echo 0) bytes"
 
-        # System Application (pre-installed from CRONUS)
-        curl -sf --max-time 30 -u "$AUTH" \
-          "$DEV/packages?publisher=Microsoft&appName=System%20Application&appVersion=0.0.0.0" \
-          -o symbols/SystemApplication.app
-        echo "  SystemApplication.app: $(stat -c%s symbols/SystemApplication.app) bytes"
+        # Extension .app files (System Application, Base Application, etc.)
+        find "$ARTIFACT_DIR/app/Extensions" -name "*.app" -exec cp {} symbols/ \; 2>/dev/null
+        echo "  Extension symbols: $(ls symbols/*.app 2>/dev/null | wc -l) files"
 
-        # Base Application (pre-installed from CRONUS)
-        curl -sf --max-time 30 -u "$AUTH" \
-          "$DEV/packages?publisher=Microsoft&appName=Base%20Application&appVersion=0.0.0.0" \
-          -o symbols/BaseApplication.app
-        echo "  BaseApplication.app: $(stat -c%s symbols/BaseApplication.app) bytes"
+        # Test framework .app files
+        find "$ARTIFACT_DIR/platform" -path "*testframework*" -name "*.app" -exec cp {} symbols/ \; 2>/dev/null
+        echo "  Total symbols: $(ls symbols/*.app 2>/dev/null | wc -l) files"
 
     - name: Compile and publish smoke test
       env:
@@ -285,14 +278,8 @@ jobs:
         }
         ALCODE
 
-        # Download symbols
-        curl -sf --max-time 30 -u "$AUTH" "$DEV/packages?publisher=Microsoft&appName=System&appVersion=0.0.0.0" \
-          -o /tmp/testapp/.alpackages/System.app || true
-        for sym in "Test Runner" "System Application"; do
-          curl -sf --max-time 30 -u "$AUTH" \
-            "$DEV/packages?publisher=Microsoft&appName=$(echo $sym | sed 's/ /%20/g')&appVersion=0.0.0.0" \
-            -o "/tmp/testapp/.alpackages/${sym}.app" 2>/dev/null || true
-        done
+        # Copy symbols from artifacts (faster and more reliable than dev endpoint)
+        cp symbols/*.app /tmp/testapp/.alpackages/ 2>/dev/null || true
 
         # Compile
         echo "Compiling smoke test..."
