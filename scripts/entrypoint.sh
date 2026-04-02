@@ -359,13 +359,10 @@ elif [ "${BC_CLEAR_ALL_APPS:-false}" = "selective" ]; then
     TOTAL_BEFORE=$($SQLCMD_DB -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM [Published Application];" 2>/dev/null | tr -d '[:space:]')
     log_step "BC_CLEAR_ALL_APPS=selective: $TOTAL_BEFORE apps installed, filtering..."
 
-    # Build the keep list: BC_KEEP_APP_IDS (from caller) + hardcoded test framework names
-    # BC_KEEP_APP_IDS are App IDs (stable across versions), not Package IDs
+    # Build the keep list from BC_KEEP_APP_IDS only.
+    # Test framework apps are NOT kept — they're deleted and freshly installed
+    # via dev endpoint after NST starts (ensures proper installation state).
     KEEP_IDS="${BC_KEEP_APP_IDS:-}"
-
-    # Hardcoded: test framework apps (always needed for test execution)
-    # These are kept by name since their IDs may vary across versions
-    KEEP_NAMES="'Test Runner','Library Assert','Library Variable Storage','Permissions Mock','Any'"
 
     # Build SQL IN clause from BC_KEEP_APP_IDS (comma-separated lowercase GUIDs)
     KEEP_SQL=""
@@ -382,11 +379,10 @@ elif [ "${BC_CLEAR_ALL_APPS:-false}" = "selective" ]; then
         cat > "$SELECTIVE_SQL" << SQLEOF
 SET NOCOUNT ON;
 SELECT 'KEEP: ' + [Name] FROM [Published Application]
-WHERE LOWER(CONVERT(VARCHAR(36), [ID])) IN ($KEEP_SQL)
-   OR [Name] IN ($KEEP_NAMES);
+WHERE LOWER(CONVERT(VARCHAR(36), [ID])) IN ($KEEP_SQL);
 
 SELECT [Package ID] INTO #keep FROM [Published Application]
-WHERE LOWER(CONVERT(VARCHAR(36), [ID])) IN ($KEEP_SQL) OR [Name] IN ($KEEP_NAMES);
+WHERE LOWER(CONVERT(VARCHAR(36), [ID])) IN ($KEEP_SQL);
 
 DELETE FROM [NAV App Installed App] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
 DELETE FROM [NAV App Tenant App] WHERE [App Package ID] NOT IN (SELECT [Package ID] FROM #keep);
@@ -398,18 +394,16 @@ DELETE FROM [Published Application] WHERE [Package ID] NOT IN (SELECT [Package I
 DROP TABLE #keep;
 SQLEOF
     else
-        log_step "WARN: BC_KEEP_APP_IDS is empty, keeping only test framework by name"
+        log_step "BC_KEEP_APP_IDS is empty — clearing ALL apps"
         cat > "$SELECTIVE_SQL" << SQLEOF
 SET NOCOUNT ON;
-SELECT [Package ID] INTO #keep FROM [Published Application] WHERE [Name] IN ($KEEP_NAMES);
-DELETE FROM [NAV App Installed App] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
-DELETE FROM [NAV App Tenant App] WHERE [App Package ID] NOT IN (SELECT [Package ID] FROM #keep);
-DELETE FROM [NAV App Dependencies] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
-DELETE FROM [NAV App Published App] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
-DELETE FROM [Installed Application] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
-DELETE FROM [Inplace Installed Application] WHERE [Runtime Package ID] NOT IN (SELECT [Package ID] FROM #keep);
-DELETE FROM [Published Application] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
-DROP TABLE #keep;
+DELETE FROM [NAV App Installed App];
+DELETE FROM [NAV App Tenant App];
+DELETE FROM [NAV App Dependencies];
+DELETE FROM [NAV App Published App];
+DELETE FROM [Installed Application];
+DELETE FROM [Inplace Installed Application];
+DELETE FROM [Published Application];
 SQLEOF
     fi
     REMOVED=$($SQLCMD_DB -h -1 -W -i "$SELECTIVE_SQL" 2>&1) || true
@@ -647,7 +641,7 @@ exec 3>/tmp/bc-stdin
         # -------------------------------------------------------------------------
         if [ "${BC_CLEAR_ALL_APPS:-false}" = "selective" ]; then
             TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
-            echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS=selective: kept apps already in DB, skipping republish (caller will publish overrides)"
+            echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS=selective: publishing test framework only (caller will publish overrides)"
         elif [ "${BC_CLEAR_ALL_APPS:-false}" = "deps-only" ]; then
             TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
             echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS=deps-only: skipping full republish (caller will publish dependency chain)"
