@@ -42,24 +42,22 @@ page 50006 "Test Results API"
     trigger OnAfterGetRecord()
     var
         InStr: InStream;
-        RawText: Text;
+        Content: Text;
     begin
-        // Read full error message from blob
         ErrorMessageText := '';
         Rec.CalcFields("Error Message");
         if Rec."Error Message".HasValue() then begin
             Rec."Error Message".CreateInStream(InStr, TextEncoding::UTF8);
-            InStr.ReadText(RawText);
-            ErrorMessageText := CopyStr(RawText, 1, 2048);
+            InStr.Read(Content);
+            ErrorMessageText := CopyStr(Content, 1, 2048);
         end;
 
-        // Read call stack from blob
         ErrorCallStackText := '';
         Rec.CalcFields("Error Call Stack");
         if Rec."Error Call Stack".HasValue() then begin
             Rec."Error Call Stack".CreateInStream(InStr, TextEncoding::UTF8);
-            InStr.ReadText(RawText);
-            ErrorCallStackText := CopyStr(RawText, 1, 2048);
+            InStr.Read(Content);
+            ErrorCallStackText := CopyStr(Content, 1, 2048);
         end;
     end;
 
