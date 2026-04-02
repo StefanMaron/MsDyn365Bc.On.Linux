@@ -67,9 +67,9 @@ mkdir -p "$DEST/app" "$DEST/platform"
 # ── Parallel download ──────────────────────────────────────────────────────
 echo "[artifacts] Downloading app + platform in parallel..."
 T0=$(_ms)
-curl -sSL --retry 3 "$APP_URL"      -o "$TMPDIR_DL/app.zip"      &
+curl -sSL --retry 3 --retry-all-errors --http1.1 "$APP_URL"      -o "$TMPDIR_DL/app.zip"      &
 APP_PID=$!
-curl -sSL --retry 3 "$PLATFORM_URL" -o "$TMPDIR_DL/platform.zip" &
+curl -sSL --retry 3 --retry-all-errors --http1.1 "$PLATFORM_URL" -o "$TMPDIR_DL/platform.zip" &
 PLATFORM_PID=$!
 
 wait $APP_PID      || { echo "[artifacts] ERROR: app artifact download failed";      exit 1; }
