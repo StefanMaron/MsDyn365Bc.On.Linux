@@ -43,6 +43,9 @@ services:
       BC_ARTIFACT_URL: ${BC_ARTIFACT_URL:-}
       BC_TEST_APPS: ${BC_TEST_APPS:-}
       SQL_SERVER: sql
+      # .NET runtime tuning (Server GC breaks API — do NOT enable gcServer)
+      DOTNET_TieredCompilation: ${DOTNET_TieredCompilation:-}
+      DOTNET_TC_QuickJitForLoops: ${DOTNET_TC_QuickJitForLoops:-}
     volumes:
       - ${BC_ARTIFACTS_DIR:-bc-artifacts}:/bc/artifacts
       - bc-service:/bc/service

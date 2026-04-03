@@ -34,6 +34,16 @@ Conclusion: Network hop adds ~0.1ms/call which is negligible. The 47% unmanaged
 time is SQL Server's internal processing (query compilation, locking, buffer ops),
 not network latency. **Docker bridge is fine.**
 
+### Experiment 2: Server GC (DOTNET_gcServer=1)
+
+Hypothesis: Server GC reduces pause frequency, improving throughput.
+Result: **Breaks the API endpoint.** BC's OData/API port (7052) returns 400
+errors with Server GC enabled. The HttpSysStub or request handling pipeline
+is incompatible with Server GC's thread pool behavior. **Cannot use.**
+
+Baseline (Workstation GC): 62-64s avg (3 runs, warm).
+Server GC: API broken, tests cannot run.
+
 ## 1. Profile First — Find the Bottleneck
 
 Before optimizing, attach `dotnet-trace` or `dotnet-counters` to the BC process
