@@ -253,7 +253,24 @@ But there may be other angles:
 - **Snapshot/restore at DB level** between codeunits (SQL Server snapshots are
   near-instant) instead of relying on transaction rollback
 
-## Linux-Exclusive Ideas (Not Yet Tested)
+## Linux-Exclusive Experiments
+
+### Experiment 9: TuneD mssql sysctl Profile
+**Blocked: requires sudo.** Could not apply sysctl changes in this session.
+Key parameters to test: `vm.swappiness=1`, `vm.dirty_ratio=80`,
+`net.ipv4.tcp_low_latency=1`. THP and CPU governor already optimal on host.
+```bash
+sudo sysctl -w vm.swappiness=1 vm.dirty_background_ratio=3 vm.dirty_ratio=80 \
+  vm.dirty_expire_centisecs=500 vm.dirty_writeback_centisecs=100 \
+  vm.max_map_count=1600000 net.ipv4.tcp_low_latency=1
+```
+
+### Experiment 10: SQL Trace Flag 3979 (FUA)
+**Not applicable at runtime.** TF 3979 can only be set at SQL Server startup,
+not via DBCC TRACEON. Would need `mssql-conf set traceflag 3979 on` and SQL
+restart. Data is on tmpfs anyway so likely no impact.
+
+## Linux-Exclusive Ideas (Still To Test)
 
 ### Microsoft TuneD `mssql` sysctl Profile
 Official Microsoft/Red Hat kernel tuning for SQL Server on Linux.
