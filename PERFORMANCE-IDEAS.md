@@ -265,10 +265,16 @@ sudo sysctl -w vm.swappiness=1 vm.dirty_background_ratio=3 vm.dirty_ratio=80 \
   vm.max_map_count=1600000 net.ipv4.tcp_low_latency=1
 ```
 
-### Experiment 10: SQL Trace Flag 3979 (FUA)
-**Not applicable at runtime.** TF 3979 can only be set at SQL Server startup,
-not via DBCC TRACEON. Would need `mssql-conf set traceflag 3979 on` and SQL
-restart. Data is on tmpfs anyway so likely no impact.
+### Experiment 10: SQL Trace Flag 3979 + writethrough
+**TF 3979:** "not supported" by mssql-conf on SQL Server 2022-latest image.
+May need specific CU level or RHEL-based image.
+**control.writethrough=1:** Crashed SQL Server — tmpfs doesn't support O_DSYNC.
+Both settings are moot when data is on tmpfs (no real disk I/O to optimize).
+
+### Testing sysctl in CI
+The sysctl experiments (Exp 9) need sudo which is available on GitHub Actions
+runners. Run the TuneD mssql profile benchmark in a CI pipeline for proper
+testing on standardized hardware.
 
 ## Linux-Exclusive Ideas (Still To Test)
 
