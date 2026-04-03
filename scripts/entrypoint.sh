@@ -506,6 +506,33 @@ BEGIN
         NEWID(), GETUTCDATE(), '$USER_GUID', GETUTCDATE(), '$USER_GUID');
 END
 " 2>/dev/null
+
+# Background SUPER user — safety net so tests can freely disable/delete ADMIN
+# without violating the "at least one enabled SUPER user" platform constraint.
+# This user has no password and is never used for authentication.
+SVC_GUID='00000000-0000-0000-0000-000000000002'
+$SQLCMD_DB -Q "
+IF NOT EXISTS (SELECT 1 FROM [User] WHERE [User Name] = 'YOURBC-SERVICEUSER')
+BEGIN
+    INSERT INTO [User] ([User Security ID], [User Name], [Full Name], [State], [Expiry Date],
+        [Windows Security ID], [Change Password], [License Type], [Authentication Email],
+        [Contact Email], [Exchange Identifier], [Application ID],
+        [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
+    VALUES ('$SVC_GUID', N'YOURBC-SERVICEUSER', N'BC Service', 0, '2099-12-31', N'S-1-5-21-572246948-1269080603-559786204-1001', 0, 0, N'', N'', N'',
+        '00000000-0000-0000-0000-000000000000',
+        NEWID(), GETUTCDATE(), '$SVC_GUID', GETUTCDATE(), '$SVC_GUID');
+    INSERT INTO [User Property] ([User Security ID], [Password], [Name Identifier],
+        [Authentication Key], [WebServices Key], [WebServices Key Expiry Date],
+        [Authentication Object ID], [Directory Role ID], [Telemetry User ID],
+        [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
+    VALUES ('$SVC_GUID', N'', N'', N'', N'', '1753-01-01', N'', N'', '$SVC_GUID',
+        NEWID(), GETUTCDATE(), '$SVC_GUID', GETUTCDATE(), '$SVC_GUID');
+    INSERT INTO [Access Control] ([User Security ID], [Role ID], [Company Name], [Scope], [App ID],
+        [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
+    VALUES ('$SVC_GUID', N'SUPER', N'', 0, '00000000-0000-0000-0000-000000000000',
+        NEWID(), GETUTCDATE(), '$SVC_GUID', GETUTCDATE(), '$SVC_GUID');
+END
+" 2>/dev/null
 log_step "Database ready (admin / Admin123!). Step 3 (DB setup): $(($(date +%s) - STEP3_START))s"
 
 # =============================================================================
