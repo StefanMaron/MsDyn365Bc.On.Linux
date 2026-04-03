@@ -241,6 +241,33 @@ But there may be other angles:
 - **Snapshot/restore at DB level** between codeunits (SQL Server snapshots are
   near-instant) instead of relying on transaction rollback
 
+## Linux-Exclusive Ideas (Not Yet Tested)
+
+### Microsoft TuneD `mssql` sysctl Profile
+Official Microsoft/Red Hat kernel tuning for SQL Server on Linux.
+Key parameters: `force_latency=5` (prevents CPU deep sleep between tiny ops),
+`vm.transparent_hugepages=always`, `vm.swappiness=1`, `vm.dirty_ratio=80`.
+Apply via `docker run --sysctl` or on the Docker host.
+Test: apply sysctls, run 5-codeunit benchmark, compare to 56s baseline.
+*Linux-exclusive — no Windows equivalent for these kernel parameters.*
+
+### TCP_QUICKACK (Linux-only socket option)
+Disables delayed ACKs per-socket. Windows has no equivalent. Our Experiment 6
+failed because containers had read-only sysctl. Proper test: run container with
+`--sysctl net.ipv4.tcp_low_latency=1` or use LD_PRELOAD shim to set
+TCP_NODELAY + TCP_QUICKACK on all sockets created by BC process.
+There's a known SqlClient-on-Linux performance issue (dotnet/SqlClient#422)
+related to TCP behavior with MARS.
+Test: strace/tcpdump to confirm delayed ACKs occur, then apply fix.
+*Linux-exclusive — TCP_QUICKACK is a Linux-only socket option.*
+
+### SQL Server Trace Flag 3979 (FUA/Write-Through)
+Linux-specific optimization for XFS filesystem. Microsoft's own testing showed
+~50% I/O reduction for write-intensive workloads. Our data is on tmpfs so
+impact may be minimal, but transaction log writes may still benefit.
+Test: `mssql-conf set traceflag 3979 on` + `control.writethrough 1`.
+*Linux-exclusive — optimizes XFS FUA path that only exists on Linux.*
+
 ## Priority Order
 
 1. **Profile** — without data, everything else is guessing
