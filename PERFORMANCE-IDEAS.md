@@ -131,6 +131,12 @@ cores is worse than letting the OS schedule freely. BC uses many async
 threads; SQL Server needs cores for internal task scheduling.
 *Platform-agnostic.*
 
+### Experiment 8: Transaction Log Location
+Verified: both data (.mdf) and log (.ldf) are on `/var/opt/mssql/data` which
+is tmpfs (RAM). Log I/O is not a bottleneck. Combined with DELAYED_DURABILITY
+= FORCED, log writes are already minimal. SQL Server does not support disabling
+the transaction log entirely — it's fundamental to ACID. *Platform-agnostic.*
+
 ### What actually helped
 Only SQL overhead removal (Experiment 3b) produced measurable improvement:
 - Query store OFF: ~7% *Platform-agnostic*
