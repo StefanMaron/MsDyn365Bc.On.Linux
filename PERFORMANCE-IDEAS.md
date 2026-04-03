@@ -44,6 +44,34 @@ is incompatible with Server GC's thread pool behavior. **Cannot use.**
 Baseline (Workstation GC): 62-64s avg (3 runs, warm).
 Server GC: API broken, tests cannot run.
 
+### Experiment 3: SQL Server Tuning (MAXDOP, ad hoc, cost threshold)
+
+Hypothesis: BC generates many small queries; MAXDOP=1 and ad hoc optimization
+should reduce SQL overhead.
+
+Applied: `max degree of parallelism`=1, `cost threshold for parallelism`=50,
+`optimize for ad hoc workloads`=1.
+
+| Setup | Run 1 | Run 2 | Run 3 | Avg |
+|-------|-------|-------|-------|-----|
+| Baseline (defaults) | 62s | 60s | 61s | **61s** |
+| SQL tuned | 65s | 61s | 61s | **62s** |
+
+**No difference.** BC's queries are already single-threaded (small, simple),
+plan cache is already warm, and ad hoc optimization doesn't help because the
+same queries repeat. The 47% SQL time is irreducible query processing overhead.
+
+### Summary
+
+Three experiments tested, none improved throughput:
+1. Network co-location: no effect (Docker bridge overhead negligible)
+2. Server GC: breaks BC's API endpoint
+3. SQL tuning: no effect (queries already optimal for this workload)
+
+The ~0.2s/method execution speed appears to be the floor for the current
+architecture. Further gains require structural changes (RPC short-circuit,
+session pooling) or parallelization across multiple BC instances.
+
 ## 1. Profile First — Find the Bottleneck
 
 Before optimizing, attach `dotnet-trace` or `dotnet-counters` to the BC process
