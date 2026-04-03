@@ -28,7 +28,7 @@ using StreamJsonRpc;
 var host = "localhost:7085";
 var odataHost = "localhost:7052"; // OData API host for suite setup
 var company = "CRONUS International Ltd.";
-var user = "admin";
+var user = "BCRUNNER";
 var password = "Admin123!";
 var timeoutMin = 30;
 var codeunitTimeoutMin = 10; // max time for a single RunNextTest call (per codeunit)

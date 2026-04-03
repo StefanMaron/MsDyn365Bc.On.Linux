@@ -481,17 +481,18 @@ else
     log_step "Cleared test framework global entries (will re-publish via dev endpoint)"
 fi
 
-# Admin user (password hash for Admin123! with GUID 00000000-0000-0000-0000-000000000001)
+# Service user for scripting/OData/dev endpoint (password hash for Admin123! with GUID 00000000-0000-0000-0000-000000000001)
+# Named BCRUNNER (not ADMIN) so tests can freely create/delete/disable an "ADMIN" user.
 USER_GUID='00000000-0000-0000-0000-000000000001'
 PASSWORD_HASH='aXD91GRctWiXaqXeWbXhxQ==-V3'
 $SQLCMD_DB -Q "
-IF NOT EXISTS (SELECT 1 FROM [User] WHERE [User Name] = 'ADMIN')
+IF NOT EXISTS (SELECT 1 FROM [User] WHERE [User Name] = 'BCRUNNER')
 BEGIN
     INSERT INTO [User] ([User Security ID], [User Name], [Full Name], [State], [Expiry Date],
         [Windows Security ID], [Change Password], [License Type], [Authentication Email],
         [Contact Email], [Exchange Identifier], [Application ID],
         [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
-    VALUES ('$USER_GUID', N'ADMIN', N'Admin', 0, '2099-12-31', N'S-1-5-21-1176130292-1391773210-2100300684-1001', 0, 0, N'', N'', N'',
+    VALUES ('$USER_GUID', N'BCRUNNER', N'BC Runner', 0, '2099-12-31', N'S-1-5-21-2074085148-119339936-2019613796-1001', 0, 0, N'', N'', N'',
         '00000000-0000-0000-0000-000000000000',
         NEWID(), GETUTCDATE(), '$USER_GUID', GETUTCDATE(), '$USER_GUID');
     INSERT INTO [User Property] ([User Security ID], [Password], [Name Identifier],
@@ -507,7 +508,8 @@ BEGIN
 END
 " 2>/dev/null
 
-# Background SUPER user — safety net so tests can freely disable/delete ADMIN
+# Background SUPER user — safety net so tests can freely disable/delete users
+# without violating the "at least one enabled SUPER user" platform constraint.
 # without violating the "at least one enabled SUPER user" platform constraint.
 # This user has no password and is never used for authentication.
 SVC_GUID='00000000-0000-0000-0000-000000000002'
@@ -533,7 +535,7 @@ BEGIN
         NEWID(), GETUTCDATE(), '$SVC_GUID', GETUTCDATE(), '$SVC_GUID');
 END
 " 2>/dev/null
-log_step "Database ready (admin / Admin123!). Step 3 (DB setup): $(($(date +%s) - STEP3_START))s"
+log_step "Database ready (BCRUNNER / Admin123!). Step 3 (DB setup): $(($(date +%s) - STEP3_START))s"
 
 # =============================================================================
 # Step 4: Start BC server in background, publish test runner, then wait
@@ -821,7 +823,7 @@ PYEOF
                 fi
 
                 HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 300 \
-                    -u "admin:Admin123!" -X POST \
+                    -u "BCRUNNER:Admin123!" -X POST \
                     -F "file=@$APP_FILE;type=application/octet-stream" \
                     "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
                 echo "[entrypoint]   $APP_NAME $APP_VER: HTTP $HTTP"
@@ -848,7 +850,7 @@ PYEOF
         \) 2>/dev/null | sort | while read -r app; do
             NAME=$(basename "$app")
             HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
-                -u "admin:Admin123!" -X POST \
+                -u "BCRUNNER:Admin123!" -X POST \
                 -F "file=@$app;type=application/octet-stream" \
                 "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
             echo "[entrypoint]   $NAME: HTTP $HTTP"
@@ -869,7 +871,7 @@ PYEOF
                 fi
                 NAME=$(basename "$app")
                 HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 600 \
-                    -u "admin:Admin123!" -X POST \
+                    -u "BCRUNNER:Admin123!" -X POST \
                     -F "file=@$app;type=application/octet-stream" \
                     "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
                 echo "[entrypoint]   $NAME: HTTP $HTTP"
@@ -880,7 +882,7 @@ PYEOF
         if [ -f /bc/testrunner/TestRunner.app ]; then
             echo "[entrypoint] Publishing Test Runner Extension..."
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-                -u "admin:Admin123!" -X POST \
+                -u "BCRUNNER:Admin123!" -X POST \
                 -F "file=@/bc/testrunner/TestRunner.app;type=application/octet-stream" \
                 "$DEV_URL/apps?SchemaUpdateMode=synchronize" 2>&1)
             echo "[entrypoint] Test Runner Extension: HTTP $HTTP_CODE"

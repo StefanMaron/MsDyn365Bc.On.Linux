@@ -14,7 +14,7 @@
 #   --company <name>           Company name (default: auto-detect)
 #   --base-url <url>           BC base URL (default: http://localhost:7048/BC)
 #   --dev-url <url>            BC Dev endpoint (default: http://localhost:7049/BC/dev)
-#   --auth <user:pass>         Authentication (default: admin:Admin123!)
+#   --auth <user:pass>         Authentication (default: BCRUNNER:Admin123!)
 #   --timeout <minutes>        Overall timeout (default: 30)
 #   --test-runner-app <path>   TestRunnerExtension .app (auto-detected)
 
@@ -23,7 +23,7 @@ set -uo pipefail
 # === Configuration & CLI Parsing ===
 BASE_URL="http://localhost:7048/BC"
 DEV_URL="http://localhost:7049/BC/dev"
-AUTH="admin:Admin123!"
+AUTH="BCRUNNER:Admin123!"
 COMPANY=""
 CODEUNIT_RANGE=""
 APP_FILE=""
