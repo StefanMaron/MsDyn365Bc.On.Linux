@@ -101,6 +101,33 @@ cache. Test with 4096 or unlimited.
 Pin BC and SQL to separate CPU cores to avoid context switching overhead.
 `--cpuset-cpus` in Docker.
 
+## Experiment Results (continued)
+
+### Experiment 4: SQL Forced Parameterization
+`ALTER DATABASE CRONUS SET PARAMETERIZATION FORCED`
+Result: **No improvement.** 64s avg vs 62s baseline. May hurt because BC's
+queries rely on literal values for optimal plans. *Platform-agnostic.*
+
+### Experiment 5: SQL Memory (4096MB vs default unlimited)
+`EXEC sp_configure 'max server memory', 4096`
+Result: **No improvement.** 64s avg vs 62s baseline. Working set fits in
+default memory allocation. *Platform-agnostic.*
+
+### Experiments blocked by BC compatibility
+- **Server GC** (DOTNET_gcServer=1): Breaks API endpoint
+- **Tiered compilation off** (DOTNET_TieredCompilation=0): Breaks API endpoint
+- **Quick JIT for loops** (DOTNET_TC_QuickJitForLoops=1): Breaks API endpoint
+All JIT/GC changes are incompatible with BC's HttpSysStub. *Linux-only issue
+(HttpSysStub is the Linux replacement for Windows HttpSys).*
+
+### What actually helped
+Only SQL overhead removal (Experiment 3b) produced measurable improvement:
+- Query store OFF: ~7% *Platform-agnostic*
+- Auto statistics OFF: ~4% *Platform-agnostic*
+- Page verify NONE: ~1% *Platform-agnostic*
+- Delayed durability FORCED: ~1% *Platform-agnostic*
+- **Combined: ~13%** *Platform-agnostic*
+
 ## 1. Profile First — Find the Bottleneck
 
 Before optimizing, attach `dotnet-trace` or `dotnet-counters` to the BC process
