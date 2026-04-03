@@ -355,6 +355,27 @@ fi
 # Sandbox tenant type
 $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1;" 2>/dev/null
 
+# SQL performance tuning for CI/CD — disable safety overhead not needed for test runs
+$SQLCMD_DB -Q "
+ALTER DATABASE CRONUS SET QUERY_STORE = OFF;
+ALTER DATABASE CRONUS SET AUTO_UPDATE_STATISTICS OFF;
+ALTER DATABASE CRONUS SET AUTO_UPDATE_STATISTICS_ASYNC OFF;
+ALTER DATABASE CRONUS SET AUTO_CREATE_STATISTICS OFF;
+ALTER DATABASE CRONUS SET PAGE_VERIFY NONE;
+ALTER DATABASE CRONUS SET DELAYED_DURABILITY = FORCED;
+" 2>/dev/null
+# Disable change tracking (must disable on tables first)
+$SQLCMD_DB -Q "
+DECLARE @sql NVARCHAR(MAX) = '';
+SELECT @sql = @sql + 'ALTER TABLE [' + s.name + '].[' + t.name + '] DISABLE CHANGE_TRACKING;'
+FROM sys.change_tracking_tables ct
+JOIN sys.tables t ON ct.object_id = t.object_id
+JOIN sys.schemas s ON t.schema_id = s.schema_id;
+IF LEN(@sql) > 0 EXEC sp_executesql @sql;
+" 2>/dev/null
+$SQLCMD -Q "ALTER DATABASE CRONUS SET CHANGE_TRACKING = OFF;" 2>/dev/null
+log_step "SQL tuned for CI/CD (query store, stats, page verify, change tracking OFF)"
+
 # Clear pre-installed apps before BC starts.
 # BC_CLEAR_ALL_APPS=true:      clear ALL apps, republish ALL dynamically after NST starts (~300s)
 # BC_CLEAR_ALL_APPS=deps-only: clear ALL apps, republish ONLY test framework after NST starts (~30s)
