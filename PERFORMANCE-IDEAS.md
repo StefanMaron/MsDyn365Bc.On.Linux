@@ -138,12 +138,24 @@ is tmpfs (RAM). Log I/O is not a bottleneck. Combined with DELAYED_DURABILITY
 the transaction log entirely — it's fundamental to ACID. *Platform-agnostic.*
 
 ### What actually helped
-Only SQL overhead removal (Experiment 3b) produced measurable improvement:
-- Query store OFF: ~7% *Platform-agnostic*
-- Auto statistics OFF: ~4% *Platform-agnostic*
-- Page verify NONE: ~1% *Platform-agnostic*
-- Delayed durability FORCED: ~1% *Platform-agnostic*
-- **Combined: ~13%** *Platform-agnostic*
+Only SQL overhead removal (Experiment 3b) produced measurable improvement.
+Small benchmark (301 methods): **13% faster** (64s → 56s).
+Full ERM benchmark (9,320 methods): **23% faster** (70.5 min → 54.4 min).
+
+| Benchmark | Before | After | Improvement |
+|-----------|--------|-------|-------------|
+| 5 codeunits (301 methods) | 64s | 56s | **-13%** |
+| Full ERM (9,320 methods) | 70.5 min | 54.4 min | **-23%** |
+
+The larger improvement at scale suggests SQL overhead (query store, stats
+updates) compounds over thousands of operations. *All platform-agnostic.*
+
+Settings applied:
+- Query store OFF
+- Auto statistics OFF (update + create + async)
+- Page verify NONE
+- Delayed durability FORCED
+- Change tracking OFF
 
 ## 1. Profile First — Find the Bottleneck
 
