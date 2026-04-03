@@ -192,6 +192,15 @@ codeunit 50003 "Test Runner API"
         exit(CodeunitId > 0);
     end;
 
+    trigger OnBeforeTestRun(CodeunitId: Integer; CodeunitName: Text; FunctionName: Text; FunctionTestPermissions: TestPermissions): Boolean
+    begin
+        // Always return true — run every test method regardless of platform checks.
+        // The platform runner 130451 has built-in checks that skip methods on Linux
+        // (missing SaaS features, etc.). By using our own runner with OnBeforeTestRun
+        // that always returns true, we ensure all methods are attempted.
+        exit(true);
+    end;
+
     trigger OnAfterTestRun(CodeunitId: Integer; CodeunitName: Text; FunctionName: Text; Permissions: TestPermissions; Success: Boolean)
     var
         Log: Record "Log Table";

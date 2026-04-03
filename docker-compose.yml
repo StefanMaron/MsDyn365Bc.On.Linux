@@ -7,6 +7,8 @@ services:
       MSSQL_MEMORY_LIMIT_MB: ${MSSQL_MEMORY_LIMIT_MB:-2048}
     ports:
       - "${SQL_PORT:-11433}:1433"
+    tmpfs:
+      - /var/opt/mssql/data:size=4g
     volumes:
       - ${BC_ARTIFACTS_DIR:-bc-artifacts}:/bc/artifacts:ro
     healthcheck:
@@ -39,6 +41,7 @@ services:
       BC_SKIP_APP_PUBLISH: ${BC_SKIP_APP_PUBLISH:-false}
       BC_KEEP_APP_IDS: ${BC_KEEP_APP_IDS:-}
       BC_ARTIFACT_URL: ${BC_ARTIFACT_URL:-}
+      BC_TEST_APPS: ${BC_TEST_APPS:-}
       SQL_SERVER: sql
     volumes:
       - ${BC_ARTIFACTS_DIR:-bc-artifacts}:/bc/artifacts

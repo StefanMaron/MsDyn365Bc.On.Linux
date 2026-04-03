@@ -222,10 +222,11 @@ page 50002 "Codeunit Run Requests"
         if Rec.CodeunitIds = '' then
             exit(false);
 
-        // Use runner 130451 (Isol. Codeunit) for proper test isolation.
-        // Results are stored in Test Method Line (read via testResults OData API).
+        // Use runner 130450 (Test Runner - Isol. Codeunit) for proper codeunit isolation.
+        // 130450 = TestIsolation=Codeunit (fresh session per codeunit) ← CORRECT
+        // 130451 = TestIsolation=Disabled (no isolation) ← WRONG, causes cascading failures
         SuiteRunner.InitSuite('DEFAULT');
-        OverrideSuiteRunner('DEFAULT', 130451);
+        OverrideSuiteRunner('DEFAULT', 130450);
 
         // Parse comma-separated IDs and ranges (same as RunCodeunit)
         IdList := Rec.CodeunitIds.Split(',');

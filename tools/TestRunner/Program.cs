@@ -198,6 +198,13 @@ async Task<int> RunTests()
             testResultJson = await ReadTestResultJson(rpc, formState!, cts.Token);
             if (testResultJson == "All tests executed.")
                 allDone = true;
+            else
+            {
+                // RunNextTest completed without killing the session (no test isolation on Linux).
+                // Count the codeunit and fetch results normally.
+                codeunitsRun++;
+                await PrintLiveResults(authBytes, codeunitsRun, numCodeunits, startTime);
+            }
         }
         catch (Exception ex) when (ex is ConnectionLostException || ex is RemoteInvocationException || ex is OperationCanceledException)
         {
@@ -410,12 +417,17 @@ class Callbacks
     //   1. Handle the callback (return from the JSON-RPC method)
     //   2. Call EndClientCall on the server to unblock the ResultWaiter
     // Without step 2, the server hangs forever.
+    // ClientResponse DTO matching Microsoft.Dynamics.Nav.Types.ClientResponse.
+    // The server's IClientApi.EndClientCall(ClientResponse response) accesses response.Result,
+    // so we must send an object (not null) to avoid NullReferenceException in EndClientCall.
+    private static readonly JObject EmptyClientResponse = new JObject { ["Result"] = null };
+
     private async Task AckCallback(string name)
     {
         // EndClientCall is silent by default — it fires frequently during test execution
         if (Rpc != null)
         {
-            try { await Rpc.InvokeAsync("EndClientCall", new object?[] { null }); }
+            try { await Rpc.InvokeAsync("EndClientCall", new object?[] { EmptyClientResponse }); }
             catch { /* connection may be closing */ }
         }
     }
@@ -445,6 +457,7 @@ class Callbacks
     // Dialog callbacks — BC sends these when AL code opens/closes dialogs
     [JsonRpcMethod("CloseDialog")] public async Task CloseDialog(JToken r) => await AckCallback("CloseDialog");
     [JsonRpcMethod("OpenDialog")] public async Task OpenDialog(JToken r) => await AckCallback("OpenDialog");
+    [JsonRpcMethod("UpdateDialog")] public async Task UpdateDialog(JToken r) => await AckCallback("UpdateDialog");
     [JsonRpcMethod("DisposeAutomationObject")] public Task DisposeAutomationObject(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("InvokeAutomationMethod")] public Task InvokeAutomationMethod(JToken r) => Task.CompletedTask;
     [JsonRpcMethod("DataSetPageReady")] public Task DataSetPageReady(JToken r) => Task.CompletedTask;

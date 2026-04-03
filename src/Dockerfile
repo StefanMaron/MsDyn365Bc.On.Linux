@@ -48,6 +48,11 @@ RUN chmod +x /bc/scripts/*.sh
 # Copy test runner extension (REST API for test execution)
 COPY extensions/TestRunnerExtension/TestRunnerExtension.app /bc/testrunner/TestRunner.app
 
+# Copy SideService stubs (Linux replacements for Windows PE executables)
+COPY stubs/reporting-service-stub /bc/stubs/reporting-service-stub
+COPY stubs/reporting-service-stub.dll /bc/stubs/reporting-service-stub.dll
+COPY stubs/reporting-service-stub.runtimeconfig.json /bc/stubs/reporting-service-stub.runtimeconfig.json
+
 ENV DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8

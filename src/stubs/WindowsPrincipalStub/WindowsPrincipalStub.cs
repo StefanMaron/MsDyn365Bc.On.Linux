@@ -123,6 +123,16 @@ namespace System.Security.Principal
         NtAuthoritySid = 7, NetworkServiceSid = 24, LocalServiceSid = 23,
         AuthenticatedUserSid = 17,
     }
+
+    // BC's ALDatabase.ALSid uses this exception type when Windows SID lookup fails.
+    // On Linux the type doesn't exist in the runtime — provide a stub.
+    public sealed class IdentityNotMappedException : SystemException
+    {
+        public IdentityNotMappedException() : base("Identity not mapped") { }
+        public IdentityNotMappedException(string message) : base(message) { }
+        public IdentityNotMappedException(string message, Exception innerException) : base(message, innerException) { }
+        public IdentityReferenceCollection? UnmappedIdentities { get; }
+    }
 }
 
 namespace Microsoft.Win32.SafeHandles

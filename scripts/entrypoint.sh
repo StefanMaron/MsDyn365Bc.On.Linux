@@ -95,6 +95,15 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
     log_step "Found service tier at: $SRC"
     cp -r "$SRC/." "$SERVICE_DIR/"
 
+    # Replace Reporting Service Windows PE with a Linux .NET stub.
+    # The original is a Windows-only self-contained .NET app. Without a stub, BC gets
+    # "Exec format error" which crashes test codeunits that use reports, causing hundreds
+    # of test methods to be skipped. The stub is a minimal .NET app that starts and sleeps
+    # — BC can start the process without crashing, and report tests fail gracefully.
+    # Keep the Reporting Service .exe for BC startup (constructor probes assembly metadata).
+    # After BC starts, replace it with a sleep stub so the watchdog sees a live process.
+    # This is done in the background subshell that waits for BC to start (see below).
+
     # Create temp directory BC expects (detect NAV_DIR from actual path)
     NAV_DIR=$(echo "$SRC" | grep -oP '\d{3}(?=/Service)')
     [ -z "$NAV_DIR" ] && NAV_DIR="${MAJOR_VERSION}0"
@@ -118,10 +127,13 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
         -e "s|ManagementApiServicesPort\" value=\"[^\"]*\"|ManagementApiServicesPort\" value=\"7086\"|" \
         -e "s|DeveloperServicesPort\" value=\"[^\"]*\"|DeveloperServicesPort\" value=\"7049\"|" \
         -e "s|ServerInstance\" value=\"[^\"]*\"|ServerInstance\" value=\"BC\"|" \
+        -e "s|ExtensionAllowedTargetLevel\" value=\"[^\"]*\"|ExtensionAllowedTargetLevel\" value=\"OnPrem\"|" \
         "$CONFIG"
 
-    # Add settings if missing
-    if ! grep -q "TenantEnvironmentType" "$CONFIG"; then
+    # Ensure TenantEnvironmentType=Sandbox (required for test automation at platform level)
+    if grep -q "TenantEnvironmentType" "$CONFIG"; then
+        sed -i 's|TenantEnvironmentType" value="[^"]*"|TenantEnvironmentType" value="Sandbox"|' "$CONFIG"
+    else
         sed -i '/<add key="TestAutomationEnabled"/a\  <add key="TenantEnvironmentType" value="Sandbox" />' "$CONFIG"
     fi
     if ! grep -q "TestAutomationEnabled" "$CONFIG"; then
@@ -341,7 +353,7 @@ if [ -n "$LICENSE_FILE" ] && [ -f "$ARTIFACTS/app/$LICENSE_FILE" ]; then
 fi
 
 # Sandbox tenant type
-$SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1 WHERE tenantid = 'default';" 2>/dev/null
+$SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1;" 2>/dev/null
 
 # Clear pre-installed apps before BC starts.
 # BC_CLEAR_ALL_APPS=true:      clear ALL apps, republish ALL dynamically after NST starts (~300s)
@@ -473,13 +485,13 @@ fi
 USER_GUID='00000000-0000-0000-0000-000000000001'
 PASSWORD_HASH='aXD91GRctWiXaqXeWbXhxQ==-V3'
 $SQLCMD_DB -Q "
-IF NOT EXISTS (SELECT 1 FROM [User] WHERE [User Name] = 'admin')
+IF NOT EXISTS (SELECT 1 FROM [User] WHERE [User Name] = 'ADMIN')
 BEGIN
     INSERT INTO [User] ([User Security ID], [User Name], [Full Name], [State], [Expiry Date],
         [Windows Security ID], [Change Password], [License Type], [Authentication Email],
         [Contact Email], [Exchange Identifier], [Application ID],
         [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
-    VALUES ('$USER_GUID', N'admin', N'Admin', 0, '2099-12-31', N'', 0, 0, N'', N'', N'',
+    VALUES ('$USER_GUID', N'ADMIN', N'Admin', 0, '2099-12-31', N'', 0, 0, N'', N'', N'',
         '00000000-0000-0000-0000-000000000000',
         NEWID(), GETUTCDATE(), '$USER_GUID', GETUTCDATE(), '$USER_GUID');
     INSERT INTO [User Property] ([User Security ID], [Password], [Name Identifier],
@@ -623,6 +635,16 @@ exec 3>/tmp/bc-stdin
     NST_WAIT_ELAPSED=$(( $(date +%s) - NST_WAIT_START ))
     TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
     echo "[entrypoint] [${TOTAL_ELAPSED}s] Dev endpoint ready (HTTP $HTTP) — NST startup: ${NST_WAIT_ELAPSED}s"
+
+    # Replace Reporting Service .exe with sleep stub NOW (after BC startup probed the assembly).
+    # The SideServiceWatchdog will call Process.Start on this path and see a live process.
+    REPORT_EXE="$SERVICE_DIR/SideServices/Microsoft.BusinessCentral.Reporting.Service.exe"
+    if [ -f "$REPORT_EXE" ] && [ ! -f "${REPORT_EXE}.win" ]; then
+        mv "$REPORT_EXE" "${REPORT_EXE}.win"
+        printf '#!/bin/sh\nexec sleep infinity\n' > "$REPORT_EXE"
+        chmod +x "$REPORT_EXE"
+        echo "[entrypoint] Replaced Reporting Service .exe with sleep stub (watchdog silenced)"
+    fi
 
     # Patch #15: Disabled — renaming ALL runtime DLLs breaks System.Net.HttpListener
     # and other assemblies that BC needs at request time (not just at startup).
@@ -804,6 +826,28 @@ PYEOF
                 "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
             echo "[entrypoint]   $NAME: HTTP $HTTP"
         done
+
+        # Publish additional test app dependencies (e.g. System App Test Library, Tests-TestLibraries)
+        # and the actual test app (e.g. Tests-SINGLESERVER) if BC_TEST_APPS is set.
+        # BC_TEST_APPS is a semicolon-separated list of .app file paths.
+        if [ -n "${BC_TEST_APPS:-}" ]; then
+            echo "[entrypoint] Publishing test app dependencies..."
+            IFS=';' read -ra TEST_APPS <<< "$BC_TEST_APPS"
+            for app in "${TEST_APPS[@]}"; do
+                app=$(echo "$app" | xargs)  # trim whitespace
+                [ -z "$app" ] && continue
+                if [ ! -f "$app" ]; then
+                    echo "[entrypoint]   SKIP (not found): $app"
+                    continue
+                fi
+                NAME=$(basename "$app")
+                HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 600 \
+                    -u "admin:Admin123!" -X POST \
+                    -F "file=@$app;type=application/octet-stream" \
+                    "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
+                echo "[entrypoint]   $NAME: HTTP $HTTP"
+            done
+        fi
 
         # Publish our TestRunner Extension (custom API for test execution, depends on MS Test Runner)
         if [ -f /bc/testrunner/TestRunner.app ]; then
