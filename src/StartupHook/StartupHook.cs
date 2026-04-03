@@ -1371,16 +1371,23 @@ internal class StartupHook
 
     /// <summary>
     /// Replacement for ALDatabase.ALSid(string userName).
-    /// Returns a deterministic dummy Windows SID based on the username hash.
-    /// Format: S-1-5-21-{hash}-{hash}-{hash}-1001
+    /// Returns a deterministic dummy Windows SID based on the username.
+    /// Uses FNV-1a hash (not GetHashCode which is randomized per-process in .NET Core).
+    /// The entrypoint pre-seeds the ADMIN user with the same SID so tests find it.
+    /// Format: S-1-5-21-{h1}-{h2}-{h3}-1001
     /// </summary>
     public static string Replacement_ALSid(string userName)
     {
-        // Return a plausible-looking SID derived from the username
-        int hash = userName?.GetHashCode() ?? 0;
-        uint h1 = (uint)(hash & 0x7FFFFFFF);
-        uint h2 = (uint)((hash >> 16 | hash << 16) & 0x7FFFFFFF);
-        uint h3 = (uint)((hash * 31) & 0x7FFFFFFF);
+        // FNV-1a 32-bit hash — deterministic across processes and restarts
+        uint hash = 2166136261u;
+        foreach (char c in (userName ?? "").ToUpperInvariant())
+        {
+            hash ^= (uint)c;
+            hash *= 16777619u;
+        }
+        uint h1 = hash & 0x7FFFFFFFu;
+        uint h2 = ((hash >> 16) | (hash << 16)) & 0x7FFFFFFFu;
+        uint h3 = (hash * 31u) & 0x7FFFFFFFu;
         return $"S-1-5-21-{h1}-{h2}-{h3}-1001";
     }
 

@@ -491,7 +491,7 @@ BEGIN
         [Windows Security ID], [Change Password], [License Type], [Authentication Email],
         [Contact Email], [Exchange Identifier], [Application ID],
         [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
-    VALUES ('$USER_GUID', N'ADMIN', N'Admin', 0, '2099-12-31', N'', 0, 0, N'', N'', N'',
+    VALUES ('$USER_GUID', N'ADMIN', N'Admin', 0, '2099-12-31', N'S-1-5-21-1176130292-1391773210-2100300684-1001', 0, 0, N'', N'', N'',
         '00000000-0000-0000-0000-000000000000',
         NEWID(), GETUTCDATE(), '$USER_GUID', GETUTCDATE(), '$USER_GUID');
     INSERT INTO [User Property] ([User Security ID], [Password], [Name Identifier],
