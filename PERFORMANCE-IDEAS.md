@@ -3,6 +3,37 @@
 Current state: ~0.33s/method average (Bucket 4, single runner, headless Linux).
 Goal: identify where time is spent and reduce irreducible overhead.
 
+## Experiment Results
+
+### Profiling (dotnet-trace, 2 min sample during ERM execution)
+
+Key finding: **47% of time is UNMANAGED_CODE_TIME** (SQL Server processing),
+only **2% is CPU_TIME**. This is an I/O-bound workload, not CPU-bound.
+
+Top hot methods:
+- `UNMANAGED_CODE_TIME`: 564s (47%) — SQL query processing, locks, transactions
+- `AsyncMethodBuilderCore.Start`: 146s — async machinery overhead
+- `TestClientProxy.Invoke`: 32s — test page client reflection
+- `CallServerSync`: 25s — synchronous client→server RPC
+- `BindingManager.DoFill`: 12.7s — page data binding
+- `NstDataAccess.GetPage`: 12.5s — server-side page retrieval
+- `ActionField` chain: 9.9s — field validation roundtrips
+
+### Experiment 1: SQL Network Co-location (Docker bridge vs host network)
+
+Hypothesis: Docker bridge network adds latency to BC↔SQL communication.
+Result: **No measurable difference.**
+
+| Setup | Run 1 | Run 2 | Run 3 | Avg |
+|-------|-------|-------|-------|-----|
+| Docker bridge (warm) | 76s | 74s | 65s | **72s** |
+| Host network (warm) | 71s | 69s | — | **70s** |
+
+Test: 5 codeunits, 301 methods from Tests-SINGLESERVER.
+Conclusion: Network hop adds ~0.1ms/call which is negligible. The 47% unmanaged
+time is SQL Server's internal processing (query compilation, locking, buffer ops),
+not network latency. **Docker bridge is fine.**
+
 ## 1. Profile First — Find the Bottleneck
 
 Before optimizing, attach `dotnet-trace` or `dotnet-counters` to the BC process
