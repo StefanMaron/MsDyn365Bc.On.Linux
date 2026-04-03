@@ -356,7 +356,8 @@ fi
 $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1;" 2>/dev/null
 
 # SQL performance tuning for CI/CD — disable safety overhead not needed for test runs
-$SQLCMD_DB -Q "
+# ALTER DATABASE must run from master context, not from within the target database
+$SQLCMD -Q "
 ALTER DATABASE CRONUS SET QUERY_STORE = OFF;
 ALTER DATABASE CRONUS SET AUTO_UPDATE_STATISTICS OFF;
 ALTER DATABASE CRONUS SET AUTO_UPDATE_STATISTICS_ASYNC OFF;
@@ -364,7 +365,7 @@ ALTER DATABASE CRONUS SET AUTO_CREATE_STATISTICS OFF;
 ALTER DATABASE CRONUS SET PAGE_VERIFY NONE;
 ALTER DATABASE CRONUS SET DELAYED_DURABILITY = FORCED;
 " 2>/dev/null
-# Disable change tracking (must disable on tables first)
+# Disable change tracking (must disable on tables first, from CRONUS context)
 $SQLCMD_DB -Q "
 DECLARE @sql NVARCHAR(MAX) = '';
 SELECT @sql = @sql + 'ALTER TABLE [' + s.name + '].[' + t.name + '] DISABLE CHANGE_TRACKING;'
