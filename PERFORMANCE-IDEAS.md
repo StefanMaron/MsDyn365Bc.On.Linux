@@ -72,6 +72,35 @@ The ~0.2s/method execution speed appears to be the floor for the current
 architecture. Further gains require structural changes (RPC short-circuit,
 session pooling) or parallelization across multiple BC instances.
 
+## Remaining Ideas to Test
+
+### TCP Tuning (Nagle's Algorithm)
+BC↔SQL communication uses TCP. Nagle's algorithm buffers small packets before
+sending, adding latency to each of the thousands of tiny SQL round-trips.
+Disabling Nagle (`TCP_NODELAY`) could reduce per-call latency. This would NOT
+have shown up in bridge-vs-host test since both had Nagle enabled.
+
+### SQL Forced Parameterization
+BC may send ad-hoc SQL text for each query. `ALTER DATABASE CRONUS SET
+PARAMETERIZATION FORCED` makes SQL Server reuse execution plans more
+aggressively, reducing plan compilation overhead per query.
+
+### SQL Packet Size
+Default network packet size is 4096 bytes. Tuning this (smaller for many tiny
+queries, larger for result sets) could reduce per-round-trip overhead.
+
+### Transaction Log on tmpfs
+Data files are on tmpfs but the log file may be on Docker overlay filesystem.
+Every commit writes to the log. Check and move if needed.
+
+### SQL Memory
+Currently `MSSQL_MEMORY_LIMIT_MB=2048`. More RAM = larger buffer pool and plan
+cache. Test with 4096 or unlimited.
+
+### CPU Affinity
+Pin BC and SQL to separate CPU cores to avoid context switching overhead.
+`--cpuset-cpus` in Docker.
+
 ## 1. Profile First — Find the Bottleneck
 
 Before optimizing, attach `dotnet-trace` or `dotnet-counters` to the BC process
