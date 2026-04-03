@@ -120,6 +120,17 @@ default memory allocation. *Platform-agnostic.*
 All JIT/GC changes are incompatible with BC's HttpSysStub. *Linux-only issue
 (HttpSysStub is the Linux replacement for Windows HttpSys).*
 
+### Experiment 6: TCP Nagle / Low Latency
+Could not modify sysctl inside containers (read-only filesystem).
+No measurable effect. 68s avg vs 62s baseline (noise). *Platform-agnostic.*
+
+### Experiment 7: CPU Affinity (cpuset-cpus)
+Pinned SQL to cores 0,1 and BC to cores 2,3 on a 12-core machine.
+Result: **50% slower** (94s warm avg vs 62s). Starving both processes of
+cores is worse than letting the OS schedule freely. BC uses many async
+threads; SQL Server needs cores for internal task scheduling.
+*Platform-agnostic.*
+
 ### What actually helped
 Only SQL overhead removal (Experiment 3b) produced measurable improvement:
 - Query store OFF: ~7% *Platform-agnostic*
