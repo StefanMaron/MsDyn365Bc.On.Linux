@@ -1,0 +1,223 @@
+name: BC tests on Linux (compile from source)
+
+# Plug-and-play GitHub Actions workflow for running AL tests against a
+# Business Central NST running on Linux. This template COMPILES your AL
+# source (app + test apps) inside the runner and then publishes the
+# compiled .app files to BC and runs the tests.
+#
+# Powered by StefanMaron/MsDyn365Bc.On.Linux — runs unmodified Microsoft BC on Linux
+# via runtime patching of the Windows .NET service tier. Image:
+# ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner:latest
+#
+# ──────────────────────────────────────────────────────────────────────
+# HOW TO USE
+# ──────────────────────────────────────────────────────────────────────
+# 1. Copy this file into your repo at .github/workflows/bc-test.yml
+# 2. Edit the values under "env:" below to match your repo layout:
+#      - BC_VERSION / BC_COUNTRY      → which BC version to test against
+#      - APP_DIRS                     → directories containing app.json
+#                                       for your production app(s).
+#                                       Space-separated, leave empty if
+#                                       you only have test apps.
+#      - TEST_APP_DIRS                → directories containing app.json
+#                                       for your test app(s)
+#      - CODEUNIT_RANGE               → AL codeunit ID range to run
+#                                       (e.g. "70000..70099")
+# 3. Commit + push. The workflow runs on every PR and push to main.
+#
+# Anything more advanced (matrix over BC versions, secrets, custom
+# symbol cache) — duplicate the job and tweak from there. The bc-linux
+# repo's own .github/workflows/test-versions.yml is a worked example.
+# ──────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  # ----- Edit these for your project ----------------------------------
+  BC_VERSION: "27.5"
+  BC_COUNTRY: "w1"
+  BC_TYPE: "sandbox"
+
+  # Space-separated paths to your production AL app source dirs (each
+  # must contain an app.json). Leave empty ("") if your repo only has
+  # test apps.
+  APP_DIRS: "app"
+
+  # Space-separated paths to your AL test app source dirs.
+  TEST_APP_DIRS: "test"
+
+  # Codeunit ID range to execute. Use "lo..hi" or a single number.
+  # Tip: pick a range that covers all test codeunits in TEST_APP_DIRS.
+  CODEUNIT_RANGE: "70000..79999"
+
+  # AL compiler version. Has to match the major BC version of the
+  # platform you're targeting. The version below is known to work with
+  # BC 27.x. For BC 28.x bump it via:
+  #   dotnet tool search Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux
+  AL_TOOL_VERSION: "16.2.28.57946"
+  # --------------------------------------------------------------------
+
+  # bc-linux runtime image (publicly available on GHCR).
+  BC_RUNNER_IMAGE: "ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner:latest"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout your repo
+        uses: actions/checkout@v4
+        with:
+          path: project
+
+      # bc-linux ships docker-compose.yml, run-tests.sh, the bundled
+      # TestRunnerExtension.app, and download-artifacts.sh. We pull a
+      # pinned tag so the workflow is reproducible.
+      - name: Checkout bc-linux runtime
+        uses: actions/checkout@v4
+        with:
+          repository: StefanMaron/MsDyn365Bc.On.Linux
+          ref: master
+          path: bc-linux
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install AL compiler (Linux)
+        run: |
+          dotnet tool install -g \
+            Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
+            --version "$AL_TOOL_VERSION" 2>/dev/null || true
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Cache BC artifacts
+        id: artifact-cache
+        uses: actions/cache@v4
+        with:
+          path: artifact-cache/${{ env.BC_VERSION }}
+          key: bc-artifacts-${{ env.BC_TYPE }}-${{ env.BC_VERSION }}-${{ env.BC_COUNTRY }}
+
+      - name: Download BC artifacts (if not cached)
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "artifact-cache/$BC_VERSION"
+          bc-linux/scripts/download-artifacts.sh \
+            "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" \
+            "$PWD/artifact-cache/$BC_VERSION"
+
+      - name: Start BC on Linux
+        env:
+          BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ env.BC_VERSION }}
+        working-directory: bc-linux
+        run: |
+          docker compose up -d
+          echo "Waiting for BC to become healthy..."
+          for i in $(seq 1 360); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' \
+              "$(docker compose ps -q bc)" 2>/dev/null || echo unknown)
+            case "$STATUS" in
+              healthy)   echo "BC ready after $((i*5))s"; break ;;
+              unhealthy) echo "BC unhealthy"; docker compose logs bc | tail -80; exit 1 ;;
+            esac
+            sleep 5
+          done
+          [ "$STATUS" = "healthy" ] || { docker compose logs bc | tail -100; exit 1; }
+
+      - name: Stage symbols from BC artifacts
+        run: |
+          mkdir -p symbols
+          ART="artifact-cache/$BC_VERSION"
+          # System.app from platform
+          find "$ART/platform/ModernDev" -name "System.app" -exec cp {} symbols/ \; 2>/dev/null || true
+          # All extension symbols (System Application, Base Application, …)
+          find "$ART/app/Extensions" -name "*.app" -exec cp {} symbols/ \; 2>/dev/null || true
+          # Test framework symbols (Test Runner, Any, Library Variable Storage, …)
+          find "$ART/platform" -path "*testframework*" -name "*.app" -exec cp {} symbols/ \; 2>/dev/null || true
+          # Microsoft Test Libraries (System Application Test, Base App Test Libraries)
+          find "$ART/app/Applications" -name "*Test Library*.app" -exec cp {} symbols/ \; 2>/dev/null || true
+          find "$ART/app/Applications" -name "*Tests-TestLibraries*.app" -exec cp {} symbols/ \; 2>/dev/null || true
+          echo "Staged $(ls symbols/*.app 2>/dev/null | wc -l) symbol files"
+
+      - name: Compile AL apps and publish to BC
+        env:
+          AUTH: "BCRUNNER:Admin123!"
+          DEV: "http://localhost:7049"
+        run: |
+          set -e
+          publish_app() {
+            local app="$1"
+            echo ">>> Publishing $app"
+            local code
+            code=$(curl -s -o /tmp/pub.out -w "%{http_code}" --max-time 180 \
+              -u "$AUTH" -X POST \
+              -F "file=@${app};type=application/octet-stream" \
+              "$DEV/apps?SchemaUpdateMode=forcesync")
+            cat /tmp/pub.out; echo
+            [ "$code" = "200" ] || [ "$code" = "422" ] || { echo "publish failed: $code"; exit 1; }
+          }
+
+          compile_dir() {
+            local src="$1"
+            [ -f "$src/app.json" ] || { echo "skip $src (no app.json)"; return 0; }
+            mkdir -p "$src/.alpackages"
+            cp symbols/*.app "$src/.alpackages/" 2>/dev/null || true
+            local out
+            out="$(pwd)/build/$(basename "$src").app"
+            mkdir -p build
+            echo ">>> Compiling $src → $out"
+            AL compile \
+              "/project:$src" \
+              "/packagecachepath:$src/.alpackages" \
+              "/out:$out"
+            echo "$out"
+          }
+
+          # Compile + publish production apps first (test apps may depend on them)
+          for d in $APP_DIRS; do
+            [ -z "$d" ] && continue
+            APP=$(compile_dir "project/$d" | tail -1)
+            [ -f "$APP" ] && publish_app "$APP"
+          done
+
+          # Compile + publish test apps. Build symbols pick up the just-built
+          # production apps from the .alpackages cache.
+          for d in $TEST_APP_DIRS; do
+            [ -z "$d" ] && continue
+            # If a production app was built, copy its .app into the test app's
+            # .alpackages so the test app's compile resolves it as a symbol.
+            mkdir -p "project/$d/.alpackages"
+            cp build/*.app "project/$d/.alpackages/" 2>/dev/null || true
+            APP=$(compile_dir "project/$d" | tail -1)
+            [ -f "$APP" ] && publish_app "$APP"
+          done
+
+          # Stash for the test step
+          ls build/ > built-apps.txt
+
+      - name: Run AL tests
+        working-directory: bc-linux
+        run: |
+          set -e
+          # Run each test .app via run-tests.sh. The TestRunnerExtension is
+          # already published inside the BC container at boot.
+          for app in ../build/*.app; do
+            base=$(basename "$app")
+            echo "=== Running tests in $base ==="
+            ./scripts/run-tests.sh \
+              --app "$app" \
+              --codeunit-range "$CODEUNIT_RANGE" \
+              --timeout 30
+          done
+
+      - name: BC logs (on failure)
+        if: failure()
+        working-directory: bc-linux
+        run: docker compose logs bc | tail -200
