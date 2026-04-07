@@ -442,6 +442,22 @@ DELETE FROM [Published Application];
 SQLEOF
     fi
     REMOVED=$($SQLCMD_DB -h -1 -W -i "$SELECTIVE_SQL" 2>&1) || true
+    # The 5 BC core test framework apps (Test Runner, Library Assert,
+    # Library Variable Storage, Permissions Mock, Any) ship in BC's
+    # sandbox image in a 'published as Global, not installed for tenant'
+    # state. The keep set above preserves them in [Published Application]
+    # but they're still not installed-for-tenant, and the dev endpoint
+    # can't promote a Global publish to a tenant install (the
+    # DependencyPublishingOption parameter rejects 'Install' as a value).
+    # So we wipe them here regardless of the keep set, and the
+    # install-for-tenant loop after NST starts re-POSTs them via
+    # forcesync, which both publishes AND installs for tenant.
+    $SQLCMD_DB -Q "
+    DELETE FROM [NAV App Installed App] WHERE [Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any'));
+    DELETE FROM [Installed Application] WHERE [Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any'));
+    DELETE FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any');
+    " 2>/dev/null || true
+    log_step "Wiped 5 core test framework apps for fresh install-for-tenant"
     log_step "Selective clear result:"
     echo "$REMOVED" | while read -r line; do
         [ -n "$line" ] && echo "[entrypoint]   $line" || true
@@ -929,20 +945,19 @@ PYEOF
             while IFS= read -r APP_PATH; do
                 [ -z "$APP_PATH" ] && continue
                 NAME=$(basename "$APP_PATH")
-                # DependencyPublishingOption=Install tells BC to ALSO install
-                # any dependencies that are published-as-Global but not yet
-                # installed-for-tenant. This is the dev-endpoint equivalent of
-                # PowerShell's `Publish-NAVApp -Force` and is exactly the
-                # behavior we need: BC's default sandbox image ships several
-                # test framework apps (Test Runner, Library Assert, Any, etc.)
-                # in published-as-Global state without installing them for
-                # the default tenant. Without this query param, publishing
-                # anything that depends on them fails with AL1024 / "the
-                # referenced dependencies ... are not installed".
+                # forcesync alone is enough: the 5 core test framework apps
+                # were wiped by the SQL above so this POST publishes them
+                # fresh as Dev/tenant-installed. Other apps in the keep set
+                # (BaseApp helpers like Tests-TestLibraries) were never in
+                # the BC database to begin with, so they also publish fresh.
+                # Tried &DependencyPublishingOption=Install — BC rejects
+                # 'Install' as an invalid value (the actual valid values are
+                # Default/Strict/Ignore, none of which auto-install missing
+                # tenant deps), so we have to wipe instead.
                 HTTP=$(curl -s -o /tmp/install-tenant.out -w "%{http_code}" --max-time 120 \
                     -u "BCRUNNER:Admin123!" -X POST \
                     -F "file=@$APP_PATH;type=application/octet-stream" \
-                    "$DEV_URL/apps?SchemaUpdateMode=forcesync&DependencyPublishingOption=Install" 2>/dev/null)
+                    "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
                 # Treat "already deployed as Global" 422s as benign — they
                 # mean the app was pre-installed by BC's sandbox image and
                 # doesn't need a republish.
