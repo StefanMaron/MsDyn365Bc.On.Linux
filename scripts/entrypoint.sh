@@ -861,56 +861,41 @@ PYEOF
             echo "[entrypoint] [${TOTAL_ELAPSED}s] Republished $REPUBLISH_OK extensions, skipped $REPUBLISH_SKIP — republish took ${REPUBLISH_ELAPSED}s"
         fi
 
-        # Publish test framework apps in EXPLICIT DEPENDENCY ORDER.
+        # Publish test framework apps. The previous version of this code
+        # was a hand-curated array of "test framework" apps to publish in
+        # explicit dependency order. Every time a downstream consumer
+        # added a test app that depended on something we'd missed, the
+        # publish silently failed and we got "0 tests ran" with no clue
+        # why. Multiple iterations of "find missing dep, add to array,
+        # rebuild image, retry" later, the right architectural answer
+        # became obvious: walk the dependency graph from a small set of
+        # "leaf" seeds and let the resolver compute the closure.
         #
-        # The previous version used `find | sort` and relied on alphabetical
-        # ordering to install transitive deps before their dependents. That
-        # broke spectacularly: locale-dependent path sorting placed
-        # `BaseApp/Test/Microsoft_Tests-TestLibraries.app` BEFORE
-        # `BusinessFoundation/Test/Microsoft_Business Foundation Test Libraries.app`
-        # and `SystemApplication/Test/Microsoft_System Application Test Library.app`,
-        # so Tests-TestLibraries was published while its two required helper
-        # libraries were still missing, hit AL1024 ("could not be found in
-        # the database"), and the publish silently HTTP-422'd. Downstream
-        # consumers then saw their own publishes fail because
-        # Tests-TestLibraries itself was never installed.
-        #
-        # Explicit ordering removes the sort dependency entirely. Each app's
-        # transitive deps appear earlier in the array.
+        # The seeds below are the apps that consumers' test extensions
+        # most commonly declare as direct dependencies. resolve-install-order.py
+        # walks each seed's transitive closure across the artifact tree
+        # and emits paths in topological order — every app's deps appear
+        # before it. No hand-curated install order, no missing-helper
+        # surprises when a future BC version adds a new transitive dep.
         echo "[entrypoint] Publishing test framework..."
-        # Order matters! Each entry must come after every app it depends on.
-        # Confirmed from BC AL1024 errors during the bc-copilot-blueprint
-        # debugging session:
-        #   Library Variable Storage      → Library Assert
-        #   Library-NoTransactions        → Library Assert + Library Variable Storage
-        #   Tests-TestLibraries           → Library Variable Storage (+ likely
-        #                                    System App Test Library +
-        #                                    Business Foundation Test Libraries)
-        # When adding new entries: keep transitive deps EARLIER in the array.
-        TEST_FRAMEWORK_APPS=(
-            # --- Leaves (no inter-deps within the framework set) ---
-            "Microsoft_Any"                           # platform/applications/testframework/testlibraries/any/
-            "Microsoft_Library Assert"                # platform/applications/testframework/testlibraries/assert/
-            "Microsoft_Test Runner"                   # platform/applications/testframework/TestRunner/
-            # --- Depend on Library Assert ---
-            "Microsoft_Library Variable Storage"      # platform/applications/testframework/testlibraries/variable storage/
-            "Microsoft_Permissions Mock"              # platform/applications/testframework/testlibraries/permissions mock/
-            # --- Base layer test helpers (depend on system app stack only) ---
-            "Microsoft_System Application Test Library"     # platform/applications/SystemApplication/Test/
-            "Microsoft_Business Foundation Test Libraries"  # platform/applications/BusinessFoundation/Test/
-            # --- BaseApp test helpers (depend on Library Assert + Library Variable Storage) ---
-            "Microsoft_Library-NoTransactions"        # platform/applications/BaseApp/Test/
-            "Microsoft_Tests-TestLibraries"           # platform/applications/BaseApp/Test/
+        TEST_FRAMEWORK_SEEDS=(
+            "Microsoft/Test Runner"
+            "Microsoft/Library Assert"
+            "Microsoft/Tests-TestLibraries"
+            "Microsoft/Library-NoTransactions"
         )
-        for prefix in "${TEST_FRAMEWORK_APPS[@]}"; do
-            # Some apps ship with a version suffix (Microsoft_Library Assert_27.5.46862.48612.app),
-            # others don't (Microsoft_Tests-TestLibraries.app). Match both via the trailing
-            # wildcard. Picking the first match is fine — only one copy ever exists per artifact.
-            app=$(find "$ARTIFACTS" -type f \( -name "${prefix}.app" -o -name "${prefix}_*.app" \) 2>/dev/null | head -1)
-            if [ -z "$app" ]; then
-                echo "[entrypoint]   $prefix: NOT FOUND in artifact tree (skipping)"
-                continue
-            fi
+        SEED_ARGS=()
+        for seed in "${TEST_FRAMEWORK_SEEDS[@]}"; do
+            SEED_ARGS+=(--seed "$seed")
+        done
+        ORDERED_APPS=$(python3 /bc/scripts/resolve-install-order.py \
+            --artifact-dir "$ARTIFACTS" \
+            "${SEED_ARGS[@]}" 2>&1 >/tmp/install-order.txt | sed 's/^/[entrypoint]   /' || true)
+        # Print the resolver's stderr (its diagnostics) inline.
+        echo "$ORDERED_APPS"
+        # Then publish each path stdout produced.
+        while IFS= read -r app; do
+            [ -z "$app" ] && continue
             NAME=$(basename "$app")
             HTTP=$(curl -s -o /tmp/tf-publish.out -w "%{http_code}" --max-time 120 \
                 -u "BCRUNNER:Admin123!" -X POST \
@@ -924,7 +909,8 @@ PYEOF
                 sed 's/^/[entrypoint]     /' /tmp/tf-publish.out
             fi
             rm -f /tmp/tf-publish.out
-        done
+        done < /tmp/install-order.txt
+        rm -f /tmp/install-order.txt
 
         # Publish additional test app dependencies (e.g. System App Test Library, Tests-TestLibraries)
         # and the actual test app (e.g. Tests-SINGLESERVER) if BC_TEST_APPS is set.
