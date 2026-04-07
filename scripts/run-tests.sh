@@ -235,16 +235,34 @@ echo "Test codeunits: $CODEUNIT_IDS"
 
 # === Setup Test Suite via OData ===
 echo -n "Setting up test suite... "
-CREATE_RESP=$(curl -s --max-time 15 -u "$AUTH" -X POST \
+CREATE_BODY=$(mktemp)
+CREATE_HTTP=$(curl -s -o "$CREATE_BODY" -w "%{http_code}" --max-time 15 -u "$AUTH" -X POST \
     -H "Content-Type: application/json" \
     -d "{\"CodeunitIds\": \"$CODEUNIT_IDS\"}" \
     "${API_BASE}/codeunitRunRequests" 2>/dev/null)
-REQUEST_ID=$(echo "$CREATE_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" 2>/dev/null || true)
+REQUEST_ID=$(py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" < "$CREATE_BODY" 2>/dev/null || true)
 
 if [ -z "$REQUEST_ID" ]; then
     echo "FAIL (could not create request)"
+    echo ""
+    echo "ERROR: POST ${API_BASE}/codeunitRunRequests"
+    echo "       HTTP code: $CREATE_HTTP"
+    echo "       Request body: {\"CodeunitIds\": \"$CODEUNIT_IDS\"}"
+    echo "       Response body:"
+    sed 's/^/         /' "$CREATE_BODY"
+    echo ""
+    echo "       Likely causes:"
+    echo "         - The custom TestRunner extension (page 99902 'Codeunit Run Requests')"
+    echo "           is not installed for the default tenant. Check 'Test Runner Extension'"
+    echo "           in entrypoint.sh's BC startup logs."
+    echo "         - The OData endpoint we're hitting (\$API_PORT_BASE) is wrong for"
+    echo "           POST in this BC version (the auto-detection picked an endpoint that"
+    echo "           accepts GET on this path but not POST)."
+    echo "         - The request body schema doesn't match the page's bound action."
+    rm -f "$CREATE_BODY"
     exit 1
 fi
+rm -f "$CREATE_BODY"
 
 SETUP_HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 -u "$AUTH" -X POST \
     "${API_BASE}/codeunitRunRequests(${REQUEST_ID})/Microsoft.NAV.setupSuite" 2>/dev/null)
