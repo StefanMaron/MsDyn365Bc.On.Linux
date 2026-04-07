@@ -199,15 +199,30 @@ jobs:
           bash bc-linux/scripts/workflow-summary.sh end AL_INSTALL
 
       - name: Stage symbols from BC artifacts
+        env:
+          APP_DIRS: ${{ inputs.app_dirs }}
+          TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
         run: |
           bash bc-linux/scripts/workflow-summary.sh begin SYMBOLS "Stage symbols"
           mkdir -p symbols
-          ART="artifact-cache/$BC_VERSION"
-          find "$ART/platform/ModernDev" -name "System.app" -exec cp {} symbols/ \; 2>/dev/null || true
-          find "$ART/app/Extensions" -name "*.app" -exec cp {} symbols/ \; 2>/dev/null || true
-          find "$ART/platform" -path "*testframework*" -name "*.app" -exec cp {} symbols/ \; 2>/dev/null || true
-          find "$ART/app/Applications" -name "*Test Library*.app" -exec cp {} symbols/ \; 2>/dev/null || true
-          find "$ART/app/Applications" -name "*Tests-TestLibraries*.app" -exec cp {} symbols/ \; 2>/dev/null || true
+          # Manifest-driven resolver: walks the artifact tree, indexes
+          # every .app by its declared id, then stages exactly the
+          # transitive dependency closure of the consumer's app.json
+          # files (plus System.app, which AL compile always needs).
+          # Robust to Microsoft moving apps between folders across BC
+          # versions — the old glob-based staging silently failed
+          # whenever an expected app moved (e.g. Tests-TestLibraries
+          # under platform/applications/BaseApp/Test/ in BC 27.5).
+          ARGS=""
+          for d in $APP_DIRS $TEST_APP_DIRS; do
+            [ -z "$d" ] && continue
+            [ -f "project/$d/app.json" ] && ARGS="$ARGS --app-json project/$d/app.json"
+          done
+          python3 bc-linux/scripts/stage-symbols.py \
+            $ARGS \
+            --artifact-dir "artifact-cache/$BC_VERSION" \
+            --out-dir symbols \
+            || true   # warnings about unresolved deps are non-fatal; AL compile gives the precise error if any
           echo "Staged $(ls symbols/*.app 2>/dev/null | wc -l) symbol files"
           bash bc-linux/scripts/workflow-summary.sh end SYMBOLS
 
