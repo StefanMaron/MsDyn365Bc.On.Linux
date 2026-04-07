@@ -86,17 +86,14 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Cache BC artifacts
-      id: artifact-cache
-      uses: actions/cache@v4
-      with:
-        path: ./artifact-cache/${{ matrix.bc_version }}
-        key: bc-artifacts-${{ matrix.bc_version }}-${{ hashFiles('scripts/download-artifacts.sh') }}
-        restore-keys: |
-          bc-artifacts-${{ matrix.bc_version }}-
-
     - name: Download BC artifacts
-      if: steps.artifact-cache.outputs.cache-hit != 'true'
+      # No actions/cache here on purpose. The previous cache key was
+      # bc-artifacts-<version>-<hash of download-artifacts.sh>, which
+      # means a fresh BC patch release (e.g. 27.5.46862.48613 replacing
+      # 48612) would still serve the stale cached version. Tests would
+      # pass against a BC build that no longer existed in real life.
+      # Downloading on every run adds ~50s per matrix entry — cheap
+      # compared to the cost of debugging "the cache lied" failures.
       env:
         BC_VERSION: ${{ matrix.bc_version }}
       run: |
