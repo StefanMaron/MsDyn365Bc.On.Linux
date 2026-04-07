@@ -878,17 +878,27 @@ PYEOF
         # Explicit ordering removes the sort dependency entirely. Each app's
         # transitive deps appear earlier in the array.
         echo "[entrypoint] Publishing test framework..."
+        # Order matters! Each entry must come after every app it depends on.
+        # Confirmed from BC AL1024 errors during the bc-copilot-blueprint
+        # debugging session:
+        #   Library Variable Storage      → Library Assert
+        #   Library-NoTransactions        → Library Assert + Library Variable Storage
+        #   Tests-TestLibraries           → Library Variable Storage (+ likely
+        #                                    System App Test Library +
+        #                                    Business Foundation Test Libraries)
+        # When adding new entries: keep transitive deps EARLIER in the array.
         TEST_FRAMEWORK_APPS=(
-            # --- Base test framework (no inter-deps among these except via Test Runner) ---
+            # --- Leaves (no inter-deps within the framework set) ---
             "Microsoft_Any"                           # platform/applications/testframework/testlibraries/any/
-            "Microsoft_Library Variable Storage"      # platform/applications/testframework/testlibraries/variable storage/
             "Microsoft_Library Assert"                # platform/applications/testframework/testlibraries/assert/
-            "Microsoft_Permissions Mock"              # platform/applications/testframework/testlibraries/permissions mock/
             "Microsoft_Test Runner"                   # platform/applications/testframework/TestRunner/
-            # --- Base layer test helpers (deps of the BaseApp test helpers below) ---
+            # --- Depend on Library Assert ---
+            "Microsoft_Library Variable Storage"      # platform/applications/testframework/testlibraries/variable storage/
+            "Microsoft_Permissions Mock"              # platform/applications/testframework/testlibraries/permissions mock/
+            # --- Base layer test helpers (depend on system app stack only) ---
             "Microsoft_System Application Test Library"     # platform/applications/SystemApplication/Test/
             "Microsoft_Business Foundation Test Libraries"  # platform/applications/BusinessFoundation/Test/
-            # --- BaseApp test helpers (depend on the layers above) ---
+            # --- BaseApp test helpers (depend on Library Assert + Library Variable Storage) ---
             "Microsoft_Library-NoTransactions"        # platform/applications/BaseApp/Test/
             "Microsoft_Tests-TestLibraries"           # platform/applications/BaseApp/Test/
         )
