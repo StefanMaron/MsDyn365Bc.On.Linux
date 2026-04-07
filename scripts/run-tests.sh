@@ -250,12 +250,64 @@ fi
 
 SETUP_HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 -u "$AUTH" -X POST \
     "${API_BASE}/codeunitRunRequests(${REQUEST_ID})/Microsoft.NAV.setupSuite" 2>/dev/null)
-if [ "$SETUP_HTTP" = "200" ] || [ "$SETUP_HTTP" = "204" ]; then
-    echo "OK"
-else
+if [ "$SETUP_HTTP" != "200" ] && [ "$SETUP_HTTP" != "204" ]; then
     echo "FAIL (HTTP $SETUP_HTTP)"
     exit 1
 fi
+
+# === Verify the suite was populated ===
+#
+# setupSuite returns 200 even when it ended up populating the suite with
+# zero codeunits. That happens when the test app was published just before
+# this script ran but BC's metadata cache hasn't propagated the new
+# codeunits to the test framework yet — a race we've observed when
+# run-tests.sh is invoked back-to-back from a fast inner loop like
+# bc-copilot-blueprint's iterate.sh.
+#
+# Diagnostic signature of the race: TestRunner.dll runs and prints
+# "0 total, 0 passed, 0 failed" in 0 seconds, then exits 1.
+#
+# Fix: query the testResults endpoint (which exposes Test Method Line
+# rows from the suite). If empty, re-call setupSuite up to a handful of
+# times with a small delay — usually the metadata catches up within a
+# second or two.
+verify_suite_populated() {
+    local req_id="$1"
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        local resp
+        resp=$(curl -sf --max-time 10 -u "$AUTH" \
+            "${API_BASE}/testResults?\$filter=testSuite%20eq%20'DEFAULT'&\$top=1" 2>/dev/null)
+        if [ -n "$resp" ] && echo "$resp" | py3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    sys.exit(0 if len(data.get('value', [])) > 0 else 1)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+            [ "$attempt" -gt 1 ] && echo "  suite populated after ${attempt} setupSuite attempts"
+            return 0
+        fi
+        # Suite still empty — re-call setupSuite. The metadata may have
+        # synced since the previous attempt.
+        curl -s -o /dev/null --max-time 60 -u "$AUTH" -X POST \
+            "${API_BASE}/codeunitRunRequests(${req_id})/Microsoft.NAV.setupSuite" 2>/dev/null
+        sleep 1
+    done
+    return 1
+}
+
+if ! verify_suite_populated "$REQUEST_ID"; then
+    echo "FAIL"
+    echo "ERROR: setupSuite returned 200 but the test suite is empty after 10 retries."
+    echo "       This usually means the test app was published but BC's metadata"
+    echo "       cache has not propagated its codeunits to the test framework yet."
+    echo "       Either:"
+    echo "         - Wait longer between publishing the test app and running tests,"
+    echo "         - Or check that the test app installed successfully for the tenant."
+    exit 1
+fi
+echo "OK"
 
 # === Disable Known-Failing Tests ===
 if [ -n "$DISABLED_TESTS_DIR" ] && [ -d "$DISABLED_TESTS_DIR" ]; then
