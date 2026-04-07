@@ -44,32 +44,34 @@ return a dummy handle (or null) instead of crashing. Similar approach to the
 existing `NavOpenTaskPageAction.ShowForm` no-op (Patch #21). Would turn crashes
 into graceful no-ops where the DotNet control simply isn't available.
 
-## Container crash after Tests-Misc in sequential Bucket 4 runs
+## ~~Container crash after Tests-Misc in sequential Bucket 4 runs~~ (FIXED — Patch #23)
 
-**Observed**: When running the full Bucket 4 test suite sequentially
+**Status**: Fixed in Patch #23 (`OfficeWordDocumentPictureMerger.ReplaceMissingImageWithTransparentImage`).
+
+**Symptom (was)**: When running Bucket 4 sequentially
 (ERM → SCM → Misc → Workflow → SCM-Service → SINGLESERVER), the BC container
-becomes unhealthy after Tests-Misc completes. The remaining 3 apps (Workflow,
-SCM-Service, SINGLESERVER) all fail with "Failed to create run request" because
-the API is dead.
+became unhealthy after Tests-Misc completed. The remaining 3 apps (Workflow,
+SCM-Service, SINGLESERVER) all failed with "Failed to create run request"
+because the API was dead.
 
-**Reproduced on**:
-- Local benchmark run 2026-04-04 (logs in
-  `PipelinePerformanceComparison/benchmark-results/local-20260404/`)
-- GitHub Actions run 23974655275 (same crash pattern at the same point)
+**Root cause**: Infinite recursion in Microsoft's
+`Microsoft.Dynamics.Nav.OpenXml.Word.DocumentMerger.OfficeWordDocumentPictureMerger.ReplaceMissingImageWithTransparentImage`.
+When a Word report references a missing image, the method calls
+`MergePictureElements` with the transparent placeholder, which re-enters
+`ReplaceMissingImageWithTransparentImage` unconditionally → ~37,390 frames
+deep → stack overflow → fatal session crash → container goes unhealthy.
+Triggered by `TestSendToEMailAndPDFVendor` in Tests-Misc; two earlier
+`NavNCLStackOverflowException` events were also visible during ERM and SCM but
+were recoverable until the deeper Misc invocation killed the worker.
 
-**What we know**:
-- BC reports `unhealthy` after Misc finishes (not crashed mid-test)
-- ERM, SCM, Misc all complete successfully and produce results
-- The crash is reproducible — happens on both local and CI runs
-- ~52MB BC container log captured for investigation
+**Fix**: Patch #23 in `StartupHook.cs` no-ops
+`ReplaceMissingImageWithTransparentImage` via JMP hook (the type is in
+`Microsoft.Dynamics.Nav.OpenXml.dll`, JIT-compiled BC code → patchable).
+The missing image XElement is left in place — reports render with a broken
+image marker but the session survives and report generation completes.
+The Misc tests do not validate rendered image content.
 
-**Impact**: We can't claim a complete Bucket 4 number from a single sequential
-run. Currently we have ~83% of methods covered (3 of 6 apps = ~19,377 of
-~23,272 methods).
-
-**Workaround for benchmarks**: Run the failing apps in a fresh container after
-the first three crash. Not yet automated.
-
-**Investigation needed**: Identify what in Tests-Misc (or its cumulative state
-after ERM+SCM) destabilizes the NST. Could be a memory leak, file handle
-exhaustion, or a specific test that puts BC into a bad state.
+**Diagnostic logs (historical)**:
+- Local benchmark run 2026-04-04 stack trace:
+  `PipelinePerformanceComparison/benchmark-results/local-20260404/bc-container.log`
+- GitHub Actions run 23974655275 (same crash pattern, same offending test)

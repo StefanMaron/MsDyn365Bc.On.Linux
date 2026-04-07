@@ -46,6 +46,24 @@ using System.Threading.Tasks;
 ///   test session and leaving all remaining test methods unexecuted.
 ///   Fix: No-op ShowForm so task-page opens are silently skipped on Linux.
 ///
+/// Patch #22: AzureADGraphQuery..ctor (Nav.Ncl.dll)
+///   Constructor pulls in Azure.Identity / MSAL Windows credential APIs and crashes the
+///   session on Linux. Fix: no-op the ctor — fields stay default; tests don't need real
+///   Azure AD calls, only that the GraphQuery DotNet object can be constructed.
+///
+/// Patch #23: OfficeWordDocumentPictureMerger.ReplaceMissingImageWithTransparentImage
+///   (Microsoft.Dynamics.Nav.OpenXml.dll)
+///   Microsoft's Word report image merger has a recursion bug: when a Word document
+///   references a missing image, ReplaceMissingImageWithTransparentImage calls back into
+///   MergePictureElements with the transparent placeholder, which re-enters
+///   ReplaceMissingImageWithTransparentImage unconditionally → unbounded recursion → stack
+///   overflow → fatal session crash → BC container becomes unhealthy. Triggered by
+///   TestSendToEMailAndPDFVendor in Tests-Misc; was the blocker for completing a full
+///   sequential Bucket 4 run (after Misc, the API was dead and the remaining 3 apps failed).
+///   Fix: No-op ReplaceMissingImageWithTransparentImage — the missing image element is left
+///   in place (renders as a broken image) but report generation completes and the session
+///   survives. The test code never inspects rendered image content.
+///
 /// JMP hooks work ONLY on BC methods (JIT-compiled). BCL methods are ReadyToRun pre-compiled
 /// and cannot be patched this way.
 /// </summary>
@@ -299,6 +317,14 @@ internal class StartupHook
         if (name == "Microsoft.Dynamics.Nav.Client.UI")
         {
             PatchShowForm(args.LoadedAssembly);
+        }
+
+        // Patch #23: Recursion bug in Microsoft's Word report image merger crashes the
+        // BC session with a stack overflow when a Word document references a missing image.
+        // This was the blocker for completing a full sequential Bucket 4 run.
+        if (name == "Microsoft.Dynamics.Nav.OpenXml")
+        {
+            PatchOfficeWordDocumentPictureMerger(args.LoadedAssembly);
         }
 
     }
@@ -2174,6 +2200,86 @@ internal class StartupHook
     private static void Replacement_AzureADGraphQueryCtor(object self, object? session)
     {
         Console.WriteLine("[StartupHook] Patch #22: AzureADGraphQuery..ctor skipped (no Azure AD on Linux)");
+    }
+
+    // ========================================================================
+    // Patch #23: OfficeWordDocumentPictureMerger.ReplaceMissingImageWithTransparentImage
+    //            — break Microsoft's recursion bug that crashes Word report generation.
+    //
+    // The bug: ReplaceMissingImageWithTransparentImage(part, elem) calls
+    // MergePictureElements(part, elem, transparentImageBytes), which under certain
+    // conditions re-enters ReplaceMissingImageWithTransparentImage with the same element
+    // unconditionally. We have observed ~37,390 frames before stack overflow on
+    // TestSendToEMailAndPDFVendor in Tests-Misc — fatal session crash, BC container goes
+    // unhealthy, and Bucket 4 cannot complete sequentially.
+    //
+    // Fix: replace the method with a no-op return. The missing image element stays in the
+    // document (rendered as a broken image), but the session survives and report generation
+    // completes. The Misc tests do not validate rendered image content.
+    //
+    // Assembly:  Microsoft.Dynamics.Nav.OpenXml.dll
+    // Type:      Microsoft.Dynamics.Nav.OpenXml.Word.DocumentMerger.OfficeWordDocumentPictureMerger
+    //            (abstract sealed → static class)
+    // Method:    private static void ReplaceMissingImageWithTransparentImage(
+    //                DocumentFormat.OpenXml.Packaging.OpenXmlPart part,
+    //                System.Xml.Linq.XElement element)
+    // ========================================================================
+
+    private static void PatchOfficeWordDocumentPictureMerger(Assembly navOpenXml)
+    {
+        try
+        {
+            var mergerType = navOpenXml.GetType(
+                "Microsoft.Dynamics.Nav.OpenXml.Word.DocumentMerger.OfficeWordDocumentPictureMerger");
+            if (mergerType == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #23: OfficeWordDocumentPictureMerger type not found — skipping");
+                return;
+            }
+
+            // Private static method, 2 params (OpenXmlPart, XElement). Match by name+arity
+            // to avoid resolving the parameter types (which would force loading
+            // DocumentFormat.OpenXml just for reflection).
+            MethodInfo? target = null;
+            foreach (var m in mergerType.GetMethods(BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public))
+            {
+                if (m.Name == "ReplaceMissingImageWithTransparentImage" && m.GetParameters().Length == 2)
+                {
+                    target = m;
+                    break;
+                }
+            }
+
+            if (target == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #23: ReplaceMissingImageWithTransparentImage not found — skipping");
+                return;
+            }
+
+            var replacement = typeof(StartupHook).GetMethod(
+                nameof(Replacement_ReplaceMissingImageWithTransparentImage),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            ApplyJmpHook(target, replacement, "OfficeWordDocumentPictureMerger.ReplaceMissingImageWithTransparentImage");
+            Console.WriteLine("[StartupHook] Patch #23: ReplaceMissingImageWithTransparentImage hooked (recursion broken)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #23 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// No-op replacement for OfficeWordDocumentPictureMerger.ReplaceMissingImageWithTransparentImage.
+    /// Static method → JMP hook passes the declared parameters directly (no hidden 'this').
+    /// Returns immediately; the missing image XElement is left in place. This breaks the
+    /// recursion loop that otherwise blows the stack.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Replacement_ReplaceMissingImageWithTransparentImage(object? part, object? element)
+    {
+        // Intentionally empty — break Microsoft's recursion bug in Nav.OpenXml.
+        // No log line per call: this is invoked once per missing image and we don't want
+        // to spam logs during legitimate report generation.
     }
 
     // ========================================================================
