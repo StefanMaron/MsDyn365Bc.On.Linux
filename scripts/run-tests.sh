@@ -280,14 +280,17 @@ verify_suite_populated() {
     # environments where there is no accidental slack between publish
     # and the first setupSuite call.
     #
-    # Stricter than "any row exists in DEFAULT": we count how many of
-    # OUR expected codeunit IDs are present, so stale rows from prior
-    # setupSuite calls or unrelated test extensions can never satisfy
-    # the check.
+    # Stricter than "any row exists in DEFAULT": only counts FUNCTION-type
+    # rows that mention OUR expected codeunit IDs. setupSuite inserts a
+    # placeholder Codeunit-type row even when the test app's metadata
+    # isn't loaded (so the codeunit registration exists but with zero
+    # [Test] functions). Without filtering by line type the lenient
+    # check accepts those stubs and lets the runner produce "0 results"
+    # silently — exactly the failure mode we're guarding against.
     local attempt
     for attempt in $(seq 1 20); do
         VERIFY_LAST_RESPONSE=$(curl -sf --max-time 10 -u "$AUTH" \
-            "${API_BASE}/testResults?\$filter=testSuite%20eq%20%27DEFAULT%27&\$top=500" 2>/dev/null || true)
+            "${API_BASE}/testResults?\$filter=testSuite%20eq%20%27DEFAULT%27%20and%20lineType%20eq%20%27Function%27&\$top=500" 2>/dev/null || true)
         if [ -n "$VERIFY_LAST_RESPONSE" ]; then
             VERIFY_LAST_DETAIL=$(echo "$VERIFY_LAST_RESPONSE" | EXPECTED="$expected_ids" py3 -c "
 import os, sys, json
@@ -296,10 +299,12 @@ try:
 except Exception as e:
     print(f'parse-error: {e}'); sys.exit(0)
 rows = data.get('value', [])
+# Only Function-type rows count — Codeunit-type rows are populated by
+# setupSuite even when the actual codeunit metadata isn't loaded.
 present = {str(r.get('testCodeunit', '')).strip() for r in rows if r.get('testCodeunit')}
 expected = {x.strip() for x in os.environ.get('EXPECTED', '').split(',') if x.strip()}
 matched = present & expected
-print(f'rows={len(rows)} distinct_codeunits={len(present)} expected={len(expected)} matched={len(matched)} sample={sorted(present)[:5]}')
+print(f'function_rows={len(rows)} distinct_codeunits={len(present)} expected={len(expected)} matched={len(matched)} sample={sorted(present)[:5]}')
 sys.exit(0 if matched else 1)
 " 2>&1)
             local rc=$?

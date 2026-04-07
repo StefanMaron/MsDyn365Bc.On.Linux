@@ -11,7 +11,17 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: stefanmaron/bc-runner
+  # Canonical image name MUST match what consumers pull. Until 2026-04-07
+  # this was `stefanmaron/bc-runner`, while every consumer (including
+  # bc-test-from-source.yml's `runner_image` default and downstream projects
+  # like bc-copilot-blueprint) pulled `stefanmaron/msdyn365bc.on.linux/bc-runner`.
+  # Result: every push to this workflow built and tagged a fresh image that
+  # nobody used, while the image people actually pulled stayed frozen for
+  # weeks. A multi-day debugging session traced an entrypoint fix that was
+  # silently invisible to every CI run because of this mismatch. Don't move
+  # this without simultaneously updating bc-test-from-source.yml and any
+  # downstream consumer.
+  IMAGE_NAME: stefanmaron/msdyn365bc.on.linux/bc-runner
 
 jobs:
   build-push:

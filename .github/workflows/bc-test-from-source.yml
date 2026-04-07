@@ -277,28 +277,29 @@ jobs:
       - name: Publish AL apps to BC
         env:
           AUTH: "BCRUNNER:Admin123!"
-          DEV: "http://localhost:7049"
+          DEV: "http://localhost:7049/BC/dev"
           APP_DIRS: ${{ inputs.app_dirs }}
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
         run: |
           set -e
           bash bc-linux/scripts/workflow-summary.sh begin PUBLISH "Publish AL apps"
-          publish_app() {
-            local app="$1"
-            [ -f "$app" ] || { echo "missing: $app"; exit 1; }
-            echo ">>> Publishing $app"
-            local code
-            code=$(curl -s -o /tmp/pub.out -w "%{http_code}" --max-time 180 \
-              -u "$AUTH" -X POST \
-              -F "file=@${app};type=application/octet-stream" \
-              "$DEV/apps?SchemaUpdateMode=forcesync")
-            cat /tmp/pub.out; echo
-            [ "$code" = "200" ] || [ "$code" = "422" ] || { echo "publish failed: $code"; exit 1; }
-          }
+          # Source the canonical publish helper from bc-linux. Previously
+          # this step had its own inline publish_app that treated EVERY
+          # 422 as success, which silently swallowed missing-dependency
+          # errors (e.g. AL1024 "Symbols for the requested app X could
+          # not be found in the database") and let downstream test runs
+          # produce "0 total, 0 passed, 0 failed" with no clue why.
+          # bc_publish_app reads the response body and only treats 422
+          # as success if it actually says "already".
+          # shellcheck disable=SC1091
+          . bc-linux/scripts/publish-app.sh
           PUBLISHED_COUNT=0
           for d in $APP_DIRS $TEST_APP_DIRS; do
             [ -z "$d" ] && continue
-            publish_app "build/$(basename "$d").app"
+            app="build/$(basename "$d").app"
+            [ -f "$app" ] || { echo "missing: $app"; exit 1; }
+            echo ">>> Publishing $app"
+            bc_publish_app "$app" "$DEV" "$AUTH" || exit 1
             PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
           done
           bash bc-linux/scripts/workflow-summary.sh count apps_published "$PUBLISHED_COUNT"
@@ -321,6 +322,13 @@ jobs:
           TESTS_PASSED=0
           TESTS_FAILED=0
           CODEUNITS_TOTAL=0
+          # NOTE on the pipe: `run-tests.sh ... | tee` hides run-tests.sh's
+          # exit code behind tee's (always 0). PIPESTATUS captures the
+          # original. Without this check, even a hard publish failure or
+          # an empty test suite leaves the workflow green — which is
+          # exactly the bug that wasted multiple debugging cycles in the
+          # bc-copilot-blueprint session.
+          ANY_TEST_FAILED=0
           for d in $TEST_APP_DIRS; do
             [ -z "$d" ] && continue
             app="../build/$(basename "$d").app"
@@ -333,6 +341,11 @@ jobs:
               --app "$app" \
               --codeunit-range "${{ inputs.codeunit_range }}" \
               --timeout 30 2>&1 | tee "$tmplog"
+            RUN_TESTS_RC=${PIPESTATUS[0]}
+            if [ "$RUN_TESTS_RC" -ne 0 ]; then
+              echo "ERROR: run-tests.sh exited with code $RUN_TESTS_RC for $base"
+              ANY_TEST_FAILED=1
+            fi
             # Parse "N total, P passed, F failed, ..." from run-tests.sh output.
             line=$(grep -oE '[0-9]+ total, [0-9]+ passed, [0-9]+ failed' "$tmplog" | tail -1 || true)
             if [ -n "$line" ]; then
@@ -355,6 +368,23 @@ jobs:
           bash scripts/workflow-summary.sh count tests_failed   "$TESTS_FAILED"
           bash scripts/workflow-summary.sh count codeunits_total "$CODEUNITS_TOTAL"
           bash scripts/workflow-summary.sh end TESTS
+          # Propagate any non-zero exit from run-tests.sh (PIPESTATUS check
+          # above), AND any test failures parsed from the per-app output.
+          # Either condition fails the workflow.
+          if [ "$ANY_TEST_FAILED" -ne 0 ]; then
+            echo "ERROR: at least one run-tests.sh invocation exited non-zero"
+            exit 1
+          fi
+          if [ "$TESTS_FAILED" -gt 0 ]; then
+            echo "ERROR: $TESTS_FAILED test(s) failed"
+            exit 1
+          fi
+          if [ "$TESTS_TOTAL" -eq 0 ]; then
+            echo "ERROR: no tests ran (TESTS_TOTAL=0). Either the test app"
+            echo "       failed to install or the test framework didn't see"
+            echo "       any [Test] procedures."
+            exit 1
+          fi
 
       - name: Workflow timing summary + telemetry
         if: always()
