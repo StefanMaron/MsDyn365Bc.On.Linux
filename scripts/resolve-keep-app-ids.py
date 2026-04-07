@@ -60,19 +60,23 @@ BASELINE = {
     "c1335042-3002-4257-bf8a-75c898ccb1b8",  # Application umbrella
 }
 
-# ── Test framework (deliberately EXCLUDED from the keep set) ──────────────
-# These apps are wiped by the SQL filter and freshly installed by the
-# entrypoint's "Publishing test framework" republish step after NST starts.
-# Even if a consumer's app.json declares one of these as a dependency, the
-# resolver's transitive closure walk filters them out so the keep set
-# doesn't include them — letting the entrypoint do the right thing.
-TEST_FRAMEWORK_IDS = {
-    "23de40a6-dfe8-4f80-80db-d70f83ce8caf",  # Test Runner
-    "dd0be2ea-f733-4d65-bb34-a28f4624fb14",  # Library Assert
-    "e7320ebb-08b3-4406-b1ec-b4927d3e280b",  # Any
-    "5095f467-0a01-4b99-99d1-9ff1237d286f",  # Library Variable Storage
-    "40860557-a18d-42ad-aecb-22b7dd80dc80",  # Permissions Mock
-}
+# ── Test framework apps (kept in the closure when consumers depend on them) ──
+#
+# Historical note: this set used to be deliberately EXCLUDED from the
+# transitive closure, on the theory that the entrypoint's
+# "Publishing test framework" republish step would freshly install them
+# after NST starts. That republish step was a hand-curated array which
+# we kept patching every time a consumer hit a missing dep — and the
+# discovery loop was painful (silent install failures, "0 tests ran"
+# with no clue, multiple cycles of "find missing dep, add to array,
+# rebuild image, retry").
+#
+# The right architecture is to never wipe them in the first place. The
+# selective filter now keeps everything in the consumer's transitive
+# closure, including any test framework apps the consumer reaches via
+# its dependency chain. The entrypoint no longer needs to republish
+# anything from this set.
+TEST_FRAMEWORK_IDS: set[str] = set()  # intentionally empty — see comment above
 
 
 # ── .app file reader ──────────────────────────────────────────────────────
@@ -202,19 +206,16 @@ def read_consumer_seeds(app_json_paths, app_file_paths) -> set[str]:
 def walk_closure(seed_ids: set[str], apps: dict) -> set[str]:
     """Walk the transitive dependency closure starting from seed_ids.
 
-    Test framework apps are excluded from the closure even when consumers
-    declare them as dependencies — they're handled by the entrypoint's
-    test framework republish step (which does a proper fresh install,
-    while keeping them in the SQL filter would cause them to be in a
-    published-but-not-installed state).
+    Includes EVERYTHING the consumer transitively depends on, test
+    framework apps included. The selective filter then preserves
+    everything in this closure, so the entrypoint never has to
+    republish test framework apps after the fact.
     """
     out = set()
 
     def visit(aid: str):
         if aid in out:
             return
-        if aid in TEST_FRAMEWORK_IDS:
-            return  # let the entrypoint's republish step handle these
         if aid not in apps:
             return  # not in this BC build — skip
         out.add(aid)
@@ -254,18 +255,14 @@ def main():
         closure = walk_closure(seeds, artifact_apps)
         print(f"transitive closure: {len(closure)}", file=sys.stderr)
 
-        # Categorize unresolved seeds for clearer diagnostics:
-        #  - test framework GUIDs are deliberately excluded (handled by entrypoint)
-        #  - everything else is genuinely missing from the artifact set
+        # Anything in seeds but not in closure is genuinely missing from
+        # the artifact set — likely pre-installed in BC's database (System
+        # Application, Business Foundation, etc.) and resolved at install
+        # time without needing to be in the keep set.
         unresolved = seeds - closure
-        framework_excluded = unresolved & TEST_FRAMEWORK_IDS
-        truly_missing = unresolved - TEST_FRAMEWORK_IDS
-        if framework_excluded:
-            print(f"NOTE: {len(framework_excluded)} consumer dep(s) excluded as test framework "
-                  f"(handled by entrypoint republish): {sorted(framework_excluded)}", file=sys.stderr)
-        if truly_missing:
-            print(f"WARN: {len(truly_missing)} consumer dep(s) not found in artifact "
-                  f"set (will rely on baseline): {sorted(truly_missing)}", file=sys.stderr)
+        if unresolved:
+            print(f"WARN: {len(unresolved)} consumer dep(s) not found in artifact "
+                  f"set (will rely on baseline): {sorted(unresolved)}", file=sys.stderr)
         keep |= closure
 
     closure_added = len(keep - BASELINE - extras) if seeds else 0

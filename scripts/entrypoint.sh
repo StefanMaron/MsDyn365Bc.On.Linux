@@ -861,56 +861,16 @@ PYEOF
             echo "[entrypoint] [${TOTAL_ELAPSED}s] Republished $REPUBLISH_OK extensions, skipped $REPUBLISH_SKIP — republish took ${REPUBLISH_ELAPSED}s"
         fi
 
-        # Publish test framework apps. The previous version of this code
-        # was a hand-curated array of "test framework" apps to publish in
-        # explicit dependency order. Every time a downstream consumer
-        # added a test app that depended on something we'd missed, the
-        # publish silently failed and we got "0 tests ran" with no clue
-        # why. Multiple iterations of "find missing dep, add to array,
-        # rebuild image, retry" later, the right architectural answer
-        # became obvious: walk the dependency graph from a small set of
-        # "leaf" seeds and let the resolver compute the closure.
-        #
-        # The seeds below are the apps that consumers' test extensions
-        # most commonly declare as direct dependencies. resolve-install-order.py
-        # walks each seed's transitive closure across the artifact tree
-        # and emits paths in topological order — every app's deps appear
-        # before it. No hand-curated install order, no missing-helper
-        # surprises when a future BC version adds a new transitive dep.
-        echo "[entrypoint] Publishing test framework..."
-        TEST_FRAMEWORK_SEEDS=(
-            "Microsoft/Test Runner"
-            "Microsoft/Library Assert"
-            "Microsoft/Tests-TestLibraries"
-            "Microsoft/Library-NoTransactions"
-        )
-        SEED_ARGS=()
-        for seed in "${TEST_FRAMEWORK_SEEDS[@]}"; do
-            SEED_ARGS+=(--seed "$seed")
-        done
-        ORDERED_APPS=$(python3 /bc/scripts/resolve-install-order.py \
-            --artifact-dir "$ARTIFACTS" \
-            "${SEED_ARGS[@]}" 2>&1 >/tmp/install-order.txt | sed 's/^/[entrypoint]   /' || true)
-        # Print the resolver's stderr (its diagnostics) inline.
-        echo "$ORDERED_APPS"
-        # Then publish each path stdout produced.
-        while IFS= read -r app; do
-            [ -z "$app" ] && continue
-            NAME=$(basename "$app")
-            HTTP=$(curl -s -o /tmp/tf-publish.out -w "%{http_code}" --max-time 120 \
-                -u "BCRUNNER:Admin123!" -X POST \
-                -F "file=@$app;type=application/octet-stream" \
-                "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
-            echo "[entrypoint]   $NAME: HTTP $HTTP"
-            # On non-2xx, dump the body so we can see WHY a republish failed.
-            # Without this, a missing transitive dep silently produces "HTTP 422"
-            # with no clue what's wrong.
-            if [ "$HTTP" != "200" ] && [ "$HTTP" != "204" ]; then
-                sed 's/^/[entrypoint]     /' /tmp/tf-publish.out
-            fi
-            rm -f /tmp/tf-publish.out
-        done < /tmp/install-order.txt
-        rm -f /tmp/install-order.txt
+        # No test framework republish step. The previous several iterations
+        # of this section (hand-curated array → explicit-dep-order array →
+        # resolver-with-seeds) were all duct tape around the wrong problem.
+        # The right architecture: don't wipe the test framework apps in the
+        # first place. resolve-keep-app-ids.py walks the consumer's app.json
+        # transitive closure and includes every test framework helper the
+        # consumer reaches via its dependency chain, so the selective
+        # filter PRESERVES them rather than wiping and re-installing.
+        # Removing-and-republishing was the source of every "0 tests ran"
+        # surprise in the bc-copilot-blueprint debugging session.
 
         # Publish additional test app dependencies (e.g. System App Test Library, Tests-TestLibraries)
         # and the actual test app (e.g. Tests-SINGLESERVER) if BC_TEST_APPS is set.
