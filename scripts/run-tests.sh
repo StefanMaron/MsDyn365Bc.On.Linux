@@ -152,28 +152,70 @@ if [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
 fi
 
 # === Discover Test Codeunit IDs ===
+#
+# Strategy: when an --app is provided, ALWAYS read SymbolReference.json from
+# the .app and extract the actual Test codeunit IDs. If --codeunit-range is
+# *also* provided, intersect the discovered IDs with that range. This avoids
+# the SetupSuite iterating tens of thousands of nonexistent IDs (each
+# AddTestCodeunit call costs ~3-5 SQL ops, so a literal "50000-99999" range
+# expands to ~250k SQL ops, which times out long before completing).
+#
+# When only --codeunit-range is provided (no .app to discover from), fall
+# back to the literal range — this is for ad-hoc usage and large
+# Microsoft-shipped test apps where the .app may not be on the host.
 CODEUNIT_IDS=""
+
+# Parse --codeunit-range into a normalized "lo-hi" or "lo,lo,..." form.
+NORMALIZED_RANGE=""
 if [ -n "$CODEUNIT_RANGE" ]; then
     if [[ "$CODEUNIT_RANGE" == *".."* ]]; then
-        CODEUNIT_IDS=$(echo "$CODEUNIT_RANGE" | sed 's/\.\.\([0-9]\)/-\1/')
+        NORMALIZED_RANGE=$(echo "$CODEUNIT_RANGE" | sed 's/\.\.\([0-9]\)/-\1/')
     else
-        CODEUNIT_IDS="$CODEUNIT_RANGE"
+        NORMALIZED_RANGE="$CODEUNIT_RANGE"
     fi
 fi
 
-if [ -z "$CODEUNIT_IDS" ] && [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
-    echo -n "Discovering test codeunits... "
-    CODEUNIT_IDS=$(unzip -p "$APP_FILE" SymbolReference.json 2>/dev/null | py3 -c "
-import sys, json
+if [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
+    echo -n "Discovering test codeunits from $(basename "$APP_FILE")"
+    [ -n "$NORMALIZED_RANGE" ] && echo -n " (filter: $NORMALIZED_RANGE)"
+    echo -n "... "
+    CODEUNIT_IDS=$(unzip -p "$APP_FILE" SymbolReference.json 2>/dev/null | RANGE="$NORMALIZED_RANGE" py3 -c "
+import os, sys, json
 raw = sys.stdin.read()
 if not raw.strip(): sys.exit(0)
 data = json.loads(raw.lstrip('\ufeff'))
+
+# Parse the optional range filter into a set/range list of allowed IDs.
+filt = os.environ.get('RANGE', '').strip()
+allowed = None  # None = no filter
+if filt:
+    allowed = set()
+    for part in filt.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '-' in part:
+            lo, hi = part.split('-', 1)
+            try:
+                allowed.update(range(int(lo), int(hi) + 1))
+            except ValueError:
+                pass
+        else:
+            try:
+                allowed.add(int(part))
+            except ValueError:
+                pass
+
 ids = []
 def collect(node):
     for cu in node.get('Codeunits', []):
         props = {p['Name']: p['Value'] for p in cu.get('Properties', [])}
-        if props.get('Subtype') == 'Test':
-            ids.append(str(cu['Id']))
+        if props.get('Subtype') != 'Test':
+            continue
+        cuid = cu.get('Id')
+        if allowed is not None and cuid not in allowed:
+            continue
+        ids.append(str(cuid))
     for ns in node.get('Namespaces', []):
         collect(ns)
 collect(data)
@@ -182,8 +224,13 @@ print(','.join(ids))
     echo "${CODEUNIT_IDS:-none found}"
 fi
 
+# Fall back to literal range expansion if no .app was provided.
+if [ -z "$CODEUNIT_IDS" ] && [ -n "$NORMALIZED_RANGE" ] && [ -z "$APP_FILE" ]; then
+    CODEUNIT_IDS="$NORMALIZED_RANGE"
+fi
+
 if [ -z "$CODEUNIT_IDS" ]; then
-    echo "ERROR: No test codeunits found. Provide --app or --codeunit-range"
+    echo "ERROR: No test codeunits found. Provide --app (with test codeunits in the symbol) or --codeunit-range"
     exit 1
 fi
 echo "Test codeunits: $CODEUNIT_IDS"
