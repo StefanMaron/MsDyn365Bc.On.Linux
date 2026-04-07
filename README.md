@@ -31,19 +31,23 @@ curl -sf -u BCRUNNER:Admin123! http://localhost:7048/BC/ODataV4/Company \
 
 ## Requirements
 
-Just to start BC:
+Just to start BC and run AL tests:
 
 - Docker with Compose v2
+- `python3`, `curl`, `unzip` (used by `scripts/run-tests.sh` for symbol
+  parsing and OData calls)
 - ~4 GB RAM (2 GB SQL + 1-2 GB BC)
 - ~3 GB disk for artifacts (downloaded once, cached in Docker volumes)
 
-To **also run AL tests** via `scripts/run-tests.sh` from the host:
+That's it — **no .NET SDK on the host is required**. The WebSocket test
+runner used by `run-tests.sh` is bundled inside the bc-runner image and
+invoked via `docker compose exec`, so all the .NET work happens in the
+container. (If `run-tests.sh` is pointed at a remote BC instead of a
+local docker, it falls back to `dotnet run` from the host source — that
+fallback path needs the .NET 8 SDK.)
 
-- `python3` (JSON parsing of test symbols + suite responses)
-- `.NET 8 SDK` (the WebSocket test runner is a small `dotnet run` project)
-- `curl`, `unzip`
-
-To **also compile AL projects from the command line**:
+**Optional — only if you want to compile AL projects from the command line**
+without using the VS Code AL extension's F5 build:
 
 - `.NET 8 SDK` plus the Linux AL compiler tool:
 
@@ -55,7 +59,9 @@ To **also compile AL projects from the command line**:
   ```
 
   (Bump the version for newer BC majors. The version above is known to
-  work with BC 27.x.)
+  work with BC 27.x. If you use VS Code with the AL Language extension,
+  F5 / Ctrl+F5 publishes via the dev endpoint without ever needing the
+  CLI compiler — skip this section.)
 
 ---
 

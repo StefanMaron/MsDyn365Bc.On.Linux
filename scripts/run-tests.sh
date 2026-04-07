@@ -336,18 +336,68 @@ echo "Executing $NUM_CODEUNITS codeunits via WebSocket (max $MAX_ITER iterations
 # Note: do NOT pass --codeunit-filter here — the suite is already set up via OData.
 # Passing it would re-trigger SetupSuite which clears test results.
 # We pass --num-codeunits for correct progress display only.
-dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
-    --host "$WS_HOST" \
-    --odata-host "$ODATA_HOST" \
-    --company "$COMPANY" \
-    --user "$AUTH_USER" \
-    --password "$AUTH_PASS" \
-    --suite "DEFAULT" \
-    --num-codeunits "$NUM_CODEUNITS" \
-    --timeout "$TIMEOUT_MIN" \
-    --codeunit-timeout 10 \
-    --max-iterations "$MAX_ITER"
-EXIT_CODE=$?
+#
+# TestRunner execution strategy:
+#   1. If BC is in a local docker compose stack, run it INSIDE the bc container
+#      via `docker compose exec`. This requires NO host-side .NET 8 SDK because
+#      the container already has the .NET 8 runtime (and we pre-publish the
+#      TestRunner.dll into the image at /bc/tools/TestRunner/).
+#   2. Otherwise (remote BC, or no docker), fall back to `dotnet run` against
+#      the source project — requires .NET 8 SDK on the host.
+USE_DOCKER_EXEC=false
+DOCKER_BC_CONTAINER=""
+if [ "$BC_HOST" = "localhost" ] || [ "$BC_HOST" = "127.0.0.1" ]; then
+    if command -v docker >/dev/null 2>&1; then
+        # Try to find a running bc container in the bc-linux compose project.
+        DOCKER_BC_CONTAINER=$(cd "$REPO_DIR" 2>/dev/null && docker compose ps -q bc 2>/dev/null | head -1)
+        if [ -n "$DOCKER_BC_CONTAINER" ]; then
+            # Verify TestRunner.dll is bundled in the image. Older bc-runner
+            # images (built before this change) don't have it; in that case
+            # we fall back to host dotnet run so the script keeps working.
+            if (cd "$REPO_DIR" 2>/dev/null && docker compose exec -T bc test -f /bc/tools/TestRunner/TestRunner.dll 2>/dev/null); then
+                USE_DOCKER_EXEC=true
+            else
+                echo "[run-tests] bc-runner image does not bundle TestRunner.dll — falling back to host dotnet run."
+                echo "[run-tests]   (rebuild with 'docker compose build bc' to drop the host SDK requirement.)"
+            fi
+        fi
+    fi
+fi
+
+if [ "$USE_DOCKER_EXEC" = "true" ]; then
+    # Inside the container, BC's WebSocket and API ports are local to the
+    # container itself, so always use localhost regardless of how the host
+    # has them mapped. The TestRunner.dll path is fixed by the Dockerfile.
+    ( cd "$REPO_DIR" && docker compose exec -T bc dotnet /bc/tools/TestRunner/TestRunner.dll \
+        --host "localhost:7085" \
+        --odata-host "localhost:7052" \
+        --company "$COMPANY" \
+        --user "$AUTH_USER" \
+        --password "$AUTH_PASS" \
+        --suite "DEFAULT" \
+        --num-codeunits "$NUM_CODEUNITS" \
+        --timeout "$TIMEOUT_MIN" \
+        --codeunit-timeout 10 \
+        --max-iterations "$MAX_ITER" )
+    EXIT_CODE=$?
+elif command -v dotnet >/dev/null 2>&1; then
+    dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
+        --host "$WS_HOST" \
+        --odata-host "$ODATA_HOST" \
+        --company "$COMPANY" \
+        --user "$AUTH_USER" \
+        --password "$AUTH_PASS" \
+        --suite "DEFAULT" \
+        --num-codeunits "$NUM_CODEUNITS" \
+        --timeout "$TIMEOUT_MIN" \
+        --codeunit-timeout 10 \
+        --max-iterations "$MAX_ITER"
+    EXIT_CODE=$?
+else
+    echo "ERROR: cannot run TestRunner — neither a local BC docker container nor a host-side dotnet SDK is available."
+    echo "  Either: start BC via 'docker compose up -d --wait' from the bc-linux directory, or install .NET 8 SDK on the host."
+    exit 1
+fi
 
 # The TestRunner already reads and prints results via OData.
 # Its exit code: 0 = all pass, 1 = failures or no tests.
