@@ -27,7 +27,7 @@ jobs:
       bc_country:     "w1"
       app_dirs:       "app"          # space-separated dirs containing app.json
       test_app_dirs:  "test"         # ditto for test apps
-      codeunit_range: "70000..79999"
+      codeunit_range: "50000..99999"
 
   # ─── Prebuilt flavour example (commented out) ─────────────────────────
   #
