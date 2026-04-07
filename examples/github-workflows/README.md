@@ -49,6 +49,7 @@ reproducible CI runs swap it for a release tag once one exists
 | `app_dirs` | no | `""` | Space-separated dirs containing `app.json` for production apps |
 | `test_app_dirs` | **yes** | — | Space-separated dirs containing `app.json` for test apps |
 | `codeunit_range` | **yes** | — | ID range of your **test** codeunits to execute (e.g. `50000..99999`). Production app codeunits are published but not run. |
+| `keep_app_ids` | no | `""` | Comma-separated extra app GUIDs to always keep in the BC database, on top of the baseline + your apps' transitive dependencies. Set to `"all"` to opt out of selective keeping and preserve every stock extension. See "Faster startup via selective extension keeping" below. |
 | `al_tool_version` | no | `16.2.28.57946` | Linux AL compiler tool version |
 | `runner_image` | no | public ghcr.io tag | Override the bc-runner image |
 | `bc_linux_ref` | no | `master` | Git ref of `MsDyn365Bc.On.Linux` to check out for scripts |
@@ -58,6 +59,32 @@ reproducible CI runs swap it for a release tag once one exists
 
 Same as above but with `app_files` / `test_app_files` (paths to `.app`
 files) instead of `app_dirs` / `test_app_dirs`, and no `al_tool_version`.
+
+### Faster startup via selective extension keeping
+
+By default the templates analyse your `app.json` (or `.app`) files,
+walk the transitive dependency closure against the downloaded BC
+artifacts, and tell the container to **uninstall every stock extension
+that's not actually needed** before NST starts. Result: BC boots faster
+because there are far fewer apps to install/upgrade on first run.
+
+Always-kept baseline (regardless of dependency analysis):
+
+| App | GUID |
+|---|---|
+| System (AL platform) | `8874ed3a-0643-4247-9ced-7a7002f7135d` |
+| System Application | `63ca2fa4-4f03-4f2b-a480-172fef340d3f` |
+| Business Foundation | `f3552374-a1f2-4356-848e-196002525837` |
+| Base Application | `437dbf0e-84ff-417a-965d-ed2bb9650972` |
+| Application (umbrella) | `c1335042-3002-4257-bf8a-75c898ccb1b8` |
+
+If your project depends on additional stock extensions that the
+resolver can't infer (rare — would mean your `app.json` is missing a
+dependency it actually needs at runtime), pass them via `keep_app_ids`
+as a comma-separated GUID list. Or set `keep_app_ids: all` to disable
+selective keeping entirely and preserve every stock extension —
+useful as an escape hatch if you suspect a missing dep is causing
+test failures.
 
 ## Alternative: inlined templates (paste into your repo)
 

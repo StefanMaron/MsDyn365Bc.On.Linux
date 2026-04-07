@@ -55,6 +55,14 @@ env:
   # ID range of your TEST codeunits to execute. APP_FILES are published
   # but their codeunits aren't run.
   CODEUNIT_RANGE: "50000..99999"
+
+  # Optional: comma-separated extra app GUIDs to keep in the BC database
+  # in addition to the baseline (System / System Application / Business
+  # Foundation / Base Application / Application umbrella) and your apps'
+  # transitive dependencies. Stock extensions NOT in this set will be
+  # uninstalled before NST starts → much faster startup. Set to "all" to
+  # opt out and keep every pre-installed extension.
+  KEEP_APP_IDS: ""
   # --------------------------------------------------------------------
 
   # bc-linux runtime image (publicly available on GHCR).
@@ -84,6 +92,27 @@ jobs:
           bc-linux/scripts/download-artifacts.sh \
             "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" \
             "$PWD/artifact-cache/$BC_VERSION"
+
+      - name: Resolve apps to keep in BC database
+        run: |
+          if [ "$KEEP_APP_IDS" = "all" ]; then
+            echo "KEEP_APP_IDS=all → BC_CLEAR_ALL_APPS=none"
+            echo "BC_CLEAR_ALL_APPS=none" >> "$GITHUB_ENV"
+            echo "BC_KEEP_APP_IDS=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          ARGS=""
+          for f in $APP_FILES $TEST_APP_FILES; do
+            [ -z "$f" ] && continue
+            [ -f "project/$f" ] && ARGS="$ARGS --app-file project/$f"
+          done
+          KEEP_IDS=$(python3 bc-linux/scripts/resolve-keep-app-ids.py \
+            $ARGS \
+            --artifact-dir "artifact-cache/$BC_VERSION" \
+            --extra-ids "$KEEP_APP_IDS")
+          echo "Resolved keep set: $KEEP_IDS"
+          echo "BC_CLEAR_ALL_APPS=selective" >> "$GITHUB_ENV"
+          echo "BC_KEEP_APP_IDS=$KEEP_IDS" >> "$GITHUB_ENV"
 
       - name: Start BC on Linux
         env:
