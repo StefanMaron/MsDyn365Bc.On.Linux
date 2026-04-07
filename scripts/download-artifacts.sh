@@ -27,62 +27,59 @@ elif [ $# -eq 4 ]; then
     BC_TYPE="$1"; BC_VERSION="$2"; BC_COUNTRY="$3"; DEST="$4"
     BASE_URL="https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net"
 
-    # Resolve short version (e.g. "27.5") to full version (e.g. "27.5.46862.48004")
-    # by listing available blobs in the Azure CDN storage container.
+    # Resolve short version (e.g. "27.5") to full version (e.g. "27.5.46862.48612)
+    # using the per-country JSON index file that Microsoft maintains for
+    # navcontainerhelper:
     #
-    # IMPORTANT: AFD edges have been observed returning STALE/WRONG cached
-    # responses for the list-blobs API on a non-deterministic basis. The same
-    # query (prefix=27.5) intermittently returns 27.0/27.1/27.2 entries from
-    # different edges. We validate the resolved version actually starts with
-    # the requested prefix and retry several times with alternating URL
-    # forms + cache-busters before giving up. See navcontainerhelper#4119.
+    #   https://bcartifacts.blob.core.windows.net/<type>/indexes/<country>.json
+    #
+    # This is the canonical approach used by BcContainerHelper's
+    # QueryArtifactsFromIndex (HelperFunctions.ps1:1721) — it's a static
+    # JSON object, NOT the list-blobs API. Avoids the AFD list-blobs cache
+    # poisoning that plagued earlier versions of this script
+    # (microsoft/navcontainerhelper#4119), which would intermittently return
+    # stale 27.0/27.1/27.2 entries when asked for prefix=27.5.
     #
     # To skip the resolver entirely, pass a fully-qualified version like
     # "27.5.46862.48612" via BC_VERSION — the regex below sees three parts
     # and goes straight to the download.
     if ! echo "$BC_VERSION" | grep -qP '^\d+\.\d+\.\d+'; then
-        echo "[artifacts] Resolving version $BC_VERSION..."
+        echo "[artifacts] Resolving version $BC_VERSION via Microsoft's index file..."
         T_RESOLVE=$(_ms)
         REQUESTED_PREFIX="$BC_VERSION"
+        INDEX_URL="$BASE_URL/${BC_TYPE}/indexes/${BC_COUNTRY}.json"
         RESOLVED=""
-        # Six attempts: alternate prefix forms (with/without trailing dot,
-        # with /), each with a fresh cache-buster, with exponential-ish
-        # backoff. Total worst-case wait ~60s before failing hard.
-        ATTEMPT=0
-        BACKOFFS="0 3 5 10 15 25"
-        for backoff in $BACKOFFS; do
-            ATTEMPT=$((ATTEMPT + 1))
-            [ $backoff -gt 0 ] && sleep $backoff
-            # Cycle prefix variants on each attempt to dodge one stale edge
-            # response and potentially hit a different cached entry.
-            case $((ATTEMPT % 3)) in
-                1) PREFIX_VARIANT="${REQUESTED_PREFIX}." ;;
-                2) PREFIX_VARIANT="${REQUESTED_PREFIX}/" ;;
-                0) PREFIX_VARIANT="${REQUESTED_PREFIX}"  ;;
-            esac
-            CACHE_BUSTER="&_=$(date +%s%N)"
-            CANDIDATE=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${PREFIX_VARIANT}${CACHE_BUSTER}" 2>/dev/null | \
-                grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | grep "^${REQUESTED_PREFIX}\." | sort -V | tail -1 | cut -d/ -f1)
-            if [ -n "$CANDIDATE" ] && echo "$CANDIDATE" | grep -q "^${REQUESTED_PREFIX}\."; then
-                RESOLVED="$CANDIDATE"
+        # Three attempts in case of transient network errors. The index
+        # file is a regular cached blob, so it doesn't suffer the
+        # list-blobs API's stale-cache problem; one retry is usually
+        # plenty.
+        for attempt in 1 2 3; do
+            RESOLVED=$(curl -sf --retry 2 --retry-delay 2 "$INDEX_URL" 2>/dev/null | \
+                BC_PREFIX="$REQUESTED_PREFIX" python3 -c "
+import json, os, sys
+prefix = os.environ['BC_PREFIX'] + '.'
+try:
+    data = json.load(sys.stdin)
+except Exception as e:
+    sys.exit(1)
+versions = [d['Version'] for d in data if d.get('Version', '').startswith(prefix)]
+if not versions:
+    sys.exit(0)
+def vkey(v):
+    return tuple(int(x) for x in v.split('.'))
+versions.sort(key=vkey)
+print(versions[-1])
+" 2>/dev/null || true)
+            if [ -n "$RESOLVED" ] && echo "$RESOLVED" | grep -q "^${REQUESTED_PREFIX}\."; then
                 break
             fi
-            # Diagnostic: what did the response look like? Capture the raw
-            # tail-1 without the prefix filter so we can see if AFD is just
-            # serving the wrong major.
-            RAW=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${PREFIX_VARIANT}${CACHE_BUSTER}.diag" 2>/dev/null | \
-                grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -1 | cut -d/ -f1)
-            if [ -n "$RAW" ]; then
-                echo "[artifacts] WARN: attempt $ATTEMPT (prefix='${PREFIX_VARIANT}') — AFD returned '$RAW' (wrong major); retrying..."
-            else
-                echo "[artifacts] WARN: attempt $ATTEMPT (prefix='${PREFIX_VARIANT}') — empty/error response; retrying..."
-            fi
+            RESOLVED=""
+            echo "[artifacts] WARN: attempt $attempt — index file unreachable or no '$REQUESTED_PREFIX.x' versions found; retrying..."
+            sleep 3
         done
         if [ -z "$RESOLVED" ]; then
-            echo "[artifacts] ERROR: Could not resolve version $REQUESTED_PREFIX after $ATTEMPT attempts."
-            echo "[artifacts] This is the AFD cache poisoning issue described in"
-            echo "[artifacts] microsoft/navcontainerhelper#4119. Workaround: pin BC_VERSION"
-            echo "[artifacts] to a fully-qualified version, e.g.:"
+            echo "[artifacts] ERROR: Could not resolve version $REQUESTED_PREFIX from $INDEX_URL"
+            echo "[artifacts] Workaround: pin BC_VERSION to a fully-qualified version, e.g.:"
             echo "[artifacts]   BC_VERSION=27.5.46862.48612 docker compose up -d --wait"
             exit 1
         fi
