@@ -929,12 +929,29 @@ PYEOF
             while IFS= read -r APP_PATH; do
                 [ -z "$APP_PATH" ] && continue
                 NAME=$(basename "$APP_PATH")
+                # DependencyPublishingOption=Install tells BC to ALSO install
+                # any dependencies that are published-as-Global but not yet
+                # installed-for-tenant. This is the dev-endpoint equivalent of
+                # PowerShell's `Publish-NAVApp -Force` and is exactly the
+                # behavior we need: BC's default sandbox image ships several
+                # test framework apps (Test Runner, Library Assert, Any, etc.)
+                # in published-as-Global state without installing them for
+                # the default tenant. Without this query param, publishing
+                # anything that depends on them fails with AL1024 / "the
+                # referenced dependencies ... are not installed".
                 HTTP=$(curl -s -o /tmp/install-tenant.out -w "%{http_code}" --max-time 120 \
                     -u "BCRUNNER:Admin123!" -X POST \
                     -F "file=@$APP_PATH;type=application/octet-stream" \
-                    "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
-                echo "[entrypoint]   $NAME: HTTP $HTTP"
-                if [ "$HTTP" != "200" ] && [ "$HTTP" != "204" ]; then
+                    "$DEV_URL/apps?SchemaUpdateMode=forcesync&DependencyPublishingOption=Install" 2>/dev/null)
+                # Treat "already deployed as Global" 422s as benign — they
+                # mean the app was pre-installed by BC's sandbox image and
+                # doesn't need a republish.
+                if [ "$HTTP" = "200" ] || [ "$HTTP" = "204" ]; then
+                    echo "[entrypoint]   $NAME: HTTP $HTTP"
+                elif [ "$HTTP" = "422" ] && grep -qiE "already (deployed|installed)" /tmp/install-tenant.out; then
+                    echo "[entrypoint]   $NAME: HTTP $HTTP (already deployed — skip)"
+                else
+                    echo "[entrypoint]   $NAME: HTTP $HTTP"
                     sed 's/^/[entrypoint]     /' /tmp/install-tenant.out
                 fi
                 rm -f /tmp/install-tenant.out
