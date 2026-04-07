@@ -272,29 +272,48 @@ fi
 # times with a small delay — usually the metadata catches up within a
 # second or two.
 VERIFY_LAST_RESPONSE=""
+VERIFY_LAST_DETAIL=""
 verify_suite_populated() {
     local req_id="$1"
+    local expected_ids="$2"   # comma-separated codeunit IDs we care about
     # Up to 20 attempts × 2s sleep = ~40s of patience. The race the loop
-    # is guarding against (publish→install→metadata propagation) is
+    # is guarding against (publish → install → metadata propagation) is
     # usually <5s on a normal runner, but can stretch on faster I/O
     # environments where there is no accidental slack between publish
     # and the first setupSuite call.
+    #
+    # Stricter than "any row exists in DEFAULT": we count how many of
+    # OUR expected codeunit IDs are present, so stale rows from prior
+    # setupSuite calls or unrelated test extensions can never satisfy
+    # the check.
+    local attempt
     for attempt in $(seq 1 20); do
         VERIFY_LAST_RESPONSE=$(curl -sf --max-time 10 -u "$AUTH" \
-            "${API_BASE}/testResults?\$filter=testSuite%20eq%20%27DEFAULT%27&\$top=1" 2>/dev/null || true)
-        if [ -n "$VERIFY_LAST_RESPONSE" ] && echo "$VERIFY_LAST_RESPONSE" | py3 -c "
-import sys, json
+            "${API_BASE}/testResults?\$filter=testSuite%20eq%20%27DEFAULT%27&\$top=500" 2>/dev/null || true)
+        if [ -n "$VERIFY_LAST_RESPONSE" ]; then
+            VERIFY_LAST_DETAIL=$(echo "$VERIFY_LAST_RESPONSE" | EXPECTED="$expected_ids" py3 -c "
+import os, sys, json
 try:
     data = json.load(sys.stdin)
-    sys.exit(0 if len(data.get('value', [])) > 0 else 1)
-except Exception:
-    sys.exit(1)
-" 2>/dev/null; then
-            [ "$attempt" -gt 1 ] && echo "  suite populated after ${attempt} setupSuite attempts (~$((attempt*2))s)"
-            return 0
+except Exception as e:
+    print(f'parse-error: {e}'); sys.exit(0)
+rows = data.get('value', [])
+present = {str(r.get('testCodeunit', '')).strip() for r in rows if r.get('testCodeunit')}
+expected = {x.strip() for x in os.environ.get('EXPECTED', '').split(',') if x.strip()}
+matched = present & expected
+print(f'rows={len(rows)} distinct_codeunits={len(present)} expected={len(expected)} matched={len(matched)} sample={sorted(present)[:5]}')
+sys.exit(0 if matched else 1)
+" 2>&1)
+            local rc=$?
+            echo "  [verify attempt $attempt] $VERIFY_LAST_DETAIL"
+            if [ "$rc" = "0" ]; then
+                return 0
+            fi
+        else
+            echo "  [verify attempt $attempt] testResults endpoint returned no body (curl failed)"
         fi
-        # Suite still empty — re-call setupSuite. The metadata may have
-        # synced since the previous attempt.
+        # Suite still empty for our codeunits — re-call setupSuite. The
+        # metadata may have synced since the previous attempt.
         curl -s -o /dev/null --max-time 60 -u "$AUTH" -X POST \
             "${API_BASE}/codeunitRunRequests(${req_id})/Microsoft.NAV.setupSuite" 2>/dev/null
         sleep 2
@@ -302,28 +321,33 @@ except Exception:
     return 1
 }
 
-if ! verify_suite_populated "$REQUEST_ID"; then
-    echo "FAIL"
+echo ""   # newline so per-attempt logs are readable
+if ! verify_suite_populated "$REQUEST_ID" "$CODEUNIT_IDS"; then
     echo ""
-    echo "ERROR: setupSuite returned 200 but the DEFAULT test suite is empty"
-    echo "       after 20 retries (~40s). The test app's codeunits never showed"
-    echo "       up in the test framework's view of the database."
+    echo "ERROR: setupSuite returned 200 but the DEFAULT test suite never"
+    echo "       contained any of the expected codeunits after 20 retries (~40s)."
     echo ""
-    echo "       Diagnostic — last raw response from testResults endpoint:"
-    echo "         URL: ${API_BASE}/testResults?\$filter=testSuite%20eq%20'DEFAULT'&\$top=1"
-    echo "         Body: ${VERIFY_LAST_RESPONSE:-<empty/no response>}"
+    echo "       Expected codeunit IDs: $CODEUNIT_IDS"
+    echo ""
+    echo "       Last verify detail:    $VERIFY_LAST_DETAIL"
+    echo ""
+    echo "       Last raw testResults response (truncated to 800 chars):"
+    echo "         URL: ${API_BASE}/testResults?\$filter=testSuite%20eq%20'DEFAULT'&\$top=500"
+    echo "         Body: ${VERIFY_LAST_RESPONSE:0:800}"
     echo ""
     echo "       Possible causes:"
-    echo "         - The test app failed to install for the default tenant"
+    echo "         - Test app failed to install for the default tenant"
     echo "           (publish succeeds without installing in some tenant configurations)"
-    echo "         - The expected codeunit IDs (${CODEUNIT_IDS}) are not in the published .app"
+    echo "         - Expected codeunit IDs are not in the published .app"
+    echo "         - setupSuite is reading from a different tenant than testResults"
     echo "         - The test framework republish step in entrypoint.sh failed silently"
     echo ""
-    echo "       Cross-check by querying installed extensions directly:"
+    echo "       Cross-check installed extensions:"
     echo "         curl -u $AUTH '${BASE_URL}/api/v2.0/extensionDeployments'"
+    echo "         curl -u $AUTH 'http://localhost:7052/BC/api/v2.0/extensionDeployments'"
     exit 1
 fi
-echo "OK"
+echo "Test suite populated."
 
 # === Disable Known-Failing Tests ===
 if [ -n "$DISABLED_TESTS_DIR" ] && [ -d "$DISABLED_TESTS_DIR" ]; then
