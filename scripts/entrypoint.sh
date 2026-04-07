@@ -861,47 +861,59 @@ PYEOF
             echo "[entrypoint] [${TOTAL_ELAPSED}s] Republished $REPUBLISH_OK extensions, skipped $REPUBLISH_SKIP — republish took ${REPUBLISH_ELAPSED}s"
         fi
 
-        # Publish test framework apps. These are needed for running AL tests.
+        # Publish test framework apps in EXPLICIT DEPENDENCY ORDER.
         #
-        # Set includes:
-        #   - The "core" framework: Test Runner, Library Assert, Library Variable
-        #     Storage, Permissions Mock, Any
-        #   - The base layer test helpers: System Application Test Library,
-        #     Business Foundation Test Libraries. These are required by
-        #     Tests-TestLibraries (which fails with AL1024 if either is missing).
-        #   - The BaseApp test helper libraries: Tests-TestLibraries and
-        #     Library-NoTransactions. These ship under
-        #     platform/applications/BaseApp/Test/ (no version suffix in the
-        #     filename, hence the trailing wildcard). Real-world AL test
-        #     extensions almost always depend on at least one of these
-        #     (e.g. LibrarySales, LibraryPurchase, LibraryInventory all live
-        #     in Tests-TestLibraries).
+        # The previous version used `find | sort` and relied on alphabetical
+        # ordering to install transitive deps before their dependents. That
+        # broke spectacularly: locale-dependent path sorting placed
+        # `BaseApp/Test/Microsoft_Tests-TestLibraries.app` BEFORE
+        # `BusinessFoundation/Test/Microsoft_Business Foundation Test Libraries.app`
+        # and `SystemApplication/Test/Microsoft_System Application Test Library.app`,
+        # so Tests-TestLibraries was published while its two required helper
+        # libraries were still missing, hit AL1024 ("could not be found in
+        # the database"), and the publish silently HTTP-422'd. Downstream
+        # consumers then saw their own publishes fail because
+        # Tests-TestLibraries itself was never installed.
         #
-        # `sort` orders this alphabetically. Verify dependency order is
-        # respected when adding new apps:
-        #   Any < Business Foundation Test Libraries < Library Assert <
-        #   Library Variable Storage < Library-NoTransactions <
-        #   Permissions Mock < System Application Test Library <
-        #   Test Runner < Tests-TestLibraries
-        # Tests-TestLibraries comes last, after all its transitive deps.
+        # Explicit ordering removes the sort dependency entirely. Each app's
+        # transitive deps appear earlier in the array.
         echo "[entrypoint] Publishing test framework..."
-        find "$ARTIFACTS" -name "*.app" -type f \( \
-            -name "Microsoft_Test Runner_*" -o \
-            -name "Microsoft_Library Assert_*" -o \
-            -name "Microsoft_Library Variable Storage_*" -o \
-            -name "Microsoft_Permissions Mock_*" -o \
-            -name "Microsoft_Any_*" -o \
-            -name "Microsoft_System Application Test Library*" -o \
-            -name "Microsoft_Business Foundation Test Libraries*" -o \
-            -name "Microsoft_Tests-TestLibraries*" -o \
-            -name "Microsoft_Library-NoTransactions*" \
-        \) 2>/dev/null | sort | while read -r app; do
+        TEST_FRAMEWORK_APPS=(
+            # --- Base test framework (no inter-deps among these except via Test Runner) ---
+            "Microsoft_Any"                           # platform/applications/testframework/testlibraries/any/
+            "Microsoft_Library Variable Storage"      # platform/applications/testframework/testlibraries/variable storage/
+            "Microsoft_Library Assert"                # platform/applications/testframework/testlibraries/assert/
+            "Microsoft_Permissions Mock"              # platform/applications/testframework/testlibraries/permissions mock/
+            "Microsoft_Test Runner"                   # platform/applications/testframework/TestRunner/
+            # --- Base layer test helpers (deps of the BaseApp test helpers below) ---
+            "Microsoft_System Application Test Library"     # platform/applications/SystemApplication/Test/
+            "Microsoft_Business Foundation Test Libraries"  # platform/applications/BusinessFoundation/Test/
+            # --- BaseApp test helpers (depend on the layers above) ---
+            "Microsoft_Library-NoTransactions"        # platform/applications/BaseApp/Test/
+            "Microsoft_Tests-TestLibraries"           # platform/applications/BaseApp/Test/
+        )
+        for prefix in "${TEST_FRAMEWORK_APPS[@]}"; do
+            # Some apps ship with a version suffix (Microsoft_Library Assert_27.5.46862.48612.app),
+            # others don't (Microsoft_Tests-TestLibraries.app). Match both via the trailing
+            # wildcard. Picking the first match is fine — only one copy ever exists per artifact.
+            app=$(find "$ARTIFACTS" -type f \( -name "${prefix}.app" -o -name "${prefix}_*.app" \) 2>/dev/null | head -1)
+            if [ -z "$app" ]; then
+                echo "[entrypoint]   $prefix: NOT FOUND in artifact tree (skipping)"
+                continue
+            fi
             NAME=$(basename "$app")
-            HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
+            HTTP=$(curl -s -o /tmp/tf-publish.out -w "%{http_code}" --max-time 120 \
                 -u "BCRUNNER:Admin123!" -X POST \
                 -F "file=@$app;type=application/octet-stream" \
                 "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
             echo "[entrypoint]   $NAME: HTTP $HTTP"
+            # On non-2xx, dump the body so we can see WHY a republish failed.
+            # Without this, a missing transitive dep silently produces "HTTP 422"
+            # with no clue what's wrong.
+            if [ "$HTTP" != "200" ] && [ "$HTTP" != "204" ]; then
+                sed 's/^/[entrypoint]     /' /tmp/tf-publish.out
+            fi
+            rm -f /tmp/tf-publish.out
         done
 
         # Publish additional test app dependencies (e.g. System App Test Library, Tests-TestLibraries)
