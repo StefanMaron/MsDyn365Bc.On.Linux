@@ -113,6 +113,32 @@ jobs:
             "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" \
             "$PWD/artifact-cache/$BC_VERSION"
 
+      - name: Resolve apps to keep in BC database
+        env:
+          APP_DIRS: ${{ inputs.app_dirs }}
+          TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
+        run: |
+          # Walk the consumer's app.json files to find their immediate
+          # dependencies, then resolve the transitive closure against the
+          # BC artifact extension set. The resolver always emits a baseline
+          # of 10 apps (System / System Application / Business Foundation /
+          # Base Application / Application umbrella + Test Runner /
+          # Library Assert / Any / Library Variable Storage / Permissions
+          # Mock) so the test framework is always preserved.
+          ARGS=""
+          for d in $APP_DIRS $TEST_APP_DIRS; do
+            [ -z "$d" ] && continue
+            if [ -f "project/$d/app.json" ]; then
+              ARGS="$ARGS --app-json project/$d/app.json"
+            fi
+          done
+          KEEP_IDS=$(python3 bc-linux/scripts/resolve-keep-app-ids.py \
+            $ARGS \
+            --artifact-dir "artifact-cache/$BC_VERSION")
+          echo "Resolved keep set: $KEEP_IDS"
+          echo "BC_CLEAR_ALL_APPS=selective" >> "$GITHUB_ENV"
+          echo "BC_KEEP_APP_IDS=$KEEP_IDS" >> "$GITHUB_ENV"
+
       - name: Start BC on Linux
         env:
           BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ inputs.bc_version }}
@@ -218,4 +244,9 @@ jobs:
       - name: BC logs (on failure)
         if: failure()
         working-directory: bc-linux
-        run: docker compose logs bc | tail -200
+        run: |
+          echo "=== entrypoint.sh + selective filter output ==="
+          docker compose logs bc 2>&1 | grep -E "\[entrypoint\]|Selective|KEEP:|BC_CLEAR_ALL_APPS|BC_KEEP_APP_IDS|test framework|Library Assert|Microsoft_Any|Microsoft_Test Runner" || true
+          echo ""
+          echo "=== last 500 lines of bc-1 ==="
+          docker compose logs bc 2>&1 | tail -500

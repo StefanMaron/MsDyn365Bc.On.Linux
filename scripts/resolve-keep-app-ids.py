@@ -41,12 +41,28 @@ from pathlib import Path
 # Stable across BC versions. Including any of these in BC_KEEP_APP_IDS is
 # harmless even if the app is not actually published in this BC build —
 # the entrypoint's keep filter just won't match it.
+#
+# Includes both the application stack (System / Business Foundation /
+# Base Application / Application umbrella) AND the standard Microsoft
+# test framework libraries. The test framework GUIDs are baseline because
+# almost every consumer test app declares dependencies on at least
+# Library Assert + Any, and the entrypoint's republish step assumes
+# these to be available — keeping them in the keep list avoids the
+# resolver having to discover them through dep walking, and matches
+# the test framework republish behavior of the entrypoint.
 BASELINE = {
+    # Application stack
     "8874ed3a-0643-4247-9ced-7a7002f7135d",  # System (AL platform symbols)
     "63ca2fa4-4f03-4f2b-a480-172fef340d3f",  # System Application
     "f3552374-a1f2-4356-848e-196002525837",  # Business Foundation
     "437dbf0e-84ff-417a-965d-ed2bb9650972",  # Base Application
     "c1335042-3002-4257-bf8a-75c898ccb1b8",  # Application umbrella
+    # Test framework (matches entrypoint.sh test framework republish list)
+    "23de40a6-dfe8-4f80-80db-d70f83ce8caf",  # Test Runner
+    "dd0be2ea-f733-4d65-bb34-a28f4624fb14",  # Library Assert
+    "e7320ebb-08b3-4406-b1ec-b4927d3e280b",  # Any
+    "5095f467-0a01-4b99-99d1-9ff1237d286f",  # Library Variable Storage
+    "40860557-a18d-42ad-aecb-22b7dd80dc80",  # Permissions Mock
 }
 
 
