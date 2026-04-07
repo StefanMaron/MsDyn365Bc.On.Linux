@@ -56,7 +56,7 @@ env:
   # ID range of your TEST codeunits to execute. Use "lo..hi" or a single
   # number. Pick a range that covers all test codeunits in TEST_APP_DIRS —
   # production codeunits in APP_DIRS are published but not run.
-  CODEUNIT_RANGE: "70000..79999"
+  CODEUNIT_RANGE: "50000..99999"
 
   # AL compiler version. Has to match the major BC version of the
   # platform you're targeting. The version below is known to work with

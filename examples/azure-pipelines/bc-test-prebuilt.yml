@@ -54,7 +54,7 @@ variables:
 
   # ID range of your TEST codeunits to execute. APP_FILES are published but
   # their codeunits aren't run — only TEST_APP_FILES codeunits are executed.
-  CODEUNIT_RANGE: '70000..79999'
+  CODEUNIT_RANGE: '50000..99999'
   # --------------------------------------------------------------------
 
   # bc-linux runtime image (publicly available on GHCR — no auth needed).

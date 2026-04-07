@@ -53,7 +53,7 @@ variables:
 
   # ID range of your TEST codeunits to execute. APP_DIRS are published but
   # their codeunits aren't run — only TEST_APP_DIRS codeunits are executed.
-  CODEUNIT_RANGE: '70000..79999'
+  CODEUNIT_RANGE: '50000..99999'
 
   # AL compiler version. Has to match the major BC version. The version
   # below is known to work with BC 27.x. For BC 28.x bump it.

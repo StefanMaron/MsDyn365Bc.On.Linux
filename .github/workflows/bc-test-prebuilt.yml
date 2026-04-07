@@ -15,7 +15,7 @@ name: BC test (prebuilt) [reusable]
 #       with:
 #         bc_version:     "27.5"
 #         test_app_files: "tests/MyTests.app"
-#         codeunit_range: "70000..79999"
+#         codeunit_range: "50000..99999"
 #
 # Inputs are documented under workflow_call below.
 
@@ -47,7 +47,7 @@ on:
         required: true
         type: string
       codeunit_range:
-        description: "Test codeunit ID range to execute (e.g. 70000..79999). This is the range of your TEST codeunits — production .app files in app_files are published but their codeunits aren't run."
+        description: "Test codeunit ID range to execute (e.g. 50000..99999). This is the range of your TEST codeunits — production .app files in app_files are published but their codeunits aren't run."
         required: true
         type: string
       runner_image:

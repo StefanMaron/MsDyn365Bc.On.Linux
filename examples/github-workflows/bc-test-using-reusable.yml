@@ -36,4 +36,4 @@ jobs:
   #   with:
   #     bc_version:     "27.5"
   #     test_app_files: "tests/MyTests.app"
-  #     codeunit_range: "70000..79999"
+  #     codeunit_range: "50000..99999"
