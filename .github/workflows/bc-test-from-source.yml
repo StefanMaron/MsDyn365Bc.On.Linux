@@ -95,6 +95,9 @@ jobs:
           ref: ${{ inputs.bc_linux_ref }}
           path: bc-linux
 
+      - name: Initialize timing
+        run: bash bc-linux/scripts/workflow-summary.sh init
+
       # ─── Phase 2: artifact download + docker image pull (parallel) ───
       # Downloading the BC artifact from Microsoft's CDN and pulling the
       # bc-runner / mssql images from GHCR / mcr are independent network
@@ -107,6 +110,7 @@ jobs:
           BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ inputs.bc_version }}
         run: |
           set -e
+          bash bc-linux/scripts/workflow-summary.sh begin DOWNLOAD "Download BC artifacts + pull docker images"
           mkdir -p "artifact-cache/$BC_VERSION"
           (
             bc-linux/scripts/download-artifacts.sh \
@@ -127,6 +131,7 @@ jobs:
           PULL_PID=$!
           wait $ARTIFACT_PID || { echo "artifact download failed"; exit 1; }
           wait $PULL_PID     || { echo "docker pull failed"; exit 1; }
+          bash bc-linux/scripts/workflow-summary.sh end DOWNLOAD
 
       # ─── Phase 3: figure out the BC_KEEP_APP_IDS for the entrypoint ──
       # Must run BEFORE 'docker compose up' so the env propagates into
@@ -136,6 +141,7 @@ jobs:
           APP_DIRS: ${{ inputs.app_dirs }}
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
         run: |
+          bash bc-linux/scripts/workflow-summary.sh begin RESOLVE "Resolve apps to keep"
           # Walk the consumer's app.json files to find their immediate
           # dependencies, then resolve the transitive closure against the
           # BC artifact extension set. The resolver always emits the 5
@@ -158,6 +164,7 @@ jobs:
           echo "Resolved keep set: $KEEP_IDS"
           echo "BC_CLEAR_ALL_APPS=selective" >> "$GITHUB_ENV"
           echo "BC_KEEP_APP_IDS=$KEEP_IDS" >> "$GITHUB_ENV"
+          bash bc-linux/scripts/workflow-summary.sh end RESOLVE
 
       # ─── Phase 4: kick off BC startup in the background ──────────────
       # docker compose up -d returns immediately. BC then takes ~5 minutes
@@ -169,6 +176,7 @@ jobs:
           BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ inputs.bc_version }}
         working-directory: bc-linux
         run: |
+          bash scripts/workflow-summary.sh begin BC_BOOT "BC startup (background → wait for healthy)"
           docker compose up -d
           echo "BC container started in background — continuing with other work."
 
@@ -183,13 +191,16 @@ jobs:
 
       - name: Install AL compiler (Linux)
         run: |
+          bash bc-linux/scripts/workflow-summary.sh begin AL_INSTALL "Install AL compiler"
           dotnet tool install -g \
             Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
             --version "${{ inputs.al_tool_version }}" 2>/dev/null || true
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          bash bc-linux/scripts/workflow-summary.sh end AL_INSTALL
 
       - name: Stage symbols from BC artifacts
         run: |
+          bash bc-linux/scripts/workflow-summary.sh begin SYMBOLS "Stage symbols"
           mkdir -p symbols
           ART="artifact-cache/$BC_VERSION"
           find "$ART/platform/ModernDev" -name "System.app" -exec cp {} symbols/ \; 2>/dev/null || true
@@ -198,6 +209,7 @@ jobs:
           find "$ART/app/Applications" -name "*Test Library*.app" -exec cp {} symbols/ \; 2>/dev/null || true
           find "$ART/app/Applications" -name "*Tests-TestLibraries*.app" -exec cp {} symbols/ \; 2>/dev/null || true
           echo "Staged $(ls symbols/*.app 2>/dev/null | wc -l) symbol files"
+          bash bc-linux/scripts/workflow-summary.sh end SYMBOLS
 
       - name: Compile AL apps (no publish yet)
         env:
@@ -205,6 +217,7 @@ jobs:
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
         run: |
           set -e
+          bash bc-linux/scripts/workflow-summary.sh begin COMPILE "Compile AL apps"
           compile_dir() {
             local src="$1"
             [ -f "$src/app.json" ] || { echo "skip $src (no app.json)" >&2; return 0; }
@@ -227,6 +240,7 @@ jobs:
             cp build/*.app "project/$d/.alpackages/" 2>/dev/null || true
             compile_dir "project/$d"
           done
+          bash bc-linux/scripts/workflow-summary.sh end COMPILE
 
       # ─── Phase 6: synchronization point — wait for BC to be healthy ──
       - name: Wait for BC healthy
@@ -242,6 +256,7 @@ jobs:
             sleep 5
           done
           [ "$STATUS" = "healthy" ] || { docker compose logs bc | tail -100; exit 1; }
+          bash scripts/workflow-summary.sh end BC_BOOT
 
       # ─── Phase 7: publish compiled apps to the now-running BC ────────
       - name: Publish AL apps to BC
@@ -252,6 +267,7 @@ jobs:
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
         run: |
           set -e
+          bash bc-linux/scripts/workflow-summary.sh begin PUBLISH "Publish AL apps"
           publish_app() {
             local app="$1"
             [ -f "$app" ] || { echo "missing: $app"; exit 1; }
@@ -264,10 +280,17 @@ jobs:
             cat /tmp/pub.out; echo
             [ "$code" = "200" ] || [ "$code" = "422" ] || { echo "publish failed: $code"; exit 1; }
           }
+          PUBLISHED_COUNT=0
           for d in $APP_DIRS $TEST_APP_DIRS; do
             [ -z "$d" ] && continue
             publish_app "build/$(basename "$d").app"
+            PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
           done
+          bash bc-linux/scripts/workflow-summary.sh count apps_published "$PUBLISHED_COUNT"
+          # Track compile count too — same loop iteration shape, runs after compile.
+          COMPILED_COUNT=$(ls build/*.app 2>/dev/null | wc -l)
+          bash bc-linux/scripts/workflow-summary.sh count apps_compiled "$COMPILED_COUNT"
+          bash bc-linux/scripts/workflow-summary.sh end PUBLISH
 
       - name: Run AL tests
         working-directory: bc-linux
@@ -275,20 +298,58 @@ jobs:
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
         run: |
           set -e
+          bash scripts/workflow-summary.sh begin TESTS "Run AL tests"
           # Iterate only the test apps (we know which ones from TEST_APP_DIRS).
           # Production apps in APP_DIRS are already published but their .app
           # files aren't fed to run-tests.sh because they have no test codeunits.
+          TESTS_TOTAL=0
+          TESTS_PASSED=0
+          TESTS_FAILED=0
+          CODEUNITS_TOTAL=0
           for d in $TEST_APP_DIRS; do
             [ -z "$d" ] && continue
             app="../build/$(basename "$d").app"
             [ -f "$app" ] || { echo "skip: $app (not built)"; continue; }
             base=$(basename "$app")
             echo "=== Running tests in $base ==="
+            # Capture output so we can parse the totals for telemetry.
+            tmplog=$(mktemp)
             ./scripts/run-tests.sh \
               --app "$app" \
               --codeunit-range "${{ inputs.codeunit_range }}" \
-              --timeout 30
+              --timeout 30 2>&1 | tee "$tmplog"
+            # Parse "N total, P passed, F failed, ..." from run-tests.sh output.
+            line=$(grep -oE '[0-9]+ total, [0-9]+ passed, [0-9]+ failed' "$tmplog" | tail -1 || true)
+            if [ -n "$line" ]; then
+              t=$(echo "$line" | grep -oE '^[0-9]+')
+              p=$(echo "$line" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
+              f=$(echo "$line" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+')
+              TESTS_TOTAL=$((TESTS_TOTAL + ${t:-0}))
+              TESTS_PASSED=$((TESTS_PASSED + ${p:-0}))
+              TESTS_FAILED=$((TESTS_FAILED + ${f:-0}))
+            fi
+            cu=$(grep -oE 'Test codeunits: [^ ]+' "$tmplog" | head -1 | sed 's/Test codeunits: //')
+            if [ -n "$cu" ]; then
+              n=$(echo "$cu" | tr ',' '\n' | grep -c .)
+              CODEUNITS_TOTAL=$((CODEUNITS_TOTAL + n))
+            fi
+            rm -f "$tmplog"
           done
+          bash scripts/workflow-summary.sh count tests_total    "$TESTS_TOTAL"
+          bash scripts/workflow-summary.sh count tests_passed   "$TESTS_PASSED"
+          bash scripts/workflow-summary.sh count tests_failed   "$TESTS_FAILED"
+          bash scripts/workflow-summary.sh count codeunits_total "$CODEUNITS_TOTAL"
+          bash scripts/workflow-summary.sh end TESTS
+
+      - name: Workflow timing summary + telemetry
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          # Opt out of anonymous performance telemetry by setting this to "true"
+          # in your workflow's env block. Default is to send (helps build the
+          # case for native Linux BC support to Microsoft).
+          BC_TELEMETRY_OPT_OUT: ${{ vars.BC_TELEMETRY_OPT_OUT || 'false' }}
+        run: bash bc-linux/scripts/workflow-summary.sh emit
 
       - name: BC logs (on failure)
         if: failure()
