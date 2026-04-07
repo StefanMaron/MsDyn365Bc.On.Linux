@@ -82,6 +82,7 @@ jobs:
       BC_TYPE: ${{ inputs.bc_type }}
 
     steps:
+      # ─── Phase 1: cheap parallel-friendly checkouts ──────────────────
       - name: Checkout your repo
         uses: actions/checkout@v4
         with:
@@ -94,25 +95,42 @@ jobs:
           ref: ${{ inputs.bc_linux_ref }}
           path: bc-linux
 
-      - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.0.x"
-
-      - name: Install AL compiler (Linux)
+      # ─── Phase 2: artifact download + docker image pull (parallel) ───
+      # Downloading the BC artifact from Microsoft's CDN and pulling the
+      # bc-runner / mssql images from GHCR / mcr are independent network
+      # operations on different hosts. Run them in parallel inside one
+      # shell step to overlap their wall time (~50s artifacts ⊕ ~30s pull
+      # ⇒ ~50s instead of ~80s sequential).
+      - name: Download BC artifacts + pull docker images (parallel)
+        env:
+          BC_RUNNER_IMAGE: ${{ inputs.runner_image }}
+          BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ inputs.bc_version }}
         run: |
-          dotnet tool install -g \
-            Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-            --version "${{ inputs.al_tool_version }}" 2>/dev/null || true
-          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-
-      - name: Download BC artifacts
-        run: |
+          set -e
           mkdir -p "artifact-cache/$BC_VERSION"
-          bc-linux/scripts/download-artifacts.sh \
-            "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" \
-            "$PWD/artifact-cache/$BC_VERSION"
+          (
+            bc-linux/scripts/download-artifacts.sh \
+              "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" \
+              "$PWD/artifact-cache/$BC_VERSION"
+          ) &
+          ARTIFACT_PID=$!
+          (
+            cd bc-linux
+            # mcr.microsoft.com (mssql/server) is occasionally WAF-blocked
+            # from GitHub runner IPs — short retry loop dodges that.
+            for attempt in 1 2 3 4 5; do
+              if docker compose pull --quiet; then break; fi
+              echo "docker compose pull failed (attempt $attempt/5); retrying in 15s..."
+              sleep 15
+            done
+          ) &
+          PULL_PID=$!
+          wait $ARTIFACT_PID || { echo "artifact download failed"; exit 1; }
+          wait $PULL_PID     || { echo "docker pull failed"; exit 1; }
 
+      # ─── Phase 3: figure out the BC_KEEP_APP_IDS for the entrypoint ──
+      # Must run BEFORE 'docker compose up' so the env propagates into
+      # the container's selective filter step at DB setup time.
       - name: Resolve apps to keep in BC database
         env:
           APP_DIRS: ${{ inputs.app_dirs }}
@@ -126,9 +144,7 @@ jobs:
           # any consumer transitive deps that aren't test framework apps
           # are added to the keep set on top. Test framework apps are
           # deliberately excluded — the entrypoint's republish step does
-          # a fresh install of them after NST starts. Result: BC starts
-          # with only 5+N apps in Published Application instead of 121,
-          # which speeds up the first-boot extension compile phase.
+          # a fresh install of them after NST starts.
           ARGS=""
           for d in $APP_DIRS $TEST_APP_DIRS; do
             [ -z "$d" ] && continue
@@ -143,31 +159,34 @@ jobs:
           echo "BC_CLEAR_ALL_APPS=selective" >> "$GITHUB_ENV"
           echo "BC_KEEP_APP_IDS=$KEEP_IDS" >> "$GITHUB_ENV"
 
-      - name: Start BC on Linux
+      # ─── Phase 4: kick off BC startup in the background ──────────────
+      # docker compose up -d returns immediately. BC then takes ~5 minutes
+      # to fully boot. We do NOT wait for healthy here — instead the next
+      # several steps (setup .NET, install AL, compile) run during that
+      # boot window in parallel.
+      - name: Start BC on Linux (background)
         env:
           BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ inputs.bc_version }}
         working-directory: bc-linux
         run: |
-          # Pre-pull images with retries — mcr.microsoft.com (mssql/server) is
-          # occasionally WAF-blocked from GitHub runner IPs, which manifests as
-          # "pull access denied ... The request is blocked". A short retry loop
-          # works around the transient block.
-          for attempt in 1 2 3 4 5; do
-            if docker compose pull --quiet; then break; fi
-            echo "docker compose pull failed (attempt $attempt/5); retrying in 15s..."
-            sleep 15
-          done
           docker compose up -d
-          for i in $(seq 1 360); do
-            STATUS=$(docker inspect --format='{{.State.Health.Status}}' \
-              "$(docker compose ps -q bc)" 2>/dev/null || echo unknown)
-            case "$STATUS" in
-              healthy)   echo "BC ready after $((i*5))s"; break ;;
-              unhealthy) docker compose logs bc | tail -80; exit 1 ;;
-            esac
-            sleep 5
-          done
-          [ "$STATUS" = "healthy" ] || { docker compose logs bc | tail -100; exit 1; }
+          echo "BC container started in background — continuing with other work."
+
+      # ─── Phase 5: work that runs DURING BC's startup window ──────────
+      # Setup .NET, install the AL compiler, stage symbols, and compile
+      # the consumer's AL apps. None of these need BC to be responsive,
+      # so they overlap with the slow `docker compose up` startup time.
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install AL compiler (Linux)
+        run: |
+          dotnet tool install -g \
+            Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
+            --version "${{ inputs.al_tool_version }}" 2>/dev/null || true
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
       - name: Stage symbols from BC artifacts
         run: |
@@ -180,7 +199,52 @@ jobs:
           find "$ART/app/Applications" -name "*Tests-TestLibraries*.app" -exec cp {} symbols/ \; 2>/dev/null || true
           echo "Staged $(ls symbols/*.app 2>/dev/null | wc -l) symbol files"
 
-      - name: Compile and publish
+      - name: Compile AL apps (no publish yet)
+        env:
+          APP_DIRS: ${{ inputs.app_dirs }}
+          TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
+        run: |
+          set -e
+          compile_dir() {
+            local src="$1"
+            [ -f "$src/app.json" ] || { echo "skip $src (no app.json)" >&2; return 0; }
+            mkdir -p "$src/.alpackages"
+            cp symbols/*.app "$src/.alpackages/" 2>/dev/null || true
+            local out
+            out="$(pwd)/build/$(basename "$src").app"
+            mkdir -p build
+            echo ">>> Compiling $src → $out"
+            AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out"
+          }
+          # Compile production apps first so test apps can resolve them as deps.
+          for d in $APP_DIRS; do
+            [ -z "$d" ] && continue
+            compile_dir "project/$d"
+          done
+          for d in $TEST_APP_DIRS; do
+            [ -z "$d" ] && continue
+            mkdir -p "project/$d/.alpackages"
+            cp build/*.app "project/$d/.alpackages/" 2>/dev/null || true
+            compile_dir "project/$d"
+          done
+
+      # ─── Phase 6: synchronization point — wait for BC to be healthy ──
+      - name: Wait for BC healthy
+        working-directory: bc-linux
+        run: |
+          for i in $(seq 1 360); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' \
+              "$(docker compose ps -q bc)" 2>/dev/null || echo unknown)
+            case "$STATUS" in
+              healthy)   echo "BC ready after $((i*5))s"; break ;;
+              unhealthy) docker compose logs bc | tail -80; exit 1 ;;
+            esac
+            sleep 5
+          done
+          [ "$STATUS" = "healthy" ] || { docker compose logs bc | tail -100; exit 1; }
+
+      # ─── Phase 7: publish compiled apps to the now-running BC ────────
+      - name: Publish AL apps to BC
         env:
           AUTH: "BCRUNNER:Admin123!"
           DEV: "http://localhost:7049"
@@ -190,6 +254,7 @@ jobs:
           set -e
           publish_app() {
             local app="$1"
+            [ -f "$app" ] || { echo "missing: $app"; exit 1; }
             echo ">>> Publishing $app"
             local code
             code=$(curl -s -o /tmp/pub.out -w "%{http_code}" --max-time 180 \
@@ -199,29 +264,9 @@ jobs:
             cat /tmp/pub.out; echo
             [ "$code" = "200" ] || [ "$code" = "422" ] || { echo "publish failed: $code"; exit 1; }
           }
-          compile_dir() {
-            local src="$1"
-            [ -f "$src/app.json" ] || { echo "skip $src (no app.json)" >&2; return 0; }
-            mkdir -p "$src/.alpackages"
-            cp symbols/*.app "$src/.alpackages/" 2>/dev/null || true
-            local out
-            out="$(pwd)/build/$(basename "$src").app"
-            mkdir -p build
-            echo ">>> Compiling $src → $out" >&2
-            AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" >&2
-            echo "$out"
-          }
-          for d in $APP_DIRS; do
+          for d in $APP_DIRS $TEST_APP_DIRS; do
             [ -z "$d" ] && continue
-            APP=$(compile_dir "project/$d")
-            [ -f "$APP" ] && publish_app "$APP"
-          done
-          for d in $TEST_APP_DIRS; do
-            [ -z "$d" ] && continue
-            mkdir -p "project/$d/.alpackages"
-            cp build/*.app "project/$d/.alpackages/" 2>/dev/null || true
-            APP=$(compile_dir "project/$d")
-            [ -f "$APP" ] && publish_app "$APP"
+            publish_app "build/$(basename "$d").app"
           done
 
       - name: Run AL tests
