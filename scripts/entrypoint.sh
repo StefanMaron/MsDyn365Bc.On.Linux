@@ -866,20 +866,24 @@ PYEOF
         # Set includes:
         #   - The "core" framework: Test Runner, Library Assert, Library Variable
         #     Storage, Permissions Mock, Any
+        #   - The base layer test helpers: System Application Test Library,
+        #     Business Foundation Test Libraries. These are required by
+        #     Tests-TestLibraries (which fails with AL1024 if either is missing).
         #   - The BaseApp test helper libraries: Tests-TestLibraries and
-        #     Library-NoTransactions. These ship in the BC artifact under
+        #     Library-NoTransactions. These ship under
         #     platform/applications/BaseApp/Test/ (no version suffix in the
-        #     filename, hence the trailing wildcard match). Real-world AL test
-        #     extensions almost always depend on at least one of these (e.g.
-        #     LibrarySales, LibraryPurchase, LibraryInventory all live in
-        #     Tests-TestLibraries). Without them in the republish set, any
-        #     consumer that declares them as a dependency hits a missing-dep
-        #     error at publish time and the publish silently fails.
+        #     filename, hence the trailing wildcard). Real-world AL test
+        #     extensions almost always depend on at least one of these
+        #     (e.g. LibrarySales, LibraryPurchase, LibraryInventory all live
+        #     in Tests-TestLibraries).
         #
-        # `sort` orders this alphabetically — Library Assert / Library Variable
-        # Storage / Library-NoTransactions land before Tests-TestLibraries in
-        # ASCII order, so transitive deps install first. Test Runner sorts
-        # before Tests-TestLibraries too.
+        # `sort` orders this alphabetically. Verify dependency order is
+        # respected when adding new apps:
+        #   Any < Business Foundation Test Libraries < Library Assert <
+        #   Library Variable Storage < Library-NoTransactions <
+        #   Permissions Mock < System Application Test Library <
+        #   Test Runner < Tests-TestLibraries
+        # Tests-TestLibraries comes last, after all its transitive deps.
         echo "[entrypoint] Publishing test framework..."
         find "$ARTIFACTS" -name "*.app" -type f \( \
             -name "Microsoft_Test Runner_*" -o \
@@ -887,6 +891,8 @@ PYEOF
             -name "Microsoft_Library Variable Storage_*" -o \
             -name "Microsoft_Permissions Mock_*" -o \
             -name "Microsoft_Any_*" -o \
+            -name "Microsoft_System Application Test Library*" -o \
+            -name "Microsoft_Business Foundation Test Libraries*" -o \
             -name "Microsoft_Tests-TestLibraries*" -o \
             -name "Microsoft_Library-NoTransactions*" \
         \) 2>/dev/null | sort | while read -r app; do
