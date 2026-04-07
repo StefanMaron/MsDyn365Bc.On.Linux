@@ -79,20 +79,39 @@ jobs:
           ref: master
           path: bc-linux
 
-      - name: Download BC artifacts
+      - name: Initialize timing
+        run: bash bc-linux/scripts/workflow-summary.sh init
+
+      - name: Download BC artifacts + pull docker images (parallel)
         run: |
+          set -e
+          bash bc-linux/scripts/workflow-summary.sh begin DOWNLOAD "Download BC artifacts + pull docker images"
           mkdir -p "artifact-cache/$BC_VERSION"
-          bc-linux/scripts/download-artifacts.sh \
-            "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" \
-            "$PWD/artifact-cache/$BC_VERSION"
+          (
+            bc-linux/scripts/download-artifacts.sh \
+              "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" \
+              "$PWD/artifact-cache/$BC_VERSION"
+          ) &
+          ARTIFACT_PID=$!
+          (
+            cd bc-linux
+            for attempt in 1 2 3 4 5; do
+              if docker compose pull --quiet; then break; fi
+              echo "docker compose pull failed (attempt $attempt/5); retrying in 15s..."
+              sleep 15
+            done
+          ) &
+          PULL_PID=$!
+          wait $ARTIFACT_PID || { echo "artifact download failed"; exit 1; }
+          wait $PULL_PID     || { echo "docker pull failed"; exit 1; }
+          bash bc-linux/scripts/workflow-summary.sh end DOWNLOAD
 
       - name: Resolve apps to keep in BC database
         run: |
-          # Walk consumer .app files, keep only the 5-app baseline +
-          # any non-test-framework transitive deps. Speeds up BC startup
-          # by reducing the extension count BC has to compile on first
-          # boot. Test framework is handled by the entrypoint's republish
-          # step.
+          bash bc-linux/scripts/workflow-summary.sh begin RESOLVE "Resolve apps to keep"
+          # Walk consumer .app files, keep the 5-app baseline + any
+          # non-test-framework transitive deps. Test framework is
+          # handled by the entrypoint's republish step.
           ARGS=""
           for f in $APP_FILES $TEST_APP_FILES; do
             [ -z "$f" ] && continue
@@ -104,31 +123,31 @@ jobs:
           echo "Resolved keep set: $KEEP_IDS"
           echo "BC_CLEAR_ALL_APPS=selective" >> "$GITHUB_ENV"
           echo "BC_KEEP_APP_IDS=$KEEP_IDS" >> "$GITHUB_ENV"
+          bash bc-linux/scripts/workflow-summary.sh end RESOLVE
 
-      - name: Start BC on Linux
+      - name: Start BC on Linux (background)
         env:
           BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ env.BC_VERSION }}
         working-directory: bc-linux
         run: |
-          # Pre-pull with retries — mcr.microsoft.com is occasionally
-          # WAF-blocked from GitHub runner IPs.
-          for attempt in 1 2 3 4 5; do
-            if docker compose pull --quiet; then break; fi
-            echo "docker compose pull failed (attempt $attempt/5); retrying in 15s..."
-            sleep 15
-          done
+          bash scripts/workflow-summary.sh begin BC_BOOT "BC startup (background → wait for healthy)"
           docker compose up -d
-          echo "Waiting for BC to become healthy..."
+          echo "BC container started in background — continuing with other work."
+
+      - name: Wait for BC healthy
+        working-directory: bc-linux
+        run: |
           for i in $(seq 1 360); do
             STATUS=$(docker inspect --format='{{.State.Health.Status}}' \
               "$(docker compose ps -q bc)" 2>/dev/null || echo unknown)
             case "$STATUS" in
               healthy)   echo "BC ready after $((i*5))s"; break ;;
-              unhealthy) echo "BC unhealthy"; docker compose logs bc | tail -80; exit 1 ;;
+              unhealthy) docker compose logs bc | tail -80; exit 1 ;;
             esac
             sleep 5
           done
           [ "$STATUS" = "healthy" ] || { docker compose logs bc | tail -100; exit 1; }
+          bash scripts/workflow-summary.sh end BC_BOOT
 
       - name: Publish .app files to BC
         env:
@@ -136,6 +155,7 @@ jobs:
           DEV: "http://localhost:7049"
         run: |
           set -e
+          bash bc-linux/scripts/workflow-summary.sh begin PUBLISH "Publish .app files"
           publish_app() {
             local app="$1"
             [ -f "$app" ] || { echo "missing: $app"; exit 1; }
@@ -148,30 +168,63 @@ jobs:
             cat /tmp/pub.out; echo
             [ "$code" = "200" ] || [ "$code" = "422" ] || { echo "publish failed: $code"; exit 1; }
           }
-
+          PUBLISHED_COUNT=0
           for app in $APP_FILES; do
             [ -z "$app" ] && continue
             publish_app "project/$app"
+            PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
           done
-
           for app in $TEST_APP_FILES; do
             [ -z "$app" ] && continue
             publish_app "project/$app"
+            PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
           done
+          bash bc-linux/scripts/workflow-summary.sh count apps_published "$PUBLISHED_COUNT"
+          bash bc-linux/scripts/workflow-summary.sh end PUBLISH
 
       - name: Run AL tests
         working-directory: bc-linux
         run: |
           set -e
+          bash scripts/workflow-summary.sh begin TESTS "Run AL tests"
+          TESTS_TOTAL=0; TESTS_PASSED=0; TESTS_FAILED=0; CODEUNITS_TOTAL=0
           for app in $TEST_APP_FILES; do
             [ -z "$app" ] && continue
             base=$(basename "$app")
             echo "=== Running tests in $base ==="
+            tmplog=$(mktemp)
             ./scripts/run-tests.sh \
               --app "../project/$app" \
               --codeunit-range "$CODEUNIT_RANGE" \
-              --timeout 30
+              --timeout 30 2>&1 | tee "$tmplog"
+            line=$(grep -oE '[0-9]+ total, [0-9]+ passed, [0-9]+ failed' "$tmplog" | tail -1 || true)
+            if [ -n "$line" ]; then
+              t=$(echo "$line" | grep -oE '^[0-9]+')
+              p=$(echo "$line" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
+              f=$(echo "$line" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+')
+              TESTS_TOTAL=$((TESTS_TOTAL + ${t:-0}))
+              TESTS_PASSED=$((TESTS_PASSED + ${p:-0}))
+              TESTS_FAILED=$((TESTS_FAILED + ${f:-0}))
+            fi
+            cu=$(grep -oE 'Test codeunits: [^ ]+' "$tmplog" | head -1 | sed 's/Test codeunits: //')
+            if [ -n "$cu" ]; then
+              n=$(echo "$cu" | tr ',' '\n' | grep -c .)
+              CODEUNITS_TOTAL=$((CODEUNITS_TOTAL + n))
+            fi
+            rm -f "$tmplog"
           done
+          bash scripts/workflow-summary.sh count tests_total    "$TESTS_TOTAL"
+          bash scripts/workflow-summary.sh count tests_passed   "$TESTS_PASSED"
+          bash scripts/workflow-summary.sh count tests_failed   "$TESTS_FAILED"
+          bash scripts/workflow-summary.sh count codeunits_total "$CODEUNITS_TOTAL"
+          bash scripts/workflow-summary.sh end TESTS
+
+      - name: Workflow timing summary + telemetry
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          BC_TELEMETRY_OPT_OUT: ${{ vars.BC_TELEMETRY_OPT_OUT || 'false' }}
+        run: bash bc-linux/scripts/workflow-summary.sh emit
 
       - name: BC logs (on failure)
         if: failure()
