@@ -271,13 +271,18 @@ fi
 # rows from the suite). If empty, re-call setupSuite up to a handful of
 # times with a small delay — usually the metadata catches up within a
 # second or two.
+VERIFY_LAST_RESPONSE=""
 verify_suite_populated() {
     local req_id="$1"
-    for attempt in 1 2 3 4 5 6 7 8 9 10; do
-        local resp
-        resp=$(curl -sf --max-time 10 -u "$AUTH" \
-            "${API_BASE}/testResults?\$filter=testSuite%20eq%20'DEFAULT'&\$top=1" 2>/dev/null)
-        if [ -n "$resp" ] && echo "$resp" | py3 -c "
+    # Up to 20 attempts × 2s sleep = ~40s of patience. The race the loop
+    # is guarding against (publish→install→metadata propagation) is
+    # usually <5s on a normal runner, but can stretch on faster I/O
+    # environments where there is no accidental slack between publish
+    # and the first setupSuite call.
+    for attempt in $(seq 1 20); do
+        VERIFY_LAST_RESPONSE=$(curl -sf --max-time 10 -u "$AUTH" \
+            "${API_BASE}/testResults?\$filter=testSuite%20eq%20%27DEFAULT%27&\$top=1" 2>/dev/null || true)
+        if [ -n "$VERIFY_LAST_RESPONSE" ] && echo "$VERIFY_LAST_RESPONSE" | py3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -285,26 +290,37 @@ try:
 except Exception:
     sys.exit(1)
 " 2>/dev/null; then
-            [ "$attempt" -gt 1 ] && echo "  suite populated after ${attempt} setupSuite attempts"
+            [ "$attempt" -gt 1 ] && echo "  suite populated after ${attempt} setupSuite attempts (~$((attempt*2))s)"
             return 0
         fi
         # Suite still empty — re-call setupSuite. The metadata may have
         # synced since the previous attempt.
         curl -s -o /dev/null --max-time 60 -u "$AUTH" -X POST \
             "${API_BASE}/codeunitRunRequests(${req_id})/Microsoft.NAV.setupSuite" 2>/dev/null
-        sleep 1
+        sleep 2
     done
     return 1
 }
 
 if ! verify_suite_populated "$REQUEST_ID"; then
     echo "FAIL"
-    echo "ERROR: setupSuite returned 200 but the test suite is empty after 10 retries."
-    echo "       This usually means the test app was published but BC's metadata"
-    echo "       cache has not propagated its codeunits to the test framework yet."
-    echo "       Either:"
-    echo "         - Wait longer between publishing the test app and running tests,"
-    echo "         - Or check that the test app installed successfully for the tenant."
+    echo ""
+    echo "ERROR: setupSuite returned 200 but the DEFAULT test suite is empty"
+    echo "       after 20 retries (~40s). The test app's codeunits never showed"
+    echo "       up in the test framework's view of the database."
+    echo ""
+    echo "       Diagnostic — last raw response from testResults endpoint:"
+    echo "         URL: ${API_BASE}/testResults?\$filter=testSuite%20eq%20'DEFAULT'&\$top=1"
+    echo "         Body: ${VERIFY_LAST_RESPONSE:-<empty/no response>}"
+    echo ""
+    echo "       Possible causes:"
+    echo "         - The test app failed to install for the default tenant"
+    echo "           (publish succeeds without installing in some tenant configurations)"
+    echo "         - The expected codeunit IDs (${CODEUNIT_IDS}) are not in the published .app"
+    echo "         - The test framework republish step in entrypoint.sh failed silently"
+    echo ""
+    echo "       Cross-check by querying installed extensions directly:"
+    echo "         curl -u $AUTH '${BASE_URL}/api/v2.0/extensionDeployments'"
     exit 1
 fi
 echo "OK"
