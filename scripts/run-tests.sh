@@ -460,7 +460,17 @@ if [ "$USE_DOCKER_EXEC" = "true" ]; then
     # Inside the container, BC's WebSocket and API ports are local to the
     # container itself, so always use localhost regardless of how the host
     # has them mapped. The TestRunner.dll path is fixed by the Dockerfile.
+    #
+    # --verbose is now passed by default. Without it, every Log() message
+    # in TestRunner.dll is silently swallowed (the function gates on a
+    # `verbose` flag and writes to stderr only when set). That made the
+    # bc-copilot-blueprint debugging session needlessly painful: the
+    # runner would exit with "0 total, 0 passed, 0 failed" in 0 seconds
+    # and there was no way to see *why* — whether it was a connection
+    # failure, an empty suite, "All tests executed" on the first iter,
+    # or anything else. Verbose stderr is cheap and the right default.
     ( cd "$REPO_DIR" && docker compose exec -T bc dotnet /bc/tools/TestRunner/TestRunner.dll \
+        --verbose \
         --host "localhost:7085" \
         --odata-host "localhost:7052" \
         --company "$COMPANY" \
@@ -474,6 +484,7 @@ if [ "$USE_DOCKER_EXEC" = "true" ]; then
     EXIT_CODE=$?
 elif command -v dotnet >/dev/null 2>&1; then
     dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
+        --verbose \
         --host "$WS_HOST" \
         --odata-host "$ODATA_HOST" \
         --company "$COMPANY" \
