@@ -135,7 +135,7 @@ Authentication: `admin` / `Admin123!` (NavUserPassword)
    ```bash
    mkdir -p .alpackages
    for app in System "System Application" "Base Application" "Application"; do
-     curl -sf -u admin:Admin123! \
+     curl -sf -u BCRUNNER:Admin123! \
        "http://localhost:7049/BC/dev/packages?publisher=Microsoft&appName=$(echo $app | sed 's/ /%20/g')&appVersion=0.0.0.0" \
        -o ".alpackages/${app}.app"
    done
@@ -150,7 +150,7 @@ Authentication: `admin` / `Admin123!` (NavUserPassword)
 AL compile "/project:." "/packagecachepath:.alpackages" "/out:MyExtension.app"
 
 # Publish
-curl -u admin:Admin123! -X POST \
+curl -u BCRUNNER:Admin123! -X POST \
   -F "file=@MyExtension.app;type=application/octet-stream" \
   "http://localhost:7049/BC/dev/apps?SchemaUpdateMode=forcesync"
 ```
@@ -161,7 +161,7 @@ The test framework (Test Runner, Library Assert, Library Variable Storage, Any) 
 
 1. **Publish your test app** (separate from running tests):
    ```bash
-   curl -u admin:Admin123! -X POST \
+   curl -u BCRUNNER:Admin123! -X POST \
      -F "file=@MyTestApp.app;type=application/octet-stream" \
      "http://localhost:7049/BC/dev/apps?SchemaUpdateMode=forcesync"
    ```
