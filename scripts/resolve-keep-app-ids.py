@@ -42,22 +42,31 @@ from pathlib import Path
 # harmless even if the app is not actually published in this BC build —
 # the entrypoint's keep filter just won't match it.
 #
-# Includes both the application stack (System / Business Foundation /
-# Base Application / Application umbrella) AND the standard Microsoft
-# test framework libraries. The test framework GUIDs are baseline because
-# almost every consumer test app declares dependencies on at least
-# Library Assert + Any, and the entrypoint's republish step assumes
-# these to be available — keeping them in the keep list avoids the
-# resolver having to discover them through dep walking, and matches
-# the test framework republish behavior of the entrypoint.
+# Includes ONLY the application stack (System / System Application /
+# Business Foundation / Base Application / Application umbrella). The test
+# framework apps are NOT in the baseline because they're handled separately
+# by the entrypoint's "Publishing test framework" step (entrypoint.sh:864),
+# which deletes them via SQL filter and then does a fresh install via the
+# dev endpoint after NST starts. If we kept them in the SQL filter, the
+# republish step would see them as "already deployed" (HTTP 422) and
+# skip the install — leaving them in a published-but-not-installed-for-
+# tenant-default state which then breaks the consumer's test app publish
+# with "Library Assert ... is not installed" cryptic errors.
 BASELINE = {
-    # Application stack
     "8874ed3a-0643-4247-9ced-7a7002f7135d",  # System (AL platform symbols)
     "63ca2fa4-4f03-4f2b-a480-172fef340d3f",  # System Application
     "f3552374-a1f2-4356-848e-196002525837",  # Business Foundation
     "437dbf0e-84ff-417a-965d-ed2bb9650972",  # Base Application
     "c1335042-3002-4257-bf8a-75c898ccb1b8",  # Application umbrella
-    # Test framework (matches entrypoint.sh test framework republish list)
+}
+
+# ── Test framework (deliberately EXCLUDED from the keep set) ──────────────
+# These apps are wiped by the SQL filter and freshly installed by the
+# entrypoint's "Publishing test framework" republish step after NST starts.
+# Even if a consumer's app.json declares one of these as a dependency, the
+# resolver's transitive closure walk filters them out so the keep set
+# doesn't include them — letting the entrypoint do the right thing.
+TEST_FRAMEWORK_IDS = {
     "23de40a6-dfe8-4f80-80db-d70f83ce8caf",  # Test Runner
     "dd0be2ea-f733-4d65-bb34-a28f4624fb14",  # Library Assert
     "e7320ebb-08b3-4406-b1ec-b4927d3e280b",  # Any
@@ -191,12 +200,21 @@ def read_consumer_seeds(app_json_paths, app_file_paths) -> set[str]:
 
 
 def walk_closure(seed_ids: set[str], apps: dict) -> set[str]:
-    """Walk the transitive dependency closure starting from seed_ids."""
+    """Walk the transitive dependency closure starting from seed_ids.
+
+    Test framework apps are excluded from the closure even when consumers
+    declare them as dependencies — they're handled by the entrypoint's
+    test framework republish step (which does a proper fresh install,
+    while keeping them in the SQL filter would cause them to be in a
+    published-but-not-installed state).
+    """
     out = set()
 
     def visit(aid: str):
         if aid in out:
             return
+        if aid in TEST_FRAMEWORK_IDS:
+            return  # let the entrypoint's republish step handle these
         if aid not in apps:
             return  # not in this BC build — skip
         out.add(aid)
@@ -235,10 +253,19 @@ def main():
         print(f"artifact apps loaded: {len(artifact_apps)}", file=sys.stderr)
         closure = walk_closure(seeds, artifact_apps)
         print(f"transitive closure: {len(closure)}", file=sys.stderr)
+
+        # Categorize unresolved seeds for clearer diagnostics:
+        #  - test framework GUIDs are deliberately excluded (handled by entrypoint)
+        #  - everything else is genuinely missing from the artifact set
         unresolved = seeds - closure
-        if unresolved:
-            print(f"WARN: {len(unresolved)} consumer dep(s) not found in artifact "
-                  f"set (will rely on baseline): {sorted(unresolved)}", file=sys.stderr)
+        framework_excluded = unresolved & TEST_FRAMEWORK_IDS
+        truly_missing = unresolved - TEST_FRAMEWORK_IDS
+        if framework_excluded:
+            print(f"NOTE: {len(framework_excluded)} consumer dep(s) excluded as test framework "
+                  f"(handled by entrypoint republish): {sorted(framework_excluded)}", file=sys.stderr)
+        if truly_missing:
+            print(f"WARN: {len(truly_missing)} consumer dep(s) not found in artifact "
+                  f"set (will rely on baseline): {sorted(truly_missing)}", file=sys.stderr)
         keep |= closure
 
     closure_added = len(keep - BASELINE - extras) if seeds else 0
