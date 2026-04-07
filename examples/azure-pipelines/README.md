@@ -52,31 +52,6 @@ preinstalled — no service connection or self-hosted agent required.
   `download-artifacts.sh` this lands at ~50s for a full BC platform on a
   Microsoft-hosted Ubuntu agent (~88 MB/s observed in practice), which is
   not worth the complexity of a cache step.
-- **Selective extension keeping** — `resolve-keep-app-ids.py` analyses
-  your `app.json` (or `.app` files) and the downloaded BC artifacts to
-  build a transitive dependency set, then tells the container to
-  uninstall stock extensions you don't need before NST starts. Faster
-  boot. Override with `KEEP_APP_IDS` (extra GUIDs to always keep) or
-  set `KEEP_APP_IDS: 'all'` to disable.
-
-### Faster startup via selective extension keeping
-
-By default the templates analyse your AL apps, walk their transitive
-dependency closure against the BC artifacts, and tell the container to
-uninstall every stock extension that's not needed. Always-kept baseline:
-
-| App | GUID |
-|---|---|
-| System (AL platform) | `8874ed3a-0643-4247-9ced-7a7002f7135d` |
-| System Application | `63ca2fa4-4f03-4f2b-a480-172fef340d3f` |
-| Business Foundation | `f3552374-a1f2-4356-848e-196002525837` |
-| Base Application | `437dbf0e-84ff-417a-965d-ed2bb9650972` |
-| Application (umbrella) | `c1335042-3002-4257-bf8a-75c898ccb1b8` |
-
-If your project needs additional stock extensions that the resolver
-can't infer, list their GUIDs comma-separated in `KEEP_APP_IDS`. Set
-`KEEP_APP_IDS: 'all'` to disable selective keeping entirely (slowest
-startup, but the safest escape hatch).
 
 ## Customising further
 

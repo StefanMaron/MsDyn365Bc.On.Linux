@@ -28,12 +28,6 @@ jobs:
       app_dirs:       "app"          # space-separated dirs containing app.json
       test_app_dirs:  "test"         # ditto for test apps
       codeunit_range: "50000..99999"
-      # Optional: extra app GUIDs to keep in the BC database, on top of the
-      # baseline (System / System Application / Business Foundation /
-      # Base Application / Application umbrella) and the deps the resolver
-      # finds in your app.json. Set to "all" to disable selective keeping
-      # entirely (slowest startup but safest).
-      # keep_app_ids: ""
 
   # ─── Prebuilt flavour example (commented out) ─────────────────────────
   #

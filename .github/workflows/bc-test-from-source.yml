@@ -55,11 +55,6 @@ on:
         required: false
         type: string
         default: "16.2.28.57946"
-      keep_app_ids:
-        description: "Comma-separated extra app GUIDs to always keep in the BC database (in addition to the baseline + dependencies of your apps). Set to 'all' to keep every stock extension (slowest startup, equivalent to BC_CLEAR_ALL_APPS=none)."
-        required: false
-        type: string
-        default: ""
       runner_image:
         description: "Override the bc-runner image (defaults to the public ghcr.io tag)"
         required: false
@@ -117,40 +112,6 @@ jobs:
           bc-linux/scripts/download-artifacts.sh \
             "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" \
             "$PWD/artifact-cache/$BC_VERSION"
-
-      - name: Resolve apps to keep in BC database
-        id: keep
-        env:
-          APP_DIRS: ${{ inputs.app_dirs }}
-          TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
-          KEEP_APP_IDS: ${{ inputs.keep_app_ids }}
-        run: |
-          # If the consumer set keep_app_ids=all, skip the resolver entirely
-          # and keep every pre-installed extension (slowest startup, but a
-          # good escape hatch if dependency analysis is causing problems).
-          if [ "$KEEP_APP_IDS" = "all" ]; then
-            echo "keep_app_ids=all → BC_CLEAR_ALL_APPS=none, no selective filter"
-            echo "BC_CLEAR_ALL_APPS=none" >> "$GITHUB_ENV"
-            echo "BC_KEEP_APP_IDS=" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          # Collect app.json paths for every consumer source dir
-          ARGS=""
-          for d in $APP_DIRS $TEST_APP_DIRS; do
-            [ -z "$d" ] && continue
-            if [ -f "project/$d/app.json" ]; then
-              ARGS="$ARGS --app-json project/$d/app.json"
-            else
-              echo "WARN: project/$d/app.json not found"
-            fi
-          done
-          KEEP_IDS=$(python3 bc-linux/scripts/resolve-keep-app-ids.py \
-            $ARGS \
-            --artifact-dir "artifact-cache/$BC_VERSION" \
-            --extra-ids "$KEEP_APP_IDS")
-          echo "Resolved keep set: $KEEP_IDS"
-          echo "BC_CLEAR_ALL_APPS=selective" >> "$GITHUB_ENV"
-          echo "BC_KEEP_APP_IDS=$KEEP_IDS" >> "$GITHUB_ENV"
 
       - name: Start BC on Linux
         env:

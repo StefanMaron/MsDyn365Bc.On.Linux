@@ -56,13 +56,6 @@ variables:
   # their codeunits aren't run — only TEST_APP_FILES codeunits are executed.
   CODEUNIT_RANGE: '50000..99999'
 
-  # Optional: comma-separated extra app GUIDs to keep in the BC database
-  # in addition to the baseline (System / System Application / Business
-  # Foundation / Base Application / Application umbrella) and your apps'
-  # transitive dependencies. Stock extensions NOT in this set will be
-  # uninstalled before NST starts → much faster startup. Set to 'all' to
-  # opt out and keep every pre-installed extension.
-  KEEP_APP_IDS: ''
   # --------------------------------------------------------------------
 
   # bc-linux runtime image (publicly available on GHCR — no auth needed).
@@ -92,38 +85,12 @@ steps:
 
   - bash: |
       set -e
-      KEEP_APP_IDS_VAR='$(KEEP_APP_IDS)'
-      if [ "$KEEP_APP_IDS_VAR" = "all" ]; then
-        echo "KEEP_APP_IDS=all → BC_CLEAR_ALL_APPS=none"
-        echo "##vso[task.setvariable variable=BC_CLEAR_ALL_APPS]none"
-        echo "##vso[task.setvariable variable=BC_KEEP_APP_IDS]"
-        exit 0
-      fi
-      ARGS=""
-      cd "$(Pipeline.Workspace)/project"
-      for f in $(APP_FILES) $(TEST_APP_FILES); do
-        [ -z "$f" ] && continue
-        [ -f "$f" ] && ARGS="$ARGS --app-file $f"
-      done
-      KEEP_IDS=$(python3 "$(Agent.BuildDirectory)/bc-linux/scripts/resolve-keep-app-ids.py" \
-        $ARGS \
-        --artifact-dir "$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)" \
-        --extra-ids "$KEEP_APP_IDS_VAR")
-      echo "Resolved keep set: $KEEP_IDS"
-      echo "##vso[task.setvariable variable=BC_CLEAR_ALL_APPS]selective"
-      echo "##vso[task.setvariable variable=BC_KEEP_APP_IDS]$KEEP_IDS"
-    displayName: 'Resolve apps to keep in BC database'
-
-  - bash: |
-      set -e
       cd "$(Agent.BuildDirectory)/bc-linux"
       export BC_ARTIFACTS_DIR="$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)"
       export BC_VERSION="$(BC_VERSION)"
       export BC_COUNTRY="$(BC_COUNTRY)"
       export BC_TYPE="$(BC_TYPE)"
       export BC_RUNNER_IMAGE="$(BC_RUNNER_IMAGE)"
-      export BC_CLEAR_ALL_APPS="$(BC_CLEAR_ALL_APPS)"
-      export BC_KEEP_APP_IDS="$(BC_KEEP_APP_IDS)"
       # Pre-pull with retries — mcr.microsoft.com is occasionally WAF-blocked.
       for attempt in 1 2 3 4 5; do
         if docker compose pull --quiet; then break; fi
