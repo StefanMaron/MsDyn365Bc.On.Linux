@@ -142,16 +142,21 @@ jobs:
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
         run: |
           bash bc-linux/scripts/workflow-summary.sh begin RESOLVE "Resolve apps to keep"
-          # Walk the consumer's app.json files to find their immediate
-          # dependencies, then resolve the transitive closure against the
-          # BC artifact extension set. The resolver always emits the 5
-          # baseline application stack apps (System / System Application /
-          # Business Foundation / Base Application / Application umbrella);
-          # any consumer transitive deps that aren't test framework apps
-          # are added to the keep set on top. Test framework apps are
-          # deliberately excluded — the entrypoint's republish step does
-          # a fresh install of them after NST starts.
-          ARGS=""
+          # Walk the consumer's app.json files (production + test) AND
+          # bc-linux's own custom Test Runner Extension app.json to find
+          # their declared dependencies, then resolve the transitive
+          # closure against the BC artifact extension set. The closure
+          # is added to the 5 baseline application stack apps (System /
+          # System Application / Business Foundation / Base Application /
+          # Application umbrella).
+          #
+          # The TestRunnerExtension app.json is included so its declared
+          # dependency on Microsoft Test Runner gets walked into the
+          # closure. Without this, the selective filter would wipe
+          # Microsoft Test Runner and the entrypoint's TestRunnerExtension
+          # publish would fail with AL1024 — exactly the bug that broke
+          # the bc-copilot-blueprint debugging session before this fix.
+          ARGS="--app-json bc-linux/extensions/TestRunnerExtension/app.json"
           for d in $APP_DIRS $TEST_APP_DIRS; do
             [ -z "$d" ] && continue
             if [ -f "project/$d/app.json" ]; then

@@ -16,9 +16,9 @@ on:
   workflow_dispatch:
     inputs:
       versions:
-        description: 'BC versions to test (comma-separated, e.g. "27.0,27.5,28.0")'
+        description: 'BC versions to test (comma-separated, e.g. "27.0,27.5")'
         required: false
-        default: '27.0,27.1,27.2,27.3,27.4,27.5,28.0'
+        default: '27.0,27.1,27.2,27.3,27.4,27.5'
         type: string
   push:
     branches: [main, master]
@@ -41,7 +41,9 @@ jobs:
         if [ -z "$VERSIONS" ]; then
           # Default matrix when triggered by push/PR (no workflow_dispatch input).
           # Keep in sync with the workflow_dispatch input default above.
-          VERSIONS="27.0,27.1,27.2,27.3,27.4,27.5,28.0"
+          # 28.0 will be added once Microsoft ships an officially-released
+          # AL compiler that supports it.
+          VERSIONS="27.0,27.1,27.2,27.3,27.4,27.5"
         fi
         JSON=$(echo "$VERSIONS" | python3 -c "import sys,json; print(json.dumps({'bc_version': sys.stdin.read().strip().split(',')}))")
         echo "matrix=$JSON" >> $GITHUB_OUTPUT

@@ -126,11 +126,14 @@ jobs:
           TEST_APP_FILES: ${{ inputs.test_app_files }}
         run: |
           bash bc-linux/scripts/workflow-summary.sh begin RESOLVE "Resolve apps to keep"
-          # Walk the consumer's .app files (not source dirs) for dependencies,
-          # then keep the 5-app baseline + any non-test-framework transitive
-          # deps. Test framework apps are excluded — they're handled by the
-          # entrypoint's republish step.
-          ARGS=""
+          # Walk the consumer's .app files (not source dirs) AND bc-linux's
+          # custom Test Runner Extension app.json for dependencies, then
+          # keep the 5-app baseline + the full transitive closure.
+          # The TestRunnerExtension app.json is included so its declared
+          # dep on Microsoft Test Runner gets walked into the closure
+          # (otherwise the selective filter wipes Test Runner and the
+          # entrypoint's TestRunnerExtension publish fails AL1024).
+          ARGS="--app-json bc-linux/extensions/TestRunnerExtension/app.json"
           for f in $APP_FILES $TEST_APP_FILES; do
             [ -z "$f" ] && continue
             if [ -f "project/$f" ]; then
