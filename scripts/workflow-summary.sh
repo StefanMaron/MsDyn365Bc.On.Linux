@@ -388,10 +388,25 @@ PYEOF
                 -H "Content-Type: application/json" \
                 -X POST "$TELEMETRY_INGESTION" \
                 -d "$TELEMETRY_PAYLOAD" 2>/dev/null || echo "000")
+            EVENT_COUNT=$(echo "$TELEMETRY_PAYLOAD" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))' 2>/dev/null || echo "?")
             if [ "$HTTP_CODE" = "200" ]; then
-                echo "[telemetry] sent $(echo "$TELEMETRY_PAYLOAD" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))') events to bc-linux App Insights (set BC_TELEMETRY_OPT_OUT=true to disable)"
+                # App Insights returns 200 even when events are dropped due to
+                # schema issues — the real status is in itemsAccepted/itemsReceived.
+                ACCEPTED=$(python3 -c "import sys,json; d=json.load(open('/tmp/telemetry.out')); print(d.get('itemsAccepted', 0))" 2>/dev/null || echo "0")
+                RECEIVED=$(python3 -c "import sys,json; d=json.load(open('/tmp/telemetry.out')); print(d.get('itemsReceived', 0))" 2>/dev/null || echo "0")
+                if [ "$ACCEPTED" = "$EVENT_COUNT" ] && [ "$ACCEPTED" != "0" ]; then
+                    echo "[telemetry] sent $EVENT_COUNT events to bc-linux App Insights ($ACCEPTED/$RECEIVED accepted)."
+                    echo "[telemetry] data lands in the 'customEvents' table — query with cloud_RoleName == \"bc-linux-pipeline\"."
+                    echo "[telemetry] set BC_TELEMETRY_OPT_OUT=true to disable."
+                else
+                    echo "[telemetry] WARN: App Insights accepted only $ACCEPTED of $RECEIVED events. Response:"
+                    cat /tmp/telemetry.out | head -20
+                    echo ""
+                fi
             else
-                echo "[telemetry] POST failed (HTTP $HTTP_CODE) — ignored"
+                echo "[telemetry] POST failed (HTTP $HTTP_CODE):"
+                cat /tmp/telemetry.out 2>/dev/null | head -10 || true
+                echo "  (ignored — telemetry never blocks the workflow)"
             fi
         fi
         ;;
