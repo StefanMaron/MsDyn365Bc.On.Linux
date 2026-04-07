@@ -78,15 +78,7 @@ jobs:
           ref: master
           path: bc-linux
 
-      - name: Cache BC artifacts
-        id: artifact-cache
-        uses: actions/cache@v4
-        with:
-          path: artifact-cache/${{ env.BC_VERSION }}
-          key: bc-artifacts-${{ env.BC_TYPE }}-${{ env.BC_VERSION }}-${{ env.BC_COUNTRY }}
-
-      - name: Download BC artifacts (if not cached)
-        if: steps.artifact-cache.outputs.cache-hit != 'true'
+      - name: Download BC artifacts
         run: |
           mkdir -p "artifact-cache/$BC_VERSION"
           bc-linux/scripts/download-artifacts.sh \
@@ -98,6 +90,13 @@ jobs:
           BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ env.BC_VERSION }}
         working-directory: bc-linux
         run: |
+          # Pre-pull with retries — mcr.microsoft.com is occasionally
+          # WAF-blocked from GitHub runner IPs.
+          for attempt in 1 2 3 4 5; do
+            if docker compose pull --quiet; then break; fi
+            echo "docker compose pull failed (attempt $attempt/5); retrying in 15s..."
+            sleep 15
+          done
           docker compose up -d
           echo "Waiting for BC to become healthy..."
           for i in $(seq 1 360); do

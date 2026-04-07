@@ -91,13 +91,6 @@ steps:
       echo "##vso[task.prependpath]$HOME/.dotnet/tools"
     displayName: 'Install Linux AL compiler'
 
-  - task: Cache@2
-    displayName: 'Cache BC artifacts'
-    inputs:
-      key: 'bc-artifacts | $(BC_TYPE) | $(BC_VERSION) | $(BC_COUNTRY)'
-      path: '$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)'
-      cacheHitVar: ARTIFACT_CACHE_HIT
-
   - bash: |
       set -e
       mkdir -p "$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)"
@@ -105,7 +98,6 @@ steps:
         "$(BC_TYPE)" "$(BC_VERSION)" "$(BC_COUNTRY)" \
         "$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)"
     displayName: 'Download BC artifacts'
-    condition: ne(variables.ARTIFACT_CACHE_HIT, 'true')
 
   - bash: |
       set -e
@@ -115,6 +107,12 @@ steps:
       export BC_COUNTRY="$(BC_COUNTRY)"
       export BC_TYPE="$(BC_TYPE)"
       export BC_RUNNER_IMAGE="$(BC_RUNNER_IMAGE)"
+      # Pre-pull with retries — mcr.microsoft.com is occasionally WAF-blocked.
+      for attempt in 1 2 3 4 5; do
+        if docker compose pull --quiet; then break; fi
+        echo "docker compose pull failed (attempt $attempt/5); retrying in 15s..."
+        sleep 15
+      done
       docker compose up -d
       for i in $(seq 1 360); do
         STATUS=$(docker inspect --format='{{.State.Health.Status}}' \

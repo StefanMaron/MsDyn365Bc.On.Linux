@@ -10,7 +10,7 @@ execute tests via the bundled TestRunnerExtension.
 
 | File | When to use |
 |------|-------------|
-| [`bc-test-from-source.yml`](./bc-test-from-source.yml) | Your AL source lives in the repo and you want CI to compile it. Installs the Linux AL compiler tool, stages BC symbols from cached artifacts, builds your app + test apps, then publishes and runs them. |
+| [`bc-test-from-source.yml`](./bc-test-from-source.yml) | Your AL source lives in the repo and you want CI to compile it. Installs the Linux AL compiler tool, downloads BC artifacts, stages symbols, builds your app + test apps, then publishes and runs them. |
 | [`bc-test-prebuilt.yml`](./bc-test-prebuilt.yml) | You already have `.app` files (built by another job, vendor-supplied, or committed to the repo). Skips compilation and goes straight to publish + run. |
 
 ## Setup
@@ -47,15 +47,19 @@ preinstalled — no service connection or self-hosted agent required.
 - **TestRunnerExtension**: an AL extension shipped with the image. Exposes
   the OData/WebSocket endpoints `run-tests.sh` uses to populate test suites,
   execute methods, and read results.
-- **Pipeline cache** (`Cache@2` task) caches BC artifacts across runs.
+- **No artifact caching** — artifacts are downloaded fresh each run from
+  Microsoft's CDN. With the HTTP/1.1 download path in
+  `download-artifacts.sh` this lands at ~50s for a full BC platform on a
+  Microsoft-hosted Ubuntu agent (~88 MB/s observed in practice), which is
+  not worth the complexity of a cache step.
 
 ## Customising further
 
 - **Multiple BC versions**: convert the single job into a matrix using a
-  `strategy.matrix:` block. Make `BC_VERSION` a matrix variable and let
-  `Cache@2`'s `key:` interpolate it.
-- **Different artifact source**: pre-populate the cache path with your own
-  artifacts.
+  `strategy.matrix:` block. Make `BC_VERSION` a matrix variable.
+- **Different artifact source**: pre-populate
+  `$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)` yourself before the
+  download step (or skip the download step altogether).
 - **Multiple test apps with shared symbols**: build production apps first,
   copy their `.app` outputs into each test app's `.alpackages/` directory
   (the from-source template already does this).

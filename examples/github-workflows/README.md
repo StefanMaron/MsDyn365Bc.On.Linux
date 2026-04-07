@@ -77,7 +77,8 @@ ships an improvement, you'll have to re-copy it.
 All flavours:
 
 - Boot BC and SQL Server in Linux containers (no Windows runner required)
-- Cache BC artifacts between runs (`actions/cache`)
+- Download BC artifacts on demand (~50s on a hosted runner thanks to the
+  HTTP/1.1 fix in `download-artifacts.sh`)
 - Publish via the BC dev endpoint
 - Execute tests via `bc-linux/scripts/run-tests.sh` (hybrid OData + WebSocket)
 - Print the BC log tail on failure
@@ -131,7 +132,7 @@ All flavours:
 | `BC unhealthy` after several minutes | Artifact download timed out, or first-boot DB restore is still running. Look at the failure log tail in the workflow output. |
 | `publish failed: 422` | App schema conflict — make sure your version number bumps between runs, or set `SchemaUpdateMode=ForceSync` (already the default in these templates). |
 | `Could not get company ID` | BC isn't reachable on `localhost:7048`. Check that the container is `healthy` and that the OData port is mapped. |
-| AL compile errors about missing symbols | The "Stage symbols" step couldn't find a dependency. Check the artifact cache structure and add the missing path to that step. |
+| AL compile errors about missing symbols | The "Stage symbols" step couldn't find a dependency. Check the downloaded artifact structure and add the missing path to that step. |
 | Test fails with `serviceConnection` errors | Use the latest `bc-runner` image — `serviceConnection`/TestPage support depends on patches #17–#23 in the startup hook. |
 
 ## Reporting issues
