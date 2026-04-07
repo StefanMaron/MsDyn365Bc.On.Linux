@@ -208,9 +208,13 @@ jobs:
         working-directory: bc-linux
         run: |
           set -e
-          # Run each test .app via run-tests.sh. The TestRunnerExtension is
-          # already published inside the BC container at boot.
-          for app in ../build/*.app; do
+          # Iterate only the test apps (we know which ones from TEST_APP_DIRS).
+          # Production apps in APP_DIRS are already published but we don't run
+          # tests on them — they have no test codeunits.
+          for d in $TEST_APP_DIRS; do
+            [ -z "$d" ] && continue
+            app="../build/$(basename "$d").app"
+            [ -f "$app" ] || { echo "skip: $app (not built)"; continue; }
             base=$(basename "$app")
             echo "=== Running tests in $base ==="
             ./scripts/run-tests.sh \

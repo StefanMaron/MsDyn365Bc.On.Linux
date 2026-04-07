@@ -188,8 +188,13 @@ steps:
   - bash: |
       set -e
       cd "$(Agent.BuildDirectory)/bc-linux"
-      for app in "$(Pipeline.Workspace)/build"/*.app; do
-        [ -f "$app" ] || continue
+      # Iterate only the test apps (we know which ones from TEST_APP_DIRS).
+      # Production apps in APP_DIRS are already published but we don't run
+      # tests on them — they have no test codeunits.
+      for d in $(TEST_APP_DIRS); do
+        [ -z "$d" ] && continue
+        app="$(Pipeline.Workspace)/build/$(basename "$d").app"
+        [ -f "$app" ] || { echo "skip: $app (not built)"; continue; }
         base=$(basename "$app")
         echo "=== Running tests in $base ==="
         ./scripts/run-tests.sh \
