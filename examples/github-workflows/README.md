@@ -1,19 +1,80 @@
 # GitHub Actions starter workflows for bc-linux
 
-Two copy-paste GitHub Actions workflows that run AL tests against a Business
-Central NST on Linux. Both pull the published `ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner`
-image (publicly available, no auth needed) and use the bc-linux scripts to
-boot BC, publish your apps, and execute tests via the bundled
-TestRunnerExtension.
+Run AL tests against a Business Central NST on Linux from your own GitHub
+repo. All flavours pull the public
+`ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner` image (no auth needed)
+and use the bc-linux scripts to boot BC, publish your apps, and execute
+tests via the bundled TestRunnerExtension.
 
-## Pick a template
+## ✨ Recommended: reusable workflow (10-line consumer file)
+
+`bc-linux` ships two **reusable workflows** in its own `.github/workflows/`
+that you can call from your repo. The consumer file is tiny:
+
+```yaml
+# .github/workflows/bc-test.yml
+name: BC Tests
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  bc-tests:
+    uses: StefanMaron/MsDyn365Bc.On.Linux/.github/workflows/bc-test-from-source.yml@master
+    with:
+      bc_version:     "27.5"
+      app_dirs:       "app"
+      test_app_dirs:  "test"
+      codeunit_range: "70000..79999"
+```
+
+Two flavours are available — pick whichever fits:
+
+| Reusable workflow | When to use |
+|---|---|
+| `bc-test-from-source.yml` | Compile AL source from your repo, stage symbols from BC artifacts, publish, run tests. |
+| `bc-test-prebuilt.yml`    | Skip compilation; publish and run pre-built `.app` files. |
+
+A copy-paste consumer example is in
+[`bc-test-using-reusable.yml`](./bc-test-using-reusable.yml).
+
+**Pin to a tag in production.** `@master` is great while iterating, but for
+reproducible CI runs swap it for a release tag once one exists
+(`@v1`, `@v2.1`, etc.) so an upstream change can't break your pipeline.
+
+### Inputs (from-source)
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `bc_version` | no | `27.5` | BC platform version |
+| `bc_country` | no | `w1` | BC country code |
+| `bc_type` | no | `sandbox` | `sandbox` or `onprem` |
+| `app_dirs` | no | `""` | Space-separated dirs containing `app.json` for production apps |
+| `test_app_dirs` | **yes** | — | Space-separated dirs containing `app.json` for test apps |
+| `codeunit_range` | **yes** | — | AL codeunit ID range to execute (`70000..79999`) |
+| `al_tool_version` | no | `16.2.28.57946` | Linux AL compiler tool version |
+| `runner_image` | no | public ghcr.io tag | Override the bc-runner image |
+| `bc_linux_ref` | no | `master` | Git ref of `MsDyn365Bc.On.Linux` to check out for scripts |
+| `timeout_minutes` | no | `45` | Job timeout |
+
+### Inputs (prebuilt)
+
+Same as above but with `app_files` / `test_app_files` (paths to `.app`
+files) instead of `app_dirs` / `test_app_dirs`, and no `al_tool_version`.
+
+## Alternative: inlined templates (paste into your repo)
+
+If you'd rather see exactly what's happening — or you want to fork-and-tweak
+the steps — copy one of these files into `.github/workflows/bc-test.yml`
+in your repo and edit the `env:` block at the top.
 
 | File | When to use |
 |------|-------------|
-| [`bc-test-from-source.yml`](./bc-test-from-source.yml) | Your AL source lives in the repo and you want CI to compile it. Installs the Linux AL compiler tool, stages BC symbols from cached artifacts, builds your app + test apps, then publishes and runs them. |
-| [`bc-test-prebuilt.yml`](./bc-test-prebuilt.yml) | You already have `.app` files (built by another job, vendor-supplied, or committed to the repo). Skips compilation and goes straight to publish + run. |
+| [`bc-test-from-source.yml`](./bc-test-from-source.yml) | Your AL source lives in the repo and you want CI to compile it. |
+| [`bc-test-prebuilt.yml`](./bc-test-prebuilt.yml) | You already have `.app` files; skips compilation. |
 
-Both workflows:
+These are functionally equivalent to the reusable workflows above — just
+copied into your repo so you can edit them freely. Trade-off: when bc-linux
+ships an improvement, you'll have to re-copy it.
+
+All flavours:
 
 - Boot BC and SQL Server in Linux containers (no Windows runner required)
 - Cache BC artifacts between runs (`actions/cache`)

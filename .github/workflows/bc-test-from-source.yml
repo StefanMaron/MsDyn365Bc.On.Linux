@@ -1,0 +1,216 @@
+name: BC test (from source) [reusable]
+
+# Reusable workflow that compiles AL source from the calling repo, publishes
+# it to a Business Central NST running on Linux, and executes the AL tests.
+#
+# Consumer usage (paste into .github/workflows/bc-test.yml in your repo):
+#
+#   name: BC Tests
+#   on: [push, pull_request, workflow_dispatch]
+#   jobs:
+#     test:
+#       uses: StefanMaron/MsDyn365Bc.On.Linux/.github/workflows/bc-test-from-source.yml@master
+#       with:
+#         bc_version:     "27.5"
+#         app_dirs:       "app"
+#         test_app_dirs:  "test"
+#         codeunit_range: "70000..79999"
+#
+# Inputs are documented under workflow_call below. For pre-built .app files
+# (no compile step), use bc-test-prebuilt.yml instead.
+
+on:
+  workflow_call:
+    inputs:
+      bc_version:
+        description: "BC platform version (e.g. 27.5)"
+        required: false
+        type: string
+        default: "27.5"
+      bc_country:
+        description: "BC country code (e.g. w1, de, us)"
+        required: false
+        type: string
+        default: "w1"
+      bc_type:
+        description: "BC artifact type (sandbox or onprem)"
+        required: false
+        type: string
+        default: "sandbox"
+      app_dirs:
+        description: "Space-separated dirs containing app.json for production apps (compile order)"
+        required: false
+        type: string
+        default: ""
+      test_app_dirs:
+        description: "Space-separated dirs containing app.json for test apps"
+        required: true
+        type: string
+      codeunit_range:
+        description: "AL codeunit ID range to execute (e.g. 70000..79999)"
+        required: true
+        type: string
+      al_tool_version:
+        description: "Linux AL compiler tool version (Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux)"
+        required: false
+        type: string
+        default: "16.2.28.57946"
+      runner_image:
+        description: "Override the bc-runner image (defaults to the public ghcr.io tag)"
+        required: false
+        type: string
+        default: "ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner:latest"
+      bc_linux_ref:
+        description: "Git ref of StefanMaron/MsDyn365Bc.On.Linux to check out for scripts (master, a tag, or a commit SHA)"
+        required: false
+        type: string
+        default: "master"
+      timeout_minutes:
+        description: "Job timeout"
+        required: false
+        type: number
+        default: 45
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    env:
+      BC_RUNNER_IMAGE: ${{ inputs.runner_image }}
+      BC_VERSION: ${{ inputs.bc_version }}
+      BC_COUNTRY: ${{ inputs.bc_country }}
+      BC_TYPE: ${{ inputs.bc_type }}
+
+    steps:
+      - name: Checkout your repo
+        uses: actions/checkout@v4
+        with:
+          path: project
+
+      - name: Checkout MsDyn365Bc.On.Linux
+        uses: actions/checkout@v4
+        with:
+          repository: StefanMaron/MsDyn365Bc.On.Linux
+          ref: ${{ inputs.bc_linux_ref }}
+          path: bc-linux
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install AL compiler (Linux)
+        run: |
+          dotnet tool install -g \
+            Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
+            --version "${{ inputs.al_tool_version }}" 2>/dev/null || true
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Cache BC artifacts
+        id: artifact-cache
+        uses: actions/cache@v4
+        with:
+          path: artifact-cache/${{ inputs.bc_version }}
+          key: bc-artifacts-${{ inputs.bc_type }}-${{ inputs.bc_version }}-${{ inputs.bc_country }}
+
+      - name: Download BC artifacts (if not cached)
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "artifact-cache/$BC_VERSION"
+          bc-linux/scripts/download-artifacts.sh \
+            "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" \
+            "$PWD/artifact-cache/$BC_VERSION"
+
+      - name: Start BC on Linux
+        env:
+          BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ inputs.bc_version }}
+        working-directory: bc-linux
+        run: |
+          docker compose up -d
+          for i in $(seq 1 360); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' \
+              "$(docker compose ps -q bc)" 2>/dev/null || echo unknown)
+            case "$STATUS" in
+              healthy)   echo "BC ready after $((i*5))s"; break ;;
+              unhealthy) docker compose logs bc | tail -80; exit 1 ;;
+            esac
+            sleep 5
+          done
+          [ "$STATUS" = "healthy" ] || { docker compose logs bc | tail -100; exit 1; }
+
+      - name: Stage symbols from BC artifacts
+        run: |
+          mkdir -p symbols
+          ART="artifact-cache/$BC_VERSION"
+          find "$ART/platform/ModernDev" -name "System.app" -exec cp {} symbols/ \; 2>/dev/null || true
+          find "$ART/app/Extensions" -name "*.app" -exec cp {} symbols/ \; 2>/dev/null || true
+          find "$ART/platform" -path "*testframework*" -name "*.app" -exec cp {} symbols/ \; 2>/dev/null || true
+          find "$ART/app/Applications" -name "*Test Library*.app" -exec cp {} symbols/ \; 2>/dev/null || true
+          find "$ART/app/Applications" -name "*Tests-TestLibraries*.app" -exec cp {} symbols/ \; 2>/dev/null || true
+          echo "Staged $(ls symbols/*.app 2>/dev/null | wc -l) symbol files"
+
+      - name: Compile and publish
+        env:
+          AUTH: "BCRUNNER:Admin123!"
+          DEV: "http://localhost:7049"
+          APP_DIRS: ${{ inputs.app_dirs }}
+          TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
+        run: |
+          set -e
+          publish_app() {
+            local app="$1"
+            echo ">>> Publishing $app"
+            local code
+            code=$(curl -s -o /tmp/pub.out -w "%{http_code}" --max-time 180 \
+              -u "$AUTH" -X POST \
+              -F "file=@${app};type=application/octet-stream" \
+              "$DEV/apps?SchemaUpdateMode=forcesync")
+            cat /tmp/pub.out; echo
+            [ "$code" = "200" ] || [ "$code" = "422" ] || { echo "publish failed: $code"; exit 1; }
+          }
+          compile_dir() {
+            local src="$1"
+            [ -f "$src/app.json" ] || { echo "skip $src (no app.json)" >&2; return 0; }
+            mkdir -p "$src/.alpackages"
+            cp symbols/*.app "$src/.alpackages/" 2>/dev/null || true
+            local out
+            out="$(pwd)/build/$(basename "$src").app"
+            mkdir -p build
+            echo ">>> Compiling $src → $out" >&2
+            AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" >&2
+            echo "$out"
+          }
+          for d in $APP_DIRS; do
+            [ -z "$d" ] && continue
+            APP=$(compile_dir "project/$d")
+            [ -f "$APP" ] && publish_app "$APP"
+          done
+          for d in $TEST_APP_DIRS; do
+            [ -z "$d" ] && continue
+            mkdir -p "project/$d/.alpackages"
+            cp build/*.app "project/$d/.alpackages/" 2>/dev/null || true
+            APP=$(compile_dir "project/$d")
+            [ -f "$APP" ] && publish_app "$APP"
+          done
+
+      - name: Run AL tests
+        working-directory: bc-linux
+        run: |
+          set -e
+          for app in ../build/*.app; do
+            [ -f "$app" ] || continue
+            base=$(basename "$app")
+            # Skip production apps that aren't test apps. We can't tell from
+            # the filename alone, so just attempt the run — run-tests.sh will
+            # report 0 codeunits in range and exit cleanly if there are none.
+            echo "=== Running tests in $base ==="
+            ./scripts/run-tests.sh \
+              --app "$app" \
+              --codeunit-range "${{ inputs.codeunit_range }}" \
+              --timeout 30
+          done
+
+      - name: BC logs (on failure)
+        if: failure()
+        working-directory: bc-linux
+        run: docker compose logs bc | tail -200

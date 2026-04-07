@@ -1,0 +1,39 @@
+name: BC Tests
+
+# Tiny consumer workflow that delegates to a reusable workflow hosted in
+# StefanMaron/MsDyn365Bc.On.Linux. Copy this file into your repo at
+# .github/workflows/bc-test.yml, edit the `with:` block, commit, push.
+#
+# Two flavours are available, pick whichever fits:
+#   * bc-test-from-source.yml — compiles AL source from your repo
+#   * bc-test-prebuilt.yml    — publishes existing .app files
+#
+# This example uses the from-source flavour. For the prebuilt flavour,
+# replace the `uses:` line and the `with:` keys with the prebuilt set
+# (test_app_files / app_files instead of test_app_dirs / app_dirs).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  bc-tests:
+    uses: StefanMaron/MsDyn365Bc.On.Linux/.github/workflows/bc-test-from-source.yml@master
+    with:
+      bc_version:     "27.5"
+      bc_country:     "w1"
+      app_dirs:       "app"          # space-separated dirs containing app.json
+      test_app_dirs:  "test"         # ditto for test apps
+      codeunit_range: "70000..79999"
+
+  # ─── Prebuilt flavour example (commented out) ─────────────────────────
+  #
+  # bc-tests-prebuilt:
+  #   uses: StefanMaron/MsDyn365Bc.On.Linux/.github/workflows/bc-test-prebuilt.yml@master
+  #   with:
+  #     bc_version:     "27.5"
+  #     test_app_files: "tests/MyTests.app"
+  #     codeunit_range: "70000..79999"

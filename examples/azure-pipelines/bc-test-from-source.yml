@@ -1,0 +1,204 @@
+# Azure DevOps pipeline for running AL tests on a Business Central NST
+# running on Linux. Compiles your AL source (app + test apps) inside the
+# pipeline and publishes the compiled .app files to BC.
+#
+# Powered by StefanMaron/MsDyn365Bc.On.Linux — runs unmodified Microsoft BC
+# on Linux via runtime patching of the Windows .NET service tier.
+# Image: ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner:latest (public).
+#
+# ──────────────────────────────────────────────────────────────────────
+# HOW TO USE
+# ──────────────────────────────────────────────────────────────────────
+# 1. Copy this file into your repo as azure-pipelines.yml (or any name —
+#    set it as the YAML file in your Azure DevOps Pipeline definition).
+# 2. Edit the values in the "variables:" block to match your repo:
+#      - BC_VERSION / BC_COUNTRY     → which BC version to test against
+#      - APP_DIRS                    → space-separated dirs with app.json
+#                                      for your production app(s).
+#                                      Leave empty if you only have test apps.
+#      - TEST_APP_DIRS               → space-separated dirs with app.json
+#                                      for your test app(s)
+#      - CODEUNIT_RANGE              → AL codeunit ID range to run
+# 3. Save + run. The pipeline runs on every push to main and PR.
+#
+# Requires a Microsoft-hosted Ubuntu agent (default `ubuntu-latest`) which
+# already has Docker, Docker Compose, .NET 8 SDK, and curl preinstalled.
+# ──────────────────────────────────────────────────────────────────────
+
+trigger:
+  branches:
+    include: [main, master]
+
+pr:
+  branches:
+    include: [main, master]
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # ----- Edit these for your project ----------------------------------
+  BC_VERSION: '27.5'
+  BC_COUNTRY: 'w1'
+  BC_TYPE: 'sandbox'
+
+  # Space-separated dirs containing app.json for your production AL apps.
+  # Leave empty ('') if your repo only has test apps.
+  APP_DIRS: 'app'
+
+  # Space-separated dirs containing app.json for your test AL apps.
+  TEST_APP_DIRS: 'test'
+
+  # AL codeunit ID range to execute.
+  CODEUNIT_RANGE: '70000..79999'
+
+  # AL compiler version. Has to match the major BC version. The version
+  # below is known to work with BC 27.x. For BC 28.x bump it.
+  AL_TOOL_VERSION: '16.2.28.57946'
+  # --------------------------------------------------------------------
+
+  # bc-linux runtime image (publicly available on GHCR — no auth needed).
+  BC_RUNNER_IMAGE: 'ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner:latest'
+
+  # Git ref of MsDyn365Bc.On.Linux to use for scripts (master, tag, or SHA).
+  BC_LINUX_REF: 'master'
+
+steps:
+  - checkout: self
+    path: project
+
+  - bash: |
+      set -e
+      git clone --depth 1 --branch "$(BC_LINUX_REF)" \
+        https://github.com/StefanMaron/MsDyn365Bc.On.Linux.git \
+        "$(Agent.BuildDirectory)/bc-linux"
+      ls "$(Agent.BuildDirectory)/bc-linux"
+    displayName: 'Clone MsDyn365Bc.On.Linux'
+
+  - task: UseDotNet@2
+    displayName: 'Install .NET 8 SDK'
+    inputs:
+      packageType: 'sdk'
+      version: '8.0.x'
+
+  - bash: |
+      dotnet tool install -g \
+        Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
+        --version "$(AL_TOOL_VERSION)" 2>/dev/null || true
+      echo "##vso[task.prependpath]$HOME/.dotnet/tools"
+    displayName: 'Install Linux AL compiler'
+
+  - task: Cache@2
+    displayName: 'Cache BC artifacts'
+    inputs:
+      key: 'bc-artifacts | $(BC_TYPE) | $(BC_VERSION) | $(BC_COUNTRY)'
+      path: '$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)'
+      cacheHitVar: ARTIFACT_CACHE_HIT
+
+  - bash: |
+      set -e
+      mkdir -p "$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)"
+      "$(Agent.BuildDirectory)/bc-linux/scripts/download-artifacts.sh" \
+        "$(BC_TYPE)" "$(BC_VERSION)" "$(BC_COUNTRY)" \
+        "$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)"
+    displayName: 'Download BC artifacts'
+    condition: ne(variables.ARTIFACT_CACHE_HIT, 'true')
+
+  - bash: |
+      set -e
+      cd "$(Agent.BuildDirectory)/bc-linux"
+      export BC_ARTIFACTS_DIR="$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)"
+      export BC_VERSION="$(BC_VERSION)"
+      export BC_COUNTRY="$(BC_COUNTRY)"
+      export BC_TYPE="$(BC_TYPE)"
+      export BC_RUNNER_IMAGE="$(BC_RUNNER_IMAGE)"
+      docker compose up -d
+      for i in $(seq 1 360); do
+        STATUS=$(docker inspect --format='{{.State.Health.Status}}' \
+          "$(docker compose ps -q bc)" 2>/dev/null || echo unknown)
+        case "$STATUS" in
+          healthy)   echo "BC ready after $((i*5))s"; break ;;
+          unhealthy) docker compose logs bc | tail -80; exit 1 ;;
+        esac
+        sleep 5
+      done
+      [ "$STATUS" = "healthy" ] || { docker compose logs bc | tail -100; exit 1; }
+    displayName: 'Start BC on Linux'
+
+  - bash: |
+      set -e
+      mkdir -p "$(Pipeline.Workspace)/symbols"
+      ART="$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)"
+      find "$ART/platform/ModernDev" -name "System.app" -exec cp {} "$(Pipeline.Workspace)/symbols/" \; 2>/dev/null || true
+      find "$ART/app/Extensions" -name "*.app" -exec cp {} "$(Pipeline.Workspace)/symbols/" \; 2>/dev/null || true
+      find "$ART/platform" -path "*testframework*" -name "*.app" -exec cp {} "$(Pipeline.Workspace)/symbols/" \; 2>/dev/null || true
+      find "$ART/app/Applications" -name "*Test Library*.app" -exec cp {} "$(Pipeline.Workspace)/symbols/" \; 2>/dev/null || true
+      find "$ART/app/Applications" -name "*Tests-TestLibraries*.app" -exec cp {} "$(Pipeline.Workspace)/symbols/" \; 2>/dev/null || true
+      echo "Staged $(ls $(Pipeline.Workspace)/symbols/*.app 2>/dev/null | wc -l) symbol files"
+    displayName: 'Stage symbols from BC artifacts'
+
+  - bash: |
+      set -e
+      AUTH="BCRUNNER:Admin123!"
+      DEV="http://localhost:7049"
+      SYMBOLS="$(Pipeline.Workspace)/symbols"
+      BUILD_DIR="$(Pipeline.Workspace)/build"
+      mkdir -p "$BUILD_DIR"
+
+      publish_app() {
+        local app="$1"
+        echo ">>> Publishing $app"
+        local code
+        code=$(curl -s -o /tmp/pub.out -w "%{http_code}" --max-time 180 \
+          -u "$AUTH" -X POST \
+          -F "file=@${app};type=application/octet-stream" \
+          "$DEV/apps?SchemaUpdateMode=forcesync")
+        cat /tmp/pub.out; echo
+        [ "$code" = "200" ] || [ "$code" = "422" ] || { echo "publish failed: $code"; exit 1; }
+      }
+
+      compile_dir() {
+        local src="$1"
+        [ -f "$src/app.json" ] || { echo "skip $src (no app.json)" >&2; return 0; }
+        mkdir -p "$src/.alpackages"
+        cp "$SYMBOLS"/*.app "$src/.alpackages/" 2>/dev/null || true
+        local out="$BUILD_DIR/$(basename "$src").app"
+        echo ">>> Compiling $src → $out" >&2
+        AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" >&2
+        echo "$out"
+      }
+
+      cd "$(Pipeline.Workspace)/project"
+      for d in $(APP_DIRS); do
+        [ -z "$d" ] && continue
+        APP=$(compile_dir "$d")
+        [ -f "$APP" ] && publish_app "$APP"
+      done
+      for d in $(TEST_APP_DIRS); do
+        [ -z "$d" ] && continue
+        mkdir -p "$d/.alpackages"
+        cp "$BUILD_DIR"/*.app "$d/.alpackages/" 2>/dev/null || true
+        APP=$(compile_dir "$d")
+        [ -f "$APP" ] && publish_app "$APP"
+      done
+    displayName: 'Compile and publish AL apps'
+
+  - bash: |
+      set -e
+      cd "$(Agent.BuildDirectory)/bc-linux"
+      for app in "$(Pipeline.Workspace)/build"/*.app; do
+        [ -f "$app" ] || continue
+        base=$(basename "$app")
+        echo "=== Running tests in $base ==="
+        ./scripts/run-tests.sh \
+          --app "$app" \
+          --codeunit-range "$(CODEUNIT_RANGE)" \
+          --timeout 30
+      done
+    displayName: 'Run AL tests'
+
+  - bash: |
+      cd "$(Agent.BuildDirectory)/bc-linux"
+      docker compose logs bc | tail -200
+    displayName: 'BC logs (on failure)'
+    condition: failed()
