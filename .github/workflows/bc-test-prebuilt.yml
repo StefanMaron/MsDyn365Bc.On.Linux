@@ -96,6 +96,29 @@ jobs:
             "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" \
             "$PWD/artifact-cache/$BC_VERSION"
 
+      - name: Resolve apps to keep in BC database
+        env:
+          APP_FILES: ${{ inputs.app_files }}
+          TEST_APP_FILES: ${{ inputs.test_app_files }}
+        run: |
+          # Walk the consumer's .app files (not source dirs) for dependencies,
+          # then keep the 5-app baseline + any non-test-framework transitive
+          # deps. Test framework apps are excluded — they're handled by the
+          # entrypoint's republish step.
+          ARGS=""
+          for f in $APP_FILES $TEST_APP_FILES; do
+            [ -z "$f" ] && continue
+            if [ -f "project/$f" ]; then
+              ARGS="$ARGS --app-file project/$f"
+            fi
+          done
+          KEEP_IDS=$(python3 bc-linux/scripts/resolve-keep-app-ids.py \
+            $ARGS \
+            --artifact-dir "artifact-cache/$BC_VERSION")
+          echo "Resolved keep set: $KEEP_IDS"
+          echo "BC_CLEAR_ALL_APPS=selective" >> "$GITHUB_ENV"
+          echo "BC_KEEP_APP_IDS=$KEEP_IDS" >> "$GITHUB_ENV"
+
       - name: Start BC on Linux
         env:
           BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ inputs.bc_version }}

@@ -102,12 +102,30 @@ steps:
 
   - bash: |
       set -e
+      ARGS=""
+      cd "$(Pipeline.Workspace)/project"
+      for d in $(APP_DIRS) $(TEST_APP_DIRS); do
+        [ -z "$d" ] && continue
+        [ -f "$d/app.json" ] && ARGS="$ARGS --app-json $d/app.json"
+      done
+      KEEP_IDS=$(python3 "$(Agent.BuildDirectory)/bc-linux/scripts/resolve-keep-app-ids.py" \
+        $ARGS \
+        --artifact-dir "$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)")
+      echo "Resolved keep set: $KEEP_IDS"
+      echo "##vso[task.setvariable variable=BC_CLEAR_ALL_APPS]selective"
+      echo "##vso[task.setvariable variable=BC_KEEP_APP_IDS]$KEEP_IDS"
+    displayName: 'Resolve apps to keep in BC database'
+
+  - bash: |
+      set -e
       cd "$(Agent.BuildDirectory)/bc-linux"
       export BC_ARTIFACTS_DIR="$(Pipeline.Workspace)/artifact-cache/$(BC_VERSION)"
       export BC_VERSION="$(BC_VERSION)"
       export BC_COUNTRY="$(BC_COUNTRY)"
       export BC_TYPE="$(BC_TYPE)"
       export BC_RUNNER_IMAGE="$(BC_RUNNER_IMAGE)"
+      export BC_CLEAR_ALL_APPS="$(BC_CLEAR_ALL_APPS)"
+      export BC_KEEP_APP_IDS="$(BC_KEEP_APP_IDS)"
       # Pre-pull with retries — mcr.microsoft.com is occasionally WAF-blocked.
       for attempt in 1 2 3 4 5; do
         if docker compose pull --quiet; then break; fi

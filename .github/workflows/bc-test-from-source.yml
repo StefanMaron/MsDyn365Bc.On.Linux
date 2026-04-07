@@ -120,11 +120,15 @@ jobs:
         run: |
           # Walk the consumer's app.json files to find their immediate
           # dependencies, then resolve the transitive closure against the
-          # BC artifact extension set. The resolver always emits a baseline
-          # of 10 apps (System / System Application / Business Foundation /
-          # Base Application / Application umbrella + Test Runner /
-          # Library Assert / Any / Library Variable Storage / Permissions
-          # Mock) so the test framework is always preserved.
+          # BC artifact extension set. The resolver always emits the 5
+          # baseline application stack apps (System / System Application /
+          # Business Foundation / Base Application / Application umbrella);
+          # any consumer transitive deps that aren't test framework apps
+          # are added to the keep set on top. Test framework apps are
+          # deliberately excluded — the entrypoint's republish step does
+          # a fresh install of them after NST starts. Result: BC starts
+          # with only 5+N apps in Published Application instead of 121,
+          # which speeds up the first-boot extension compile phase.
           ARGS=""
           for d in $APP_DIRS $TEST_APP_DIRS; do
             [ -z "$d" ] && continue
