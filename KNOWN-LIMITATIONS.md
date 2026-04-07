@@ -43,3 +43,33 @@ that opens a page with a Camera control.
 return a dummy handle (or null) instead of crashing. Similar approach to the
 existing `NavOpenTaskPageAction.ShowForm` no-op (Patch #21). Would turn crashes
 into graceful no-ops where the DotNet control simply isn't available.
+
+## Container crash after Tests-Misc in sequential Bucket 4 runs
+
+**Observed**: When running the full Bucket 4 test suite sequentially
+(ERM → SCM → Misc → Workflow → SCM-Service → SINGLESERVER), the BC container
+becomes unhealthy after Tests-Misc completes. The remaining 3 apps (Workflow,
+SCM-Service, SINGLESERVER) all fail with "Failed to create run request" because
+the API is dead.
+
+**Reproduced on**:
+- Local benchmark run 2026-04-04 (logs in
+  `PipelinePerformanceComparison/benchmark-results/local-20260404/`)
+- GitHub Actions run 23974655275 (same crash pattern at the same point)
+
+**What we know**:
+- BC reports `unhealthy` after Misc finishes (not crashed mid-test)
+- ERM, SCM, Misc all complete successfully and produce results
+- The crash is reproducible — happens on both local and CI runs
+- ~52MB BC container log captured for investigation
+
+**Impact**: We can't claim a complete Bucket 4 number from a single sequential
+run. Currently we have ~83% of methods covered (3 of 6 apps = ~19,377 of
+~23,272 methods).
+
+**Workaround for benchmarks**: Run the failing apps in a fresh container after
+the first three crash. Not yet automated.
+
+**Investigation needed**: Identify what in Tests-Misc (or its cumulative state
+after ERM+SCM) destabilizes the NST. Could be a memory leak, file handle
+exhaustion, or a specific test that puts BC into a bad state.
