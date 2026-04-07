@@ -861,16 +861,85 @@ PYEOF
             echo "[entrypoint] [${TOTAL_ELAPSED}s] Republished $REPUBLISH_OK extensions, skipped $REPUBLISH_SKIP — republish took ${REPUBLISH_ELAPSED}s"
         fi
 
-        # No test framework republish step. The previous several iterations
-        # of this section (hand-curated array → explicit-dep-order array →
-        # resolver-with-seeds) were all duct tape around the wrong problem.
-        # The right architecture: don't wipe the test framework apps in the
-        # first place. resolve-keep-app-ids.py walks the consumer's app.json
-        # transitive closure and includes every test framework helper the
-        # consumer reaches via its dependency chain, so the selective
-        # filter PRESERVES them rather than wiping and re-installing.
-        # Removing-and-republishing was the source of every "0 tests ran"
-        # surprise in the bc-copilot-blueprint debugging session.
+        # Install-for-tenant pass. The selective filter (lines 391-453)
+        # preserves keep-set apps in [Published Application] but BC's
+        # default sandbox install leaves test framework apps in a
+        # published-but-not-installed-for-tenant state. We need an
+        # explicit "install for tenant" step or downstream publishes
+        # fail with "the referenced dependencies ... published as Global
+        # application are not installed".
+        #
+        # The dev endpoint POST with SchemaUpdateMode=forcesync does
+        # BOTH publish AND install-for-tenant in one step. So we just
+        # POST every keep-set app from the artifact tree.
+        #
+        # This is consumer-driven: the keep set is computed from the
+        # consumer's app.json by resolve-keep-app-ids.py. There's no
+        # hand-curated array of "test framework apps to republish"
+        # anywhere — the loop here just iterates whatever the consumer
+        # transitively needs.
+        if [ -n "${BC_KEEP_APP_IDS:-}" ]; then
+            echo "[entrypoint] Ensuring keep-set apps are installed for tenant..."
+            # Topologically sort the keep-set apps by their declared
+            # dependencies (deps before dependents). The bash equivalent
+            # is fragile; let Python do it via the shared _bcapp helper.
+            #
+            # The sorter:
+            #   1. Loads every .app from /bc/artifacts via _bcapp.py
+            #   2. Walks each keep-set id's transitive deps
+            #   3. Emits absolute paths in dep-first (post-order) order
+            #
+            # Skips the application stack baseline ids — they're already
+            # installed for the tenant by BC's sandbox setup, re-POSTing
+            # them is wasteful and slow.
+            INSTALL_ORDER=$(BC_KEEP_APP_IDS="$BC_KEEP_APP_IDS" python3 - "$ARTIFACTS" << 'PYEOF'
+import os, sys
+sys.path.insert(0, "/bc/scripts")
+from _bcapp import load_artifact_apps  # noqa
+artifact_dir = sys.argv[1]
+keep_ids = {x.strip().lower() for x in os.environ.get("BC_KEEP_APP_IDS","").split(",") if x.strip()}
+# BC application stack baseline — already installed for tenant by default.
+BASELINE = {
+    "8874ed3a-0643-4247-9ced-7a7002f7135d",  # System
+    "63ca2fa4-4f03-4f2b-a480-172fef340d3f",  # System Application
+    "f3552374-a1f2-4356-848e-196002525837",  # Business Foundation
+    "437dbf0e-84ff-417a-965d-ed2bb9650972",  # Base Application
+    "c1335042-3002-4257-bf8a-75c898ccb1b8",  # Application umbrella
+}
+to_install = keep_ids - BASELINE
+apps = load_artifact_apps(artifact_dir)
+visited, ordered = set(), []
+def visit(aid):
+    if aid in visited:
+        return
+    visited.add(aid)
+    info = apps.get(aid)
+    if info is None:
+        return  # not in artifact tree — silently skip
+    for dep in info.get("dependencies", []):
+        visit(dep["id"])
+    if aid in to_install:
+        ordered.append(info["path"])
+for aid in sorted(to_install):
+    visit(aid)
+for path in ordered:
+    print(path)
+PYEOF
+            )
+            while IFS= read -r APP_PATH; do
+                [ -z "$APP_PATH" ] && continue
+                NAME=$(basename "$APP_PATH")
+                HTTP=$(curl -s -o /tmp/install-tenant.out -w "%{http_code}" --max-time 120 \
+                    -u "BCRUNNER:Admin123!" -X POST \
+                    -F "file=@$APP_PATH;type=application/octet-stream" \
+                    "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
+                echo "[entrypoint]   $NAME: HTTP $HTTP"
+                if [ "$HTTP" != "200" ] && [ "$HTTP" != "204" ]; then
+                    sed 's/^/[entrypoint]     /' /tmp/install-tenant.out
+                fi
+                rm -f /tmp/install-tenant.out
+            done <<< "$INSTALL_ORDER"
+        fi
 
         # Publish additional test app dependencies (e.g. System App Test Library, Tests-TestLibraries)
         # and the actual test app (e.g. Tests-SINGLESERVER) if BC_TEST_APPS is set.
