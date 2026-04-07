@@ -18,7 +18,9 @@
 #                                      Leave empty if you only have test apps.
 #      - TEST_APP_DIRS               → space-separated dirs with app.json
 #                                      for your test app(s)
-#      - CODEUNIT_RANGE              → AL codeunit ID range to run
+#      - CODEUNIT_RANGE              → ID range of your TEST codeunits to
+#                                      execute. Production codeunits in
+#                                      APP_DIRS are published but not run.
 # 3. Save + run. The pipeline runs on every push to main and PR.
 #
 # Requires a Microsoft-hosted Ubuntu agent (default `ubuntu-latest`) which
@@ -49,7 +51,8 @@ variables:
   # Space-separated dirs containing app.json for your test AL apps.
   TEST_APP_DIRS: 'test'
 
-  # AL codeunit ID range to execute.
+  # ID range of your TEST codeunits to execute. APP_DIRS are published but
+  # their codeunits aren't run — only TEST_APP_DIRS codeunits are executed.
   CODEUNIT_RANGE: '70000..79999'
 
   # AL compiler version. Has to match the major BC version. The version

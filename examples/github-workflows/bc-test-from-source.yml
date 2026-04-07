@@ -21,8 +21,10 @@ name: BC tests on Linux (compile from source)
 #                                       you only have test apps.
 #      - TEST_APP_DIRS                → directories containing app.json
 #                                       for your test app(s)
-#      - CODEUNIT_RANGE               → AL codeunit ID range to run
-#                                       (e.g. "70000..70099")
+#      - CODEUNIT_RANGE               → ID range of your TEST codeunits to
+#                                       execute (e.g. "70000..70099").
+#                                       Production codeunits aren't run,
+#                                       only published.
 # 3. Commit + push. The workflow runs on every PR and push to main.
 #
 # Anything more advanced (matrix over BC versions, secrets, custom
@@ -51,8 +53,9 @@ env:
   # Space-separated paths to your AL test app source dirs.
   TEST_APP_DIRS: "test"
 
-  # Codeunit ID range to execute. Use "lo..hi" or a single number.
-  # Tip: pick a range that covers all test codeunits in TEST_APP_DIRS.
+  # ID range of your TEST codeunits to execute. Use "lo..hi" or a single
+  # number. Pick a range that covers all test codeunits in TEST_APP_DIRS —
+  # production codeunits in APP_DIRS are published but not run.
   CODEUNIT_RANGE: "70000..79999"
 
   # AL compiler version. Has to match the major BC version of the

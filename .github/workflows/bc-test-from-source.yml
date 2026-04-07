@@ -47,7 +47,7 @@ on:
         required: true
         type: string
       codeunit_range:
-        description: "AL codeunit ID range to execute (e.g. 70000..79999)"
+        description: "Test codeunit ID range to execute (e.g. 70000..79999). This is the range of your TEST codeunits — production app codeunits aren't run, only published."
         required: true
         type: string
       al_tool_version:

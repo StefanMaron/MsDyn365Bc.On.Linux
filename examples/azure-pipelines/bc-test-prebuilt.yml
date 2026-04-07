@@ -23,7 +23,9 @@
 #                                      (publish first, may be empty)
 #      - TEST_APP_FILES              → space-separated list of .app
 #                                      paths for test apps
-#      - CODEUNIT_RANGE              → AL codeunit ID range to run
+#      - CODEUNIT_RANGE              → ID range of your TEST codeunits to
+#                                      execute. APP_FILES are published
+#                                      but their codeunits aren't run.
 # 3. Save + run.
 # ──────────────────────────────────────────────────────────────────────
 
@@ -50,7 +52,8 @@ variables:
   # Test .app files to publish and run.
   TEST_APP_FILES: 'tests/MyTests.app'
 
-  # AL codeunit ID range to execute.
+  # ID range of your TEST codeunits to execute. APP_FILES are published but
+  # their codeunits aren't run — only TEST_APP_FILES codeunits are executed.
   CODEUNIT_RANGE: '70000..79999'
   # --------------------------------------------------------------------
 
