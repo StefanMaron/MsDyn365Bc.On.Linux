@@ -261,16 +261,7 @@ jobs:
       - name: Wait for BC healthy
         working-directory: bc-linux
         run: |
-          for i in $(seq 1 360); do
-            STATUS=$(docker inspect --format='{{.State.Health.Status}}' \
-              "$(docker compose ps -q bc)" 2>/dev/null || echo unknown)
-            case "$STATUS" in
-              healthy)   echo "BC ready after $((i*5))s"; break ;;
-              unhealthy) docker compose logs bc | tail -80; exit 1 ;;
-            esac
-            sleep 5
-          done
-          [ "$STATUS" = "healthy" ] || { docker compose logs bc | tail -100; exit 1; }
+          ./scripts/wait-for-bc-healthy.sh 30
           bash scripts/workflow-summary.sh end BC_BOOT
 
       # ─── Phase 7: publish compiled apps to the now-running BC ────────

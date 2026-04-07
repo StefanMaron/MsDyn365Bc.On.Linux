@@ -6,7 +6,7 @@ on:
       versions:
         description: 'BC versions to test (comma-separated, e.g. "27.0,27.5,28.0")'
         required: false
-        default: '27.0,27.1,27.2,27.3,27.4,27.5'
+        default: '27.0,27.1,27.2,27.3,27.4,27.5,28.0'
         type: string
   push:
     branches: [main, master]
@@ -27,7 +27,9 @@ jobs:
       run: |
         VERSIONS='${{ inputs.versions }}'
         if [ -z "$VERSIONS" ]; then
-          VERSIONS="27.0,27.1,27.2,27.3,27.4,27.5"
+          # Default matrix when triggered by push/PR (no workflow_dispatch input).
+          # Keep in sync with the workflow_dispatch input default above.
+          VERSIONS="27.0,27.1,27.2,27.3,27.4,27.5,28.0"
         fi
         JSON=$(echo "$VERSIONS" | python3 -c "import sys,json; print(json.dumps({'bc_version': sys.stdin.read().strip().split(',')}))")
         echo "matrix=$JSON" >> $GITHUB_OUTPUT
@@ -120,36 +122,7 @@ jobs:
       run: |
         STEP_START=$(date +%s)
         docker compose up -d 2>&1 | tail -10
-
-        echo "Waiting for BC to be healthy..."
-        for i in $(seq 1 360); do
-          STATUS=$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q bc) 2>/dev/null || echo "unknown")
-          case "$STATUS" in
-            healthy)
-              echo "BC v$BC_VERSION healthy after $((i*5))s"
-              break
-              ;;
-            unhealthy)
-              echo "ERROR: BC container unhealthy"
-              docker compose logs bc 2>&1 | tail -50
-              exit 1
-              ;;
-          esac
-          if ! docker compose ps bc 2>/dev/null | grep -q "Up"; then
-            echo "ERROR: BC container died"
-            docker compose logs bc 2>&1 | tail -50
-            exit 1
-          fi
-          [ $((i % 12)) -eq 0 ] && echo "  $((i*5))s: $(docker compose logs bc 2>&1 | grep '\[entrypoint\]' | tail -1)"
-          sleep 5
-        done
-
-        if [ "$STATUS" != "healthy" ]; then
-          echo "ERROR: BC did not become healthy within 30 minutes"
-          docker compose logs bc 2>&1 | tail -100
-          exit 1
-        fi
-
+        ./scripts/wait-for-bc-healthy.sh 30
         echo "BUILD_DURATION=$(($(date +%s) - STEP_START))" >> $GITHUB_ENV
 
     - name: Verify endpoints
@@ -286,19 +259,14 @@ jobs:
         AL compile "/project:/tmp/testapp" "/packagecachepath:/tmp/testapp/.alpackages" "/out:/tmp/testapp/SmokeTest.app" \
           || { echo "FAIL: Compilation failed"; exit 1; }
 
-        # Publish (separate from test execution)
+        # Publish via the canonical helper. The previous inline version
+        # treated ANY 422 as success, which would have silently swallowed
+        # missing-dependency errors and let the smoke test run against an
+        # empty test suite.
+        # shellcheck disable=SC1091
+        . scripts/publish-app.sh
         echo "Publishing smoke test..."
-        RESP=$(curl -s -w "\n%{http_code}" --max-time 120 -u "$AUTH" -X POST \
-          -F "file=@/tmp/testapp/SmokeTest.app;type=application/octet-stream" \
-          "$DEV/apps?SchemaUpdateMode=forcesync")
-        HTTP=$(echo "$RESP" | tail -1)
-        BODY=$(echo "$RESP" | head -n -1)
-        echo "  HTTP $HTTP"
-        if [ "$HTTP" != "200" ] && [ "$HTTP" != "422" ]; then
-          echo "  ERROR: $BODY"
-          exit 1
-        fi
-        [ "$HTTP" = "422" ] && echo "  $BODY"
+        bc_publish_app /tmp/testapp/SmokeTest.app "${DEV}/BC/dev" "$AUTH" || exit 1
 
         # Extract extension ID
         EXT_ID=$(unzip -p /tmp/testapp/SmokeTest.app NavxManifest.xml 2>/dev/null | grep -oP 'App Id="\K[^"]+' || true)
@@ -361,36 +329,9 @@ jobs:
       run: |
         STEP_START=$(date +%s)
         docker compose up -d 2>&1 | tail -10
-
-        echo "Waiting for BC to be healthy (in-container download included in this time)..."
-        for i in $(seq 1 360); do
-          STATUS=$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q bc) 2>/dev/null || echo "unknown")
-          case "$STATUS" in
-            healthy)
-              echo "BC healthy after $((i*5))s (including in-container artifact download)"
-              break
-              ;;
-            unhealthy)
-              echo "ERROR: BC container unhealthy"
-              docker compose logs bc 2>&1 | tail -50
-              exit 1
-              ;;
-          esac
-          if ! docker compose ps bc 2>/dev/null | grep -q "Up"; then
-            echo "ERROR: BC container died"
-            docker compose logs bc 2>&1 | tail -50
-            exit 1
-          fi
-          [ $((i % 12)) -eq 0 ] && echo "  $((i*5))s: $(docker compose logs bc 2>&1 | grep '\[entrypoint\]' | tail -1)"
-          sleep 5
-        done
-
-        if [ "$STATUS" != "healthy" ]; then
-          echo "ERROR: BC did not become healthy within 30 minutes"
-          docker compose logs bc 2>&1 | tail -100
-          exit 1
-        fi
-
+        # Use the shared healthcheck script. The 30-min budget covers the
+        # in-container artifact download (~3 min) + BC boot (~3-5 min).
+        ./scripts/wait-for-bc-healthy.sh 30
         echo "TOTAL_DURATION=$(($(date +%s) - STEP_START))" >> $GITHUB_ENV
 
     - name: Download timing summary
