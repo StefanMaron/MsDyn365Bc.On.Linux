@@ -442,22 +442,53 @@ DELETE FROM [Published Application];
 SQLEOF
     fi
     REMOVED=$($SQLCMD_DB -h -1 -W -i "$SELECTIVE_SQL" 2>&1) || true
-    # The 5 BC core test framework apps (Test Runner, Library Assert,
-    # Library Variable Storage, Permissions Mock, Any) ship in BC's
-    # sandbox image in a 'published as Global, not installed for tenant'
-    # state. The keep set above preserves them in [Published Application]
-    # but they're still not installed-for-tenant, and the dev endpoint
-    # can't promote a Global publish to a tenant install (the
-    # DependencyPublishingOption parameter rejects 'Install' as a value).
-    # So we wipe them here regardless of the keep set, and the
-    # install-for-tenant loop after NST starts re-POSTs them via
-    # forcesync, which both publishes AND installs for tenant.
-    $SQLCMD_DB -Q "
-    DELETE FROM [NAV App Installed App] WHERE [Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any'));
-    DELETE FROM [Installed Application] WHERE [Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any'));
-    DELETE FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any');
-    " 2>/dev/null || true
-    log_step "Wiped 5 core test framework apps for fresh install-for-tenant"
+    # Find any apps that are PUBLISHED but NOT INSTALLED for any tenant
+    # and wipe them so the install-for-tenant loop after NST starts can
+    # republish them as proper Dev/tenant deployments.
+    #
+    # Background: BC's sandbox image ships several test framework apps
+    # (Test Runner, Library Assert, Library Variable Storage, Permissions
+    # Mock, Any) in a "published as Global, not installed for tenant"
+    # state. The dev endpoint forcesync POST cannot promote a published-
+    # as-Global app to a tenant install (the DependencyPublishingOption
+    # parameter rejects 'Install' as a value), so the only way to get
+    # these apps tenant-installed via the dev endpoint is to wipe them
+    # from [Published Application] first and then re-POST them.
+    #
+    # This used to be a hand-coded list of 5 names. Discovering the set
+    # dynamically by querying [NAV App Installed App] is more robust:
+    # if a future BC version ships a different set of "published but
+    # not tenant-installed" apps, the query picks them up automatically.
+    WIPE_SQL="/tmp/wipe-stuck.sql"
+    cat > "$WIPE_SQL" << 'SQLEOF'
+SET NOCOUNT ON;
+-- Stuck apps = published but never installed for any tenant
+SELECT [Package ID] INTO #stuck
+FROM [Published Application] pa
+WHERE NOT EXISTS (
+    SELECT 1 FROM [NAV App Installed App] iaa
+    WHERE iaa.[Package ID] = pa.[Package ID]
+);
+
+SELECT 'WIPE-STUCK: ' + pa.[Name]
+FROM [Published Application] pa
+WHERE pa.[Package ID] IN (SELECT [Package ID] FROM #stuck);
+
+DELETE FROM [NAV App Installed App] WHERE [Package ID] IN (SELECT [Package ID] FROM #stuck);
+DELETE FROM [NAV App Tenant App] WHERE [App Package ID] IN (SELECT [Package ID] FROM #stuck);
+DELETE FROM [NAV App Dependencies] WHERE [Package ID] IN (SELECT [Package ID] FROM #stuck);
+DELETE FROM [NAV App Published App] WHERE [Package ID] IN (SELECT [Package ID] FROM #stuck);
+DELETE FROM [Installed Application] WHERE [Package ID] IN (SELECT [Package ID] FROM #stuck);
+DELETE FROM [Inplace Installed Application] WHERE [Runtime Package ID] IN (SELECT [Package ID] FROM #stuck);
+DELETE FROM [Published Application] WHERE [Package ID] IN (SELECT [Package ID] FROM #stuck);
+DROP TABLE #stuck;
+SQLEOF
+    STUCK_OUT=$($SQLCMD_DB -h -1 -W -i "$WIPE_SQL" 2>&1) || true
+    log_step "Stuck-publish wipe result:"
+    echo "$STUCK_OUT" | while read -r line; do
+        [ -n "$line" ] && echo "[entrypoint]   $line" || true
+    done
+    rm -f "$WIPE_SQL"
     log_step "Selective clear result:"
     echo "$REMOVED" | while read -r line; do
         [ -n "$line" ] && echo "[entrypoint]   $line" || true
