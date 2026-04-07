@@ -43,10 +43,15 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _bcapp import load_artifact_apps, version_tuple  # noqa: E402
 
-# AL compile fails without System.app even if nothing references it
-# explicitly — it provides the platform-level base types. This GUID is
-# stable across BC versions.
-SYSTEM_APP_ID = "8874ed3a-0643-4247-9ced-7a7002f7135d"
+# Implicit dependencies that AL compile always requires, even when the
+# consumer's app.json doesn't list them in `dependencies`. Both are
+# expressed in app.json via the `platform` and `application` version
+# fields rather than as explicit deps, so the resolver has to add them
+# from outside the consumer's declared graph. GUIDs are stable across
+# BC versions.
+SYSTEM_APP_ID = "8874ed3a-0643-4247-9ced-7a7002f7135d"           # Microsoft / System
+APPLICATION_APP_ID = "c1335042-3002-4257-bf8a-75c898ccb1b8"      # Microsoft / Application (umbrella)
+IMPLICIT_SEED_IDS = {SYSTEM_APP_ID, APPLICATION_APP_ID}
 
 
 def read_consumer_seeds(app_json_paths: list[str]) -> tuple[set[str], set[str]]:
@@ -126,19 +131,27 @@ def main() -> int:
     # Drop the consumer's own app ids from the seed set — they're compiled
     # separately and provided to AL compile via build/, not from artifacts.
     seeds -= self_ids
-    # System.app is implicit — every AL compile needs it.
-    seeds.add(SYSTEM_APP_ID)
+    explicit_count = len(seeds)
+    # Add the implicit deps that AL compile always needs (System + Application
+    # umbrella). These are expressed in app.json via `platform`/`application`
+    # version fields rather than as explicit dependencies, so they're not in
+    # the seed set yet. The Application umbrella's transitive closure will
+    # pull in System Application, Business Foundation, Base Application.
+    seeds |= IMPLICIT_SEED_IDS
     print(f"[stage-symbols] Consumer dependency seeds: {len(seeds)} "
-          f"({len(seeds) - 1} explicit + System)", file=sys.stderr)
+          f"({explicit_count} explicit + {len(IMPLICIT_SEED_IDS)} implicit)",
+          file=sys.stderr)
 
     resolved, unresolved = resolve_closure(seeds, apps)
     # Filter out consumer-self ids from any transitive unresolved set too.
     unresolved -= self_ids
 
-    if SYSTEM_APP_ID in unresolved:
-        print(f"ERROR: System.app ({SYSTEM_APP_ID}) not found anywhere in the "
-              f"artifact tree. AL compile cannot proceed without it. "
-              f"Check that the artifact extraction included platform/ModernDev/.",
+    missing_implicit = IMPLICIT_SEED_IDS & unresolved
+    if missing_implicit:
+        print(f"ERROR: implicit base app(s) not found anywhere in the artifact "
+              f"tree: {sorted(missing_implicit)}. AL compile cannot proceed "
+              f"without them. Check that the artifact extraction included "
+              f"platform/ModernDev/ and platform/applications/.",
               file=sys.stderr)
         return 1
 
