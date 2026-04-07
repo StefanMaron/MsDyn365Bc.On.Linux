@@ -137,18 +137,43 @@ else
 fi
 
 # === Publish Test App (if provided) ===
+#
+# BC's dev endpoint returns 422 for several distinct conditions, only one of
+# which is the benign "already installed at this version" case. Others are
+# real errors (missing dependency, schema sync failure, version conflict,
+# manifest validation, ...). The earlier version of this code treated ALL
+# 422s as "already installed" and silently continued — which silently hid a
+# missing-dependency failure for 5+ rounds of debugging in the
+# bc-copilot-blueprint session. Read the response body and only treat 422
+# as success if the body actually says so.
 if [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then
     echo -n "Publishing $(basename "$APP_FILE")... "
-    PUB_HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 -u "$AUTH" -X POST \
+    PUB_BODY=$(mktemp)
+    PUB_HTTP=$(curl -s -o "$PUB_BODY" -w "%{http_code}" --max-time 120 -u "$AUTH" -X POST \
         -F "file=@${APP_FILE};type=application/octet-stream" \
         "${DEV_URL}/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
     if [ "$PUB_HTTP" = "200" ]; then
         echo "OK"
-    elif [ "$PUB_HTTP" = "422" ]; then
+    elif [ "$PUB_HTTP" = "422" ] && grep -qi "already" "$PUB_BODY"; then
         echo "already installed (same version)"
     else
-        echo "WARN: HTTP $PUB_HTTP (continuing anyway)"
+        echo "FAIL"
+        echo ""
+        echo "ERROR: dev endpoint returned HTTP $PUB_HTTP for $(basename "$APP_FILE")"
+        echo "       URL: ${DEV_URL}/apps?SchemaUpdateMode=forcesync"
+        echo "       Body:"
+        sed 's/^/         /' "$PUB_BODY"
+        echo ""
+        echo "       Common causes:"
+        echo "         - Missing dependency that isn't installed in BC (publishing the .app"
+        echo "           file with --app makes the symbol available for compile, but the"
+        echo "           dependency itself still needs to be installed in the BC database)."
+        echo "         - Schema sync failure (forcesync detected a destructive change)."
+        echo "         - Version conflict with a previously-published variant."
+        rm -f "$PUB_BODY"
+        exit 1
     fi
+    rm -f "$PUB_BODY"
 fi
 
 # === Discover Test Codeunit IDs ===

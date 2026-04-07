@@ -862,13 +862,33 @@ PYEOF
         fi
 
         # Publish test framework apps. These are needed for running AL tests.
+        #
+        # Set includes:
+        #   - The "core" framework: Test Runner, Library Assert, Library Variable
+        #     Storage, Permissions Mock, Any
+        #   - The BaseApp test helper libraries: Tests-TestLibraries and
+        #     Library-NoTransactions. These ship in the BC artifact under
+        #     platform/applications/BaseApp/Test/ (no version suffix in the
+        #     filename, hence the trailing wildcard match). Real-world AL test
+        #     extensions almost always depend on at least one of these (e.g.
+        #     LibrarySales, LibraryPurchase, LibraryInventory all live in
+        #     Tests-TestLibraries). Without them in the republish set, any
+        #     consumer that declares them as a dependency hits a missing-dep
+        #     error at publish time and the publish silently fails.
+        #
+        # `sort` orders this alphabetically — Library Assert / Library Variable
+        # Storage / Library-NoTransactions land before Tests-TestLibraries in
+        # ASCII order, so transitive deps install first. Test Runner sorts
+        # before Tests-TestLibraries too.
         echo "[entrypoint] Publishing test framework..."
         find "$ARTIFACTS" -name "*.app" -type f \( \
             -name "Microsoft_Test Runner_*" -o \
             -name "Microsoft_Library Assert_*" -o \
             -name "Microsoft_Library Variable Storage_*" -o \
             -name "Microsoft_Permissions Mock_*" -o \
-            -name "Microsoft_Any_*" \
+            -name "Microsoft_Any_*" -o \
+            -name "Microsoft_Tests-TestLibraries*" -o \
+            -name "Microsoft_Library-NoTransactions*" \
         \) 2>/dev/null | sort | while read -r app; do
             NAME=$(basename "$app")
             HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
