@@ -1,5 +1,17 @@
 name: Test BC Versions
 
+# Matrix-tests every supported BC version end-to-end against a real
+# test extension (extensions/smoke-test/) by reusing the canonical
+# bc-test-from-source.yml workflow. There used to be ~150 lines of
+# inline compile/publish/test logic in this file that duplicated
+# (and silently broke) features the reusable workflow already provides:
+#  - start-do-wait parallelism (BC boots while AL compile runs)
+#  - 422-body-inspecting publish helper
+#  - shared wait-for-bc-healthy script
+#  - hard fail when TESTS_TOTAL is 0
+# After the bc-copilot-blueprint debugging session uncovered all of those,
+# the cleanest fix was to just use the reusable workflow here too.
+
 on:
   workflow_dispatch:
     inputs:
@@ -35,6 +47,15 @@ jobs:
         echo "matrix=$JSON" >> $GITHUB_OUTPUT
 
   build-image:
+    # Builds the bc-runner image from THIS commit and pushes both :latest and
+    # :${{ github.sha }}. The matrix test job below pins runner_image to the
+    # SHA tag so it tests exactly the image built from this commit, not
+    # whatever happens to be on :latest at run time.
+    #
+    # This duplicates build-image.yml on master pushes (both run on the same
+    # commit, both push the same content — race is harmless) but it's needed
+    # for PR runs where build-image.yml does NOT fire and the PR's image
+    # would otherwise be missing.
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -61,242 +82,44 @@ jobs:
         tags: |
           ${{ env.IMAGE }}:${{ github.sha }}
           ${{ env.IMAGE }}:latest
+        # Shares cache with build-image.yml via the same :cache tag.
         cache-from: type=registry,ref=${{ env.IMAGE }}:cache
         cache-to: type=registry,ref=${{ env.IMAGE }}:cache,mode=max
 
+  # ─── Matrix test: each BC version runs through the canonical reusable
+  #     workflow with the smoke test extension. The reusable workflow
+  #     handles BC startup parallelism, AL compile, publish (with
+  #     422-body-checking), test execution, and TESTS_TOTAL > 0 guard.
   test:
     needs: [prepare, build-image]
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    name: BC ${{ matrix.bc_version }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
-    name: BC ${{ matrix.bc_version }}
+    uses: ./.github/workflows/bc-test-from-source.yml
+    with:
+      bc_version: ${{ matrix.bc_version }}
+      bc_country: w1
+      bc_type: sandbox
+      test_app_dirs: extensions/smoke-test
+      codeunit_range: "70000..70001"
+      # Pin to the freshly-built image from this commit. Both build-image
+      # above and the reusable workflow's pull step look up the image by
+      # this exact tag — guarantees the matrix tests against the same
+      # image we just built, even if :latest changes underneath us.
+      runner_image: ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner:${{ github.sha }}
+      # Pin the bc-linux scripts checkout to this commit too, so a test
+      # at SHA X uses entrypoint.sh / run-tests.sh / publish-app.sh /
+      # wait-for-bc-healthy.sh from SHA X. Without this we'd test the
+      # SHA X image with master scripts.
+      bc_linux_ref: ${{ github.sha }}
 
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set lowercase image name
-      run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/bc-runner" >> $GITHUB_ENV
-
-    - name: Log in to GHCR
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Download BC artifacts
-      # No actions/cache here on purpose. The previous cache key was
-      # bc-artifacts-<version>-<hash of download-artifacts.sh>, which
-      # means a fresh BC patch release (e.g. 27.5.46862.48613 replacing
-      # 48612) would still serve the stale cached version. Tests would
-      # pass against a BC build that no longer existed in real life.
-      # Downloading on every run adds ~50s per matrix entry — cheap
-      # compared to the cost of debugging "the cache lied" failures.
-      env:
-        BC_VERSION: ${{ matrix.bc_version }}
-      run: |
-        mkdir -p ./artifact-cache/$BC_VERSION
-        scripts/download-artifacts.sh sandbox "$BC_VERSION" w1 ./artifact-cache/$BC_VERSION
-
-    - name: Setup .NET SDK and AL compiler
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '8.0.x'
-
-    - name: Install AL compiler
-      run: |
-        dotnet tool install -g Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-          --version 16.2.28.57946 2>/dev/null || true
-        echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
-
-    - name: Start BC
-      env:
-        BC_VERSION: ${{ matrix.bc_version }}
-        BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ matrix.bc_version }}
-        BC_RUNNER_IMAGE: ${{ env.IMAGE }}:${{ github.sha }}
-      run: |
-        STEP_START=$(date +%s)
-        docker compose up -d 2>&1 | tail -10
-        ./scripts/wait-for-bc-healthy.sh 30
-        echo "BUILD_DURATION=$(($(date +%s) - STEP_START))" >> $GITHUB_ENV
-
-    - name: Verify endpoints
-      env:
-        BC_VERSION: ${{ matrix.bc_version }}
-      run: |
-        AUTH="BCRUNNER:Admin123!"
-        INSTANCE="BC"
-
-        echo "=== Checking endpoints ==="
-
-        # OData
-        HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" \
-          "http://localhost:7048/$INSTANCE/ODataV4/Company" 2>/dev/null || echo "000")
-        echo "  OData:    $HTTP"
-        [ "$HTTP" = "200" ] || { echo "FAIL: OData not responding"; exit 1; }
-
-        # Dev endpoint
-        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" \
-          "http://localhost:7049/$INSTANCE/dev/packages" 2>/dev/null || echo "000")
-        echo "  Dev:      $HTTP"
-        # 400 is expected (no package specified), anything != 000 means it's up
-        [ "$HTTP" != "000" ] || { echo "FAIL: Dev endpoint not responding"; exit 1; }
-
-        # API
-        HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" \
-          "http://localhost:7052/$INSTANCE/api/v2.0/companies" 2>/dev/null || echo "000")
-        echo "  API:      $HTTP"
-
-        # Company name
-        COMPANY=$(curl -sf --max-time 10 -u "$AUTH" \
-          "http://localhost:7048/$INSTANCE/ODataV4/Company" 2>/dev/null | \
-          python3 -c "import json,sys; print(json.load(sys.stdin)['value'][0]['Name'])" 2>/dev/null)
-        echo "  Company:  $COMPANY"
-
-    - name: Prepare symbols from artifacts
-      env:
-        BC_VERSION: ${{ matrix.bc_version }}
-      run: |
-        mkdir -p symbols
-        ARTIFACT_DIR="./artifact-cache/$BC_VERSION"
-
-        echo "=== Copying symbols from cached artifacts ==="
-        # System.app from platform
-        SYSTEM_APP=$(find "$ARTIFACT_DIR/platform/ModernDev" -name "System.app" 2>/dev/null | head -1)
-        [ -n "$SYSTEM_APP" ] && cp "$SYSTEM_APP" symbols/System.app
-        echo "  System.app: $(stat -c%s symbols/System.app 2>/dev/null || echo 0) bytes"
-
-        # Extension .app files (System Application, Base Application, etc.)
-        find "$ARTIFACT_DIR/app/Extensions" -name "*.app" -exec cp {} symbols/ \; 2>/dev/null
-        echo "  Extension symbols: $(ls symbols/*.app 2>/dev/null | wc -l) files"
-
-        # Test framework .app files
-        find "$ARTIFACT_DIR/platform" -path "*testframework*" -name "*.app" -exec cp {} symbols/ \; 2>/dev/null
-        echo "  Total symbols: $(ls symbols/*.app 2>/dev/null | wc -l) files"
-
-    - name: Compile and publish smoke test
-      env:
-        BC_VERSION: ${{ matrix.bc_version }}
-      run: |
-        AUTH="BCRUNNER:Admin123!"
-        DEV="http://localhost:7049"
-
-        # Create a minimal smoke test extension
-        mkdir -p /tmp/testapp/.alpackages
-        cat > /tmp/testapp/app.json << 'APPJSON'
-        {
-          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-          "name": "Smoke Test",
-          "publisher": "BCLinux",
-          "version": "1.0.0.0",
-          "runtime": "14.0",
-          "target": "OnPrem",
-          "dependencies": [
-            { "id": "23de40a6-dfe8-4f80-80db-d70f83ce8caf",
-              "name": "Test Runner", "publisher": "Microsoft", "version": "1.0.0.0" }
-          ],
-          "idRanges": [{ "from": 70000, "to": 70001 }]
-        }
-        APPJSON
-
-        # Two codeunits with two tests each — verifies multi-codeunit test execution
-        # via the TestRunnerExtension REST API.
-        cat > /tmp/testapp/SmokeTest.Codeunit.al << 'ALCODE'
-        codeunit 70000 "BC Linux Smoke Test 1"
-        {
-            Subtype = Test;
-            TestPermissions = Disabled;
-
-            [Test]
-            procedure TestDateSanity()
-            begin
-                if Today() < 20200101D then
-                    Error('Date sanity check failed: %1', Today());
-            end;
-
-            [Test]
-            procedure TestBasicArithmetic()
-            begin
-                if 6 * 7 <> 42 then
-                    Error('Basic arithmetic failed');
-            end;
-        }
-
-        codeunit 70001 "BC Linux Smoke Test 2"
-        {
-            Subtype = Test;
-            TestPermissions = Disabled;
-
-            [Test]
-            procedure TestStringConcatenation()
-            var
-                Result: Text;
-            begin
-                Result := 'Hello' + ', ' + 'World';
-                if Result <> 'Hello, World' then
-                    Error('String concatenation failed: %1', Result);
-            end;
-
-            [Test]
-            procedure TestBooleanLogic()
-            begin
-                if not (true and not false) then
-                    Error('Boolean logic failed');
-            end;
-        }
-        ALCODE
-
-        # Copy symbols from artifacts (faster and more reliable than dev endpoint)
-        cp symbols/*.app /tmp/testapp/.alpackages/ 2>/dev/null || true
-
-        # Compile
-        echo "Compiling smoke test..."
-        AL compile "/project:/tmp/testapp" "/packagecachepath:/tmp/testapp/.alpackages" "/out:/tmp/testapp/SmokeTest.app" \
-          || { echo "FAIL: Compilation failed"; exit 1; }
-
-        # Publish via the canonical helper. The previous inline version
-        # treated ANY 422 as success, which would have silently swallowed
-        # missing-dependency errors and let the smoke test run against an
-        # empty test suite.
-        # shellcheck disable=SC1091
-        . scripts/publish-app.sh
-        echo "Publishing smoke test..."
-        bc_publish_app /tmp/testapp/SmokeTest.app "${DEV}/BC/dev" "$AUTH" || exit 1
-
-        # Extract extension ID
-        EXT_ID=$(unzip -p /tmp/testapp/SmokeTest.app NavxManifest.xml 2>/dev/null | grep -oP 'App Id="\K[^"]+' || true)
-        echo "SMOKE_TEST_EXT_ID=$EXT_ID" >> $GITHUB_ENV
-
-    - name: Run smoke test
-      env:
-        BC_VERSION: ${{ matrix.bc_version }}
-      run: |
-        echo "Running tests (2 codeunits × 2 methods via REST API)..."
-        ./scripts/run-tests.sh \
-          --app /tmp/testapp/SmokeTest.app \
-          --codeunit-range 70000..70001 \
-          --timeout 10
-
-    - name: Summary
-      if: always()
-      env:
-        BC_VERSION: ${{ matrix.bc_version }}
-      run: |
-        echo "=== BC v$BC_VERSION ==="
-        echo "Build + start: ${BUILD_DURATION:-n/a}s"
-        echo ""
-        echo "=== Startup phase timing ==="
-        docker compose logs bc 2>&1 | grep "\[entrypoint\]" | grep -E "\[([0-9]+s)\]|Step [0-9]|NST startup|Republished|Total startup|Cleared|Generating|CRONUS|Artifacts already" || true
-        echo ""
-        echo "=== Last entrypoint messages ==="
-        docker compose logs bc 2>&1 | grep "\[entrypoint\]" | tail -10
-
-  # Exercises the container's own artifact download path (no pre-cached artifacts).
-  # This verifies the feature works and lets us measure in-container download speed
-  # directly so it can be compared against the host-side download used by test jobs.
-  # Runs once (BC 27.5) in parallel with the main matrix.
+  # Exercises the container's own artifact download path (no pre-cached
+  # artifacts). Verifies the in-container download feature and lets us
+  # measure download speed directly. Runs once (BC 27.5) in parallel
+  # with the main matrix. Doesn't fit the reusable workflow pattern
+  # because the reusable workflow always pre-downloads artifacts on
+  # the host.
   test-container-download:
     needs: [build-image]
     runs-on: ubuntu-latest
@@ -319,14 +142,14 @@ jobs:
     - name: Start BC (in-container artifact download)
       # BC_ARTIFACTS_DIR is intentionally NOT set so docker-compose uses a named
       # volume (bc-artifacts) which starts empty — forcing the entrypoint to
-      # download artifacts itself.  This validates the container download feature.
+      # download artifacts itself. This validates the container download feature.
       env:
         BC_VERSION: "27.5"
         BC_RUNNER_IMAGE: ${{ env.IMAGE }}:${{ github.sha }}
       run: |
         STEP_START=$(date +%s)
         docker compose up -d 2>&1 | tail -10
-        # Use the shared healthcheck script. The 30-min budget covers the
+        # Use the shared healthcheck script. 30-min budget covers the
         # in-container artifact download (~3 min) + BC boot (~3-5 min).
         ./scripts/wait-for-bc-healthy.sh 30
         echo "TOTAL_DURATION=$(($(date +%s) - STEP_START))" >> $GITHUB_ENV

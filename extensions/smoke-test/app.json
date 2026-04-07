@@ -1,0 +1,23 @@
+{
+  "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "name": "BC Linux Smoke Test",
+  "publisher": "BCLinux",
+  "version": "1.0.0.0",
+  "brief": "Smoke test for the bc-linux substrate. Two codeunits with two trivial tests each. Used by the test-versions matrix workflow to verify each BC version end-to-end via the reusable bc-test-from-source workflow.",
+  "runtime": "14.0",
+  "target": "OnPrem",
+  "dependencies": [
+    {
+      "id": "23de40a6-dfe8-4f80-80db-d70f83ce8caf",
+      "name": "Test Runner",
+      "publisher": "Microsoft",
+      "version": "1.0.0.0"
+    }
+  ],
+  "idRanges": [
+    {
+      "from": 70000,
+      "to": 70001
+    }
+  ]
+}
