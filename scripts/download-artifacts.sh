@@ -28,20 +28,44 @@ elif [ $# -eq 4 ]; then
     BASE_URL="https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net"
 
     # Resolve short version (e.g. "27.5") to full version (e.g. "27.5.46862.48004")
-    # by listing available blobs in the Azure CDN storage container
+    # by listing available blobs in the Azure CDN storage container.
+    #
+    # IMPORTANT: AFD edges have been observed returning STALE/WRONG cached
+    # responses for the list-blobs API on a non-deterministic basis. The same
+    # query (prefix=27.5) intermittently returns 27.0/27.1/27.2 entries from
+    # different edges. We validate the resolved version actually starts with
+    # the requested prefix and retry up to 3 times with cache-busters before
+    # giving up. See microsoft/navcontainerhelper#4119.
     if ! echo "$BC_VERSION" | grep -qP '^\d+\.\d+\.\d+'; then
         echo "[artifacts] Resolving version $BC_VERSION..."
         T_RESOLVE=$(_ms)
-        RESOLVED=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}" 2>/dev/null | \
-            grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -1 | cut -d/ -f1)
+        REQUESTED_PREFIX="$BC_VERSION"
+        RESOLVED=""
+        for attempt in 1 2 3; do
+            # Cache buster on retries to dodge a poisoned AFD edge response.
+            CACHE_BUSTER=""
+            [ $attempt -gt 1 ] && CACHE_BUSTER="&_=$(date +%s%N)"
+            CANDIDATE=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${REQUESTED_PREFIX}.${CACHE_BUSTER}" 2>/dev/null | \
+                grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -1 | cut -d/ -f1)
+            if [ -n "$CANDIDATE" ] && echo "$CANDIDATE" | grep -q "^${REQUESTED_PREFIX}\."; then
+                RESOLVED="$CANDIDATE"
+                break
+            fi
+            if [ -n "$CANDIDATE" ]; then
+                echo "[artifacts] WARN: attempt $attempt — resolver returned '$CANDIDATE' which does not start with '${REQUESTED_PREFIX}.' (likely a stale AFD cache); retrying..."
+            else
+                echo "[artifacts] WARN: attempt $attempt — empty resolver response; retrying..."
+            fi
+            sleep 2
+        done
         if [ -z "$RESOLVED" ]; then
-            echo "[artifacts] ERROR: Could not resolve version $BC_VERSION"
-            echo "[artifacts] Listing available versions..."
-            curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${BC_VERSION}" 2>/dev/null | \
-                grep -oP '<Name>\K[^<]+' | head -10
+            echo "[artifacts] ERROR: Could not resolve version $REQUESTED_PREFIX after 3 attempts"
+            echo "[artifacts] Available versions starting with '$REQUESTED_PREFIX' (if any):"
+            curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${REQUESTED_PREFIX}." 2>/dev/null | \
+                grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -10
             exit 1
         fi
-        echo "[artifacts] Resolved: $BC_VERSION → $RESOLVED ($(( $(_ms) - T_RESOLVE ))ms)"
+        echo "[artifacts] Resolved: $REQUESTED_PREFIX → $RESOLVED ($(( $(_ms) - T_RESOLVE ))ms)"
         BC_VERSION="$RESOLVED"
     fi
 
