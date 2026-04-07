@@ -23,7 +23,7 @@
 /// 3. GET to check Status and LastResult
 /// 4. Query LastExecutionUTC for execution timestamp
 /// </summary>
-table 50003 "Codeunit Run Request"
+table 99903 "Codeunit Run Request"
 {
     Caption = 'Codeunit Run Request';
     DataClassification = SystemMetadata;
@@ -157,7 +157,7 @@ table 50003 "Codeunit Run Request"
 /// - DELETE(id): Remove execution request
 /// - POST(id)/Microsoft.NAV.runCodeunit: Execute the codeunit (service-enabled action)
 /// </summary>
-page 50002 "Codeunit Run Requests"
+page 99902 "Codeunit Run Requests"
 {
     PageType = API;
     Caption = 'Codeunit Run Requests';
@@ -324,7 +324,7 @@ page 50002 "Codeunit Run Requests"
         Commit();
 
         AllSuccess := true;
-        SuiteRunner.InitSuite('LINUX'); // Uses TestRunnerAPI (50003) as runner — logs to Log Table
+        SuiteRunner.InitSuite('LINUX'); // Uses TestRunnerAPI (99903) as runner — logs to Log Table
 
         if Rec.CodeunitIds <> '' then begin
             // Batch mode: clear Log Table before starting so we get clean results

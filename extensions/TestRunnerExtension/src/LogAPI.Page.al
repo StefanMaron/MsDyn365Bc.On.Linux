@@ -1,7 +1,7 @@
 /// <summary>
 /// API Page for Log Table - Exposes test execution logs via OData
 /// </summary>
-page 50003 "Log Entries API"
+page 99903 "Log Entries API"
 {
     PageType = API;
     APIPublisher = 'custom';

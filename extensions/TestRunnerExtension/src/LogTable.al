@@ -21,7 +21,7 @@
 /// - No automatic deletion - maintains complete audit history
 /// - Can be queried via standard BC list pages or OData endpoints
 /// </summary>
-table 50002 "Log Table"
+table 99902 "Log Table"
 {
     DataClassification = ToBeClassified;
 

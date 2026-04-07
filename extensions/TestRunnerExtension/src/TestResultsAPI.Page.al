@@ -2,7 +2,7 @@
 /// API page exposing Test Method Line results for OData reading.
 /// Used by the WebSocket test runner to read results after test execution.
 /// </summary>
-page 50006 "Test Results API"
+page 99906 "Test Results API"
 {
     PageType = API;
     APIPublisher = 'custom';

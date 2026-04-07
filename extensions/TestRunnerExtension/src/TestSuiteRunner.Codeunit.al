@@ -8,7 +8,7 @@
 /// - Supports disabling individual test methods
 /// - Results tracked in Test Method Line table
 /// </summary>
-codeunit 50004 "Test Suite Runner"
+codeunit 99904 "Test Suite Runner"
 {
     Permissions = tabledata "AL Test Suite" = rimd,
                   tabledata "Test Method Line" = rimd;
@@ -31,10 +31,10 @@ codeunit 50004 "Test Suite Runner"
         if not ALTestSuite.Get(SuiteName) then begin
             ALTestSuite.Init();
             ALTestSuite.Name := SuiteName;
-            ALTestSuite."Test Runner Id" := 50003; // TestRunnerAPI — logs results to Log Table via OnAfterTestRun
+            ALTestSuite."Test Runner Id" := 99903; // TestRunnerAPI — logs results to Log Table via OnAfterTestRun
             ALTestSuite.Insert(true);
         end else begin
-            ALTestSuite."Test Runner Id" := 50003;
+            ALTestSuite."Test Runner Id" := 99903;
             ALTestSuite.Modify(true);
         end;
 

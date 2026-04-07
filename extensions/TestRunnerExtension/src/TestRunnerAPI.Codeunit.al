@@ -19,7 +19,7 @@
 /// - Exposed via API pages (page50100.al and runnertable.al)
 /// - Can be called directly from AL code or via REST API endpoints
 /// </summary>
-codeunit 50003 "Test Runner API"
+codeunit 99903 "Test Runner API"
 {
     Subtype = TestRunner;
     TableNo = "Test Method Line"; // Required for suite runner: BC passes each codeunit line to OnRun

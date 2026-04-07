@@ -1,14 +1,14 @@
 /// <summary>
 /// WebSocket Test Runner Page — designed for the WebSocket client services runner.
 ///
-/// Opens via ws://host:7085 → OpenForm(50005). The WebSocket runner sets CodeunitIds,
+/// Opens via ws://host:7085 → OpenForm(99905). The WebSocket runner sets CodeunitIds,
 /// calls AddCodeunits to populate the suite, then calls RunNextCodeunit in a loop,
 /// reading TestResultJson after each call.
 ///
 /// This avoids the complexity of page 130455 (Command Line Test Tool) which requires
 /// keyboard mapping P/Invoke stubs and complex page state that doesn't work on Linux.
 /// </summary>
-page 50005 "WS Test Runner"
+page 99905 "WS Test Runner"
 {
     PageType = Card;
     ApplicationArea = All;

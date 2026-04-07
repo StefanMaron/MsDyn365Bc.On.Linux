@@ -1,4 +1,4 @@
-permissionset 50005 "Test Runner Exec"
+permissionset 99905 "Test Runner Exec"
 {
     Assignable = true;
     Caption = 'Test Runner Exec';
