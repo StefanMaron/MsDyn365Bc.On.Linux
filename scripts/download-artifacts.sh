@@ -34,35 +34,56 @@ elif [ $# -eq 4 ]; then
     # responses for the list-blobs API on a non-deterministic basis. The same
     # query (prefix=27.5) intermittently returns 27.0/27.1/27.2 entries from
     # different edges. We validate the resolved version actually starts with
-    # the requested prefix and retry up to 3 times with cache-busters before
-    # giving up. See microsoft/navcontainerhelper#4119.
+    # the requested prefix and retry several times with alternating URL
+    # forms + cache-busters before giving up. See navcontainerhelper#4119.
+    #
+    # To skip the resolver entirely, pass a fully-qualified version like
+    # "27.5.46862.48612" via BC_VERSION — the regex below sees three parts
+    # and goes straight to the download.
     if ! echo "$BC_VERSION" | grep -qP '^\d+\.\d+\.\d+'; then
         echo "[artifacts] Resolving version $BC_VERSION..."
         T_RESOLVE=$(_ms)
         REQUESTED_PREFIX="$BC_VERSION"
         RESOLVED=""
-        for attempt in 1 2 3; do
-            # Cache buster on retries to dodge a poisoned AFD edge response.
-            CACHE_BUSTER=""
-            [ $attempt -gt 1 ] && CACHE_BUSTER="&_=$(date +%s%N)"
-            CANDIDATE=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${REQUESTED_PREFIX}.${CACHE_BUSTER}" 2>/dev/null | \
-                grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -1 | cut -d/ -f1)
+        # Six attempts: alternate prefix forms (with/without trailing dot,
+        # with /), each with a fresh cache-buster, with exponential-ish
+        # backoff. Total worst-case wait ~60s before failing hard.
+        ATTEMPT=0
+        BACKOFFS="0 3 5 10 15 25"
+        for backoff in $BACKOFFS; do
+            ATTEMPT=$((ATTEMPT + 1))
+            [ $backoff -gt 0 ] && sleep $backoff
+            # Cycle prefix variants on each attempt to dodge one stale edge
+            # response and potentially hit a different cached entry.
+            case $((ATTEMPT % 3)) in
+                1) PREFIX_VARIANT="${REQUESTED_PREFIX}." ;;
+                2) PREFIX_VARIANT="${REQUESTED_PREFIX}/" ;;
+                0) PREFIX_VARIANT="${REQUESTED_PREFIX}"  ;;
+            esac
+            CACHE_BUSTER="&_=$(date +%s%N)"
+            CANDIDATE=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${PREFIX_VARIANT}${CACHE_BUSTER}" 2>/dev/null | \
+                grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | grep "^${REQUESTED_PREFIX}\." | sort -V | tail -1 | cut -d/ -f1)
             if [ -n "$CANDIDATE" ] && echo "$CANDIDATE" | grep -q "^${REQUESTED_PREFIX}\."; then
                 RESOLVED="$CANDIDATE"
                 break
             fi
-            if [ -n "$CANDIDATE" ]; then
-                echo "[artifacts] WARN: attempt $attempt — resolver returned '$CANDIDATE' which does not start with '${REQUESTED_PREFIX}.' (likely a stale AFD cache); retrying..."
+            # Diagnostic: what did the response look like? Capture the raw
+            # tail-1 without the prefix filter so we can see if AFD is just
+            # serving the wrong major.
+            RAW=$(curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${PREFIX_VARIANT}${CACHE_BUSTER}.diag" 2>/dev/null | \
+                grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -1 | cut -d/ -f1)
+            if [ -n "$RAW" ]; then
+                echo "[artifacts] WARN: attempt $ATTEMPT (prefix='${PREFIX_VARIANT}') — AFD returned '$RAW' (wrong major); retrying..."
             else
-                echo "[artifacts] WARN: attempt $attempt — empty resolver response; retrying..."
+                echo "[artifacts] WARN: attempt $ATTEMPT (prefix='${PREFIX_VARIANT}') — empty/error response; retrying..."
             fi
-            sleep 2
         done
         if [ -z "$RESOLVED" ]; then
-            echo "[artifacts] ERROR: Could not resolve version $REQUESTED_PREFIX after 3 attempts"
-            echo "[artifacts] Available versions starting with '$REQUESTED_PREFIX' (if any):"
-            curl -sf "$BASE_URL/${BC_TYPE}?restype=container&comp=list&prefix=${REQUESTED_PREFIX}." 2>/dev/null | \
-                grep -oP '<Name>\K[^<]+' | grep "/${BC_COUNTRY}$" | sort -V | tail -10
+            echo "[artifacts] ERROR: Could not resolve version $REQUESTED_PREFIX after $ATTEMPT attempts."
+            echo "[artifacts] This is the AFD cache poisoning issue described in"
+            echo "[artifacts] microsoft/navcontainerhelper#4119. Workaround: pin BC_VERSION"
+            echo "[artifacts] to a fully-qualified version, e.g.:"
+            echo "[artifacts]   BC_VERSION=27.5.46862.48612 docker compose up -d --wait"
             exit 1
         fi
         echo "[artifacts] Resolved: $REQUESTED_PREFIX → $RESOLVED ($(( $(_ms) - T_RESOLVE ))ms)"
