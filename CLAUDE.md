@@ -85,7 +85,7 @@ docker compose build bc && docker compose up -d --wait
 
 ### Key invariants worth remembering
 
-- **Do NOT enable Server GC** (`DOTNET_gcServer`). It breaks the BC API endpoint. The `docker-compose.yml` comment says so explicitly; the `DOTNET_TieredCompilation` / `DOTNET_TC_QuickJitForLoops` env vars are exposed for tuning but server GC is off-limits.
+- **.NET runtime tuning.** The entrypoint sets `DOTNET_gcServer=1` (Server GC, better throughput for the parallel Roslyn compile during NST startup — contrary to older PERFORMANCE-IDEAS.md warnings, this works fine in current BC 27.x) and `DOTNET_TieredCompilation=0` (tier-0 disabled so JMP hooks don't get overwritten by Tier 1 recompilation — the Watson crash handler and several other patches rely on hooks staying in place). Additional tuning knobs (`DOTNET_ReadyToRun`, `DOTNET_GCRetainVM`, `DOTNET_GCConserveMemory`, `DOTNET_GCHeapCount`, `DOTNET_GCNoAffinitize`) are exposed via docker-compose passthroughs for A/B experiments without rebuilding the image — see the `.NET runtime tuning` block in `docker-compose.yml`. Tested 2026-04-08: `DOTNET_ReadyToRun=1` and `DOTNET_GCRetainVM=1` both individually made cold boot ~5s slower on local, not faster. Not adopted.
 - **`/bc/service` is a volume**: edits to BC DLLs persist across container restarts, and the entrypoint guards `Step 2` / `Step 2b` with `[ -f ... ]` checks. To force re-patching, `docker compose down -v` (or delete the `bc-service` volume).
 - **`Add-ins` vs `Add-Ins`**: Linux is case-sensitive. The entrypoint renames the directory; never refer to the lowercase form in new patches.
 - **Patches that depend on assembly load order** (e.g. #18 `SetupSideServices` must run before `Main()` calls it) live in `StartupHook.Initialize()`, not in the per-assembly load callback. Adding a new patch in the wrong place will silently fail because the type isn't loaded yet — or, worse, succeed once and then break on the next BC update because load order shifted.
@@ -212,6 +212,89 @@ hardened. Don't undo them without understanding why they exist.
   an image namespace nobody used. The mismatch was invisible for
   weeks. Don't move this without auditing every consumer's
   `runner_image` default.
+
+## Custom license override (ISV / developer license)
+
+Added in the 2026-04-08 session. Anyone touching the license import path
+in `scripts/entrypoint.sh`, the license mount in `docker-compose.yml`, or
+the license staging step in the reusable workflows should read this.
+
+### The problem
+
+By default the entrypoint imports `Cronus.bclicense` from the BC artifact
+(`$ARTIFACTS/app/Cronus.bclicense` — path comes from `manifest.json`'s
+`licenseFile` field). ISVs need their own developer/partner license,
+and the legacy workflow was: boot BC with the default license → connect
+to SQL and manually UPDATE `[$ndo$dbproperty].license` → restart NST so
+it picks up the new license. That's an extra ~3 minutes per CI run on
+cold boot, paid on every container recreation.
+
+### The fix
+
+`BC_LICENSE_FILE` env var: when set and points to a regular file inside
+the container, the entrypoint imports THAT file via SQL `OPENROWSET BULK`
+during Step 3 (DB setup) — **before NST starts**. NST comes up with the
+right license on first boot. Falls back to the manifest default when the
+env var is unset or the file doesn't exist (with a WARN log line).
+
+`BC_LICENSE_HOST_PATH` env var + docker-compose bind mount: set this to
+the absolute path of a `.bclicense` file on the host, and it gets
+bind-mounted at `/bc/custom-license.bclicense` inside the container. The
+caller then sets `BC_LICENSE_FILE=/bc/custom-license.bclicense` to wire
+the two together. When unset, the mount source defaults to `/dev/null`,
+which becomes a character device inside the container — the entrypoint's
+`[ -f ]` check correctly skips it and the default Cronus license is used.
+No effect when unset.
+
+### CRITICAL: the mount must be on BOTH the bc AND sql services
+
+The license import runs `UPDATE [$ndo$dbproperty] SET [license] =
+(SELECT BulkColumn FROM OPENROWSET(BULK '$FILE', SINGLE_BLOB) AS f)`.
+`OPENROWSET BULK` reads the file from **SQL Server's** filesystem, not
+bc's. This is the reason the default Cronus license works at all: the
+`bc-artifacts` named volume is mounted into both services (ro on sql,
+rw on bc), so both see `/bc/artifacts/app/Cronus.bclicense`. The custom
+license must follow the same pattern. The first implementation mounted
+only on bc and hit `Cannot bulk load ... file does not exist or you
+don't have file access rights`. Don't make that mistake again — if you
+add any new file import via `OPENROWSET BULK`, it needs to be visible
+to the sql service, not just bc.
+
+### Workflow integration
+
+The reusable workflows (`bc-test-from-source.yml`, `bc-test-prebuilt.yml`)
+declare an optional `secrets.bc_license` on their `workflow_call`
+interface. Consumers base64-encode their license and pass it:
+
+```yaml
+secrets:
+  bc_license: ${{ secrets.BC_LICENSE }}
+```
+
+The workflow's "Stage ISV license (if provided)" step is guarded by
+`if: ${{ secrets.bc_license != '' }}`. When the secret is set, it
+decodes the base64 to `$RUNNER_TEMP/bc-license.bclicense`, `chmod 644`
+(so the sql container's mssql uid can read it), and writes both env
+vars to `$GITHUB_ENV`. docker-compose sees the two vars in the shell
+environment of the next step and does the bind mount accordingly.
+
+The inlined example workflows (both github-workflows/ and
+azure-pipelines/) have the same staging pattern inline. Azure Pipelines
+uses a secret pipeline variable named `BC_LICENSE_B64` instead of the
+GitHub secrets block.
+
+### Things not to break
+
+- The fallback to the manifest default must remain intact — when
+  `BC_LICENSE_FILE` is unset the existing Cronus flow continues to
+  work. The unified "LICENSE_TO_IMPORT" variable handles both cases.
+- The base64-decode path uses `printf '%s' "$BC_LICENSE_B64" | base64 -d`
+  — not `echo` (echo adds a trailing newline on some shells, which
+  corrupts binary decode). Don't "simplify" this.
+- The `chmod 644` on the decoded file is required; without it the mssql
+  uid inside sql can't read the bind-mounted file and OPENROWSET fails.
+- When adding any further file imports via OPENROWSET BULK, remember
+  the sql-container mount requirement (see "CRITICAL" above).
 
 ## Relationship to `PipelinePerformanceComparison`
 
