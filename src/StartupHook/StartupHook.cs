@@ -69,6 +69,28 @@ using System.Threading.Tasks;
 /// </summary>
 internal class StartupHook
 {
+    // Diagnostic gate: BC_DISABLE_PATCHES is a comma-separated list of patch names
+    // (e.g. "14,15,15a,15b,checkfile") that are skipped at apply time. Used to bisect
+    // which Cecil patches cause AL→C# emission drift that defeats NST's R2R pass-through
+    // gate for Base App. Empty/unset = all patches active (production behavior).
+    private static readonly HashSet<string> _disabledPatches =
+        new HashSet<string>(
+            (Environment.GetEnvironmentVariable("BC_DISABLE_PATCHES") ?? "")
+                .Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim().ToLowerInvariant()),
+            StringComparer.OrdinalIgnoreCase);
+
+    private static bool IsPatchDisabled(string name)
+    {
+        if (_disabledPatches.Count == 0) return false;
+        bool disabled = _disabledPatches.Contains(name.ToLowerInvariant());
+        if (disabled)
+        {
+            Console.Error.WriteLine($"[StartupHook] DIAGNOSTIC: patch '{name}' SKIPPED (BC_DISABLE_PATCHES)");
+        }
+        return disabled;
+    }
+
     private static bool _patchedLanguage;
     private static bool _patchedNcl;
     private static bool _patchedTypes;
@@ -262,21 +284,10 @@ internal class StartupHook
         // BC's assembly scanner produces empty-string paths from some probing directories
         // on Linux. GetAssemblyNameFromPath catches most exceptions but NOT
         // Mono.ArgumentNullOrEmptyException from CheckFileName.
+        // Routed through PatchCecilCheckFileName so the IsPatchDisabled gate applies here too.
         if (name == "Mono.Cecil")
         {
-            try
-            {
-                var mixinType = args.LoadedAssembly.GetType("Mono.Cecil.Mixin");
-                var checkFn = mixinType?.GetMethod("CheckFileName",
-                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
-                if (checkFn != null)
-                {
-                    var noop = typeof(StartupHook).GetMethod(nameof(CheckFileNameNoop),
-                        BindingFlags.Static | BindingFlags.NonPublic);
-                    ApplyJmpHook(checkFn, noop!, "Mono.Cecil.Mixin.CheckFileName");
-                }
-            }
-            catch { }
+            PatchCecilCheckFileName(args.LoadedAssembly);
         }
 
         // Re-apply encryption bypass after Main() overrides it.
@@ -602,6 +613,7 @@ internal class StartupHook
     // ========================================================================
     private static void PatchCecilTypeForwarding(Assembly codeAnalysisAsm)
     {
+        if (IsPatchDisabled("14")) return;
         try
         {
             var loaderType = codeAnalysisAsm.GetType(
@@ -639,6 +651,7 @@ internal class StartupHook
 
     private static void PatchCecilCheckFileName(Assembly cecilAsm)
     {
+        if (IsPatchDisabled("checkfile")) return;
         try
         {
             var mixinType = cecilAsm.GetType("Mono.Cecil.Mixin");
@@ -682,6 +695,7 @@ internal class StartupHook
 
     private static void PatchAssemblyProbing(Assembly navNclAsm)
     {
+        if (IsPatchDisabled("15") || IsPatchDisabled("15b")) return;
         try
         {
             // Hook B: Filter well-known assemblies in NavAppCompilationAssemblyLocator
@@ -1593,7 +1607,8 @@ internal class StartupHook
             // NavAutomationHelper.GetGlobalAssemblyCacheDirectories() adds typeof(object).Assembly.Location
             // directory (the .NET shared runtime dir) to probing paths. On Linux this contains R2R DLLs
             // that crash Cecil. Hook it to return empty so only Add-Ins is probed.
-            Type? navAutoHelper = navTypes.GetType("Microsoft.Dynamics.Nav.Types.NavAutomationHelper");
+            Type? navAutoHelper = IsPatchDisabled("15a") ? null
+                : navTypes.GetType("Microsoft.Dynamics.Nav.Types.NavAutomationHelper");
             if (navAutoHelper != null)
             {
                 var getGacDirs = navAutoHelper.GetMethod("GetGlobalAssemblyCacheDirectories",

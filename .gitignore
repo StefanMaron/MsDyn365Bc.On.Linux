@@ -24,3 +24,8 @@ artifacts/
 
 # TestRunner WebSocket client (deprecated)
 tools/TestRunner/lib/
+
+# Local investigation snapshots (raw logs etc. preserved for reference,
+# not for the repo). See MICROSOFT-FEEDBACK.md investigation log for what
+# lives in here.
+.snapshots/
