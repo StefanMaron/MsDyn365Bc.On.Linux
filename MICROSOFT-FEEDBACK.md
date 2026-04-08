@@ -363,16 +363,91 @@ upstream fix, broader benefit.
 
 ## Investigation log
 
-- **2026-04-08** — R2R drift investigation. Cecil patches ruled out
-  as cause via empirical bisect (Run C vs Run D, identical Base App
+- **2026-04-08 (early)** — R2R drift investigation. Cecil patches ruled
+  out as cause via empirical bisect (Run C vs Run D, identical Base App
   compile times). Decompiled `NavAppPackageLoader.ValidatePublishedArtifacts`
   in `Microsoft.Dynamics.Nav.Ncl.dll` and identified
   `ValidateOneApplicationMultipleAssemblyScenario` as the validation
   gate. Confirmed via byte comparison that System App pre-seed is
   byte-identical (works) and Base App is not (fails). Documented
-  findings in this file.
+  in Finding 1 above.
 
-  Raw measurement data at `/tmp/bc-linux-measurement/runA-bc.log`,
-  `runB-bc.log`, `runC-bc.log`, `runD-bc.log` (local-only, not
-  committed; copy out before machine reboot if needed for the
-  formal report).
+- **2026-04-08 (later)** — Tier 1 + Tier 2 optimization sweep (no
+  caching, no Bypass B). Local cold-boot baseline 160s wall, 105s NST,
+  140s entrypoint. Targeted the install-for-tenant tail and the
+  healthcheck poll slack.
+
+  Wins:
+    - Healthcheck interval 15s → 5s in docker-compose.yml: -10s wall
+      (slack between Ready-for-extensions and docker reporting healthy
+      collapsed from 20s → 10s). Reliable, no behavioral change.
+    - SchemaUpdateMode forcesync → synchronize for install-for-tenant
+      POSTs: neutral wall-clock but strictly safer (only sync when
+      needed).
+
+  Negative results worth not retrying:
+    - Client-side parallel POSTs within dependency layers: NST's dev
+      endpoint serializes publishes server-side. Layered concurrency=4
+      took the same ~27s as serial. Documented in entrypoint.sh comment
+      so future investigators don't waste time.
+    - "Skip-if-already-installed" precheck for install-for-tenant: no
+      effect in our config because the stuck-publish wipe always runs
+      first, leaving 0 keep-set apps tenant-installed at the precheck
+      point.
+    - Cecil patch bisect (Run D, BC_DISABLE_PATCHES=14,15,15a,15b,checkfile):
+      Base App compile times identical with patches off. Cecil patches
+      are NOT the source of the AL→C# emission drift that defeats the
+      R2R pass-through gate. They affect a different code path (post-NST
+      AL extension publishing via dev endpoint, where they remain
+      essential — disabling them produces AL0185 errors).
+    - .NET runtime tuning experiments (DOTNET_ReadyToRun=1, DOTNET_GCRetainVM=1):
+      both individually made things ~5s slower, not faster. Not committed.
+      Other tuning vars (GCConserveMemory, GCHeapCount, GCNoAffinitize)
+      remain available via the docker-compose.yml passthroughs added
+      today, but not yet tested.
+
+  **Cold boot dotnet-trace profile (T2a)** — captured 197 MB nettrace
+  via `DOTNET_DiagnosticPorts=...,suspend` so the trace covers from t=0.
+  Top inclusive-time consumers across all threads:
+    - 5564.77s `UNMANAGED_CODE_TIME` — mostly worker thread idle waiting
+      for work, plus SQL/file I/O during DB restore. This is the ~92%
+      of 6027s total cumulative thread-time.
+    - 463.10s `CPU_TIME` — actual CPU work, the other 8%.
+    - 1475s inclusive `Microsoft.CodeAnalysis.CSharp.MethodCompiler.CompileNamespace`
+      and ~400s in `AssembliesClrTypeRetriever.PopulateGeneratedAssemblyCacheAsyncImpl`
+      and `CSharpCompiler.CompileCSharpFilesAsync` — the Base App Roslyn
+      compile path. Dominates everything else by a wide margin.
+    - 165s in `SimpleMerkleTree.IsValid` + `SHA256.HashData` — the
+      validation gate from Finding 1 actually shows up as a measurable
+      CPU consumer (~3% of total). All of this would disappear if
+      Microsoft fixed the upstream emitter or shipped the C# source
+      with the .app.
+
+  **Critically: ZERO time attributed to Watson, Geneva ETW, EventLog
+  WriteEntry, Reporting Service, AzureAD Graph, ShowForm, OpenTelemetry,
+  or any of the other Windows-specific subsystems we patch.** The
+  existing StartupHook patches are extremely effective. T2b ("skip more
+  subsystem init") found nothing actionable to add.
+
+  Implication for the formal Microsoft report: Finding 2's request for
+  feature flags would still be valuable for *maintenance burden*
+  (patches break on each NST refactor), but it would NOT yield
+  meaningful wall-clock improvements on cold boot — the patches we
+  already have are already saving the wall time. The lever for further
+  cold-boot improvement is exclusively Finding 1 (the AL→C# emitter
+  drift), and it's a single bottleneck that swamps everything else.
+
+  Cumulative improvement: **160s → 150s** (-10s, all from T1c). Not
+  the dramatic improvement initially hoped for, but the *negative*
+  results from this sweep are themselves a strong signal: the cold
+  boot is essentially as fast as it can be without addressing the
+  R2R/emitter drift upstream or accepting Bypass B's risk.
+
+  Profiling infrastructure committed in the same session (BC_PROFILE_NST
+  env var + docker-compose passthrough) so the profile can be reproduced
+  by anyone with one env var.
+
+  Raw measurement data at `.snapshots/r2r-investigation-2026-04-08/`
+  (gitignored) and the full cold-boot trace at
+  `/tmp/bc-linux-measurement/profile/full-cold.speedscope.json` (local
+  only).
