@@ -629,20 +629,44 @@ log_step "Pre-seeding R2R extension DLL cache..."
 # BC's NST compiles all published extensions from AL source on first startup (~190s without pre-seeding).
 # R2R (.app) packages already contain the pre-compiled DLLs under publishedartifacts/.
 # By extracting them into the assembly cache before NST starts, the NST finds them and can skip most
-# of that work — reducing first-start time from ~190s to ~110s overall (AL compilation sub-phase drops to <10s).
+# of that work — reducing first-start time dramatically (Base App alone is ~5 chunks × 40-80s of compile).
+#
+# IMPORTANT — instance name mismatch: CustomSettings.config has ServerInstance="BC",
+# but NST itself ignores that for the assembly cache path and writes to the literal
+# default name "MicrosoftDynamicsNavServer$MicrosoftDynamicsNavServer/...". Confirmed by
+# inspecting a running container: the 5 Base App R2R chunks (hashes 25ABE184, 23B1F2D7,
+# 923623F9, 1A31B51E, 65AD4BBF) get compiled by NST into the $MicrosoftDynamicsNavServer
+# directory regardless of what the config says. We pre-seed BOTH paths to be safe — if
+# a future BC version honors ServerInstance for the cache path, we're already covered.
+# Hardlinking between them would be cheaper but feels fragile (different inode under any
+# tooling that resolves links); we just write to both. Cost is ~233 MB extra disk on
+# tmpfs/btrfs for one boot — negligible vs the wall-clock savings.
 PLATFORM_VER=$(python3 -c "import json; print(json.load(open('$ARTIFACTS/app/manifest.json'))['platform'])" 2>/dev/null || true)
 if [ -n "$PLATFORM_VER" ]; then
     INSTANCE=$(grep -oP 'ServerInstance" value="\K[^"]+' "$SERVICE_DIR/CustomSettings.config" 2>/dev/null || echo "BC")
-    ASSEMBLY_CACHE="/usr/share/Microsoft/Microsoft Dynamics NAV/$NAV_DIR/Server/MicrosoftDynamicsNavServer\$${INSTANCE}/apps/assembly/release/${PLATFORM_VER}_1"
-    mkdir -p "$ASSEMBLY_CACHE"
+    SERVER_BASE="/usr/share/Microsoft/Microsoft Dynamics NAV/$NAV_DIR/Server"
+    # Primary = NST's actual path. Secondary = configured-instance path (in case a future
+    # BC build starts honoring it). Dedupe if INSTANCE happens to be MicrosoftDynamicsNavServer.
+    ASSEMBLY_CACHE_PRIMARY="$SERVER_BASE/MicrosoftDynamicsNavServer\$MicrosoftDynamicsNavServer/apps/assembly/release/${PLATFORM_VER}_1"
+    ASSEMBLY_CACHE_ALT="$SERVER_BASE/MicrosoftDynamicsNavServer\$${INSTANCE}/apps/assembly/release/${PLATFORM_VER}_1"
+    ASSEMBLY_CACHES="$ASSEMBLY_CACHE_PRIMARY"
+    if [ "$ASSEMBLY_CACHE_ALT" != "$ASSEMBLY_CACHE_PRIMARY" ]; then
+        ASSEMBLY_CACHES="$ASSEMBLY_CACHE_PRIMARY|$ASSEMBLY_CACHE_ALT"
+    fi
+    # mkdir all targets up front so the Python helper doesn't need to.
+    IFS='|' read -ra _CACHE_LIST <<< "$ASSEMBLY_CACHES"
+    for c in "${_CACHE_LIST[@]}"; do mkdir -p "$c"; done
     R2R_SEEDED=0
     R2R_FILTERED=0
     R2R_FAILED=0
     while IFS= read -r -d '' appfile; do
-        python3 - "$appfile" "$ASSEMBLY_CACHE" "${BC_KEEP_APP_IDS_FOR_R2R:-}" << 'PYEOF' && R2R_SEEDED=$((R2R_SEEDED + 1)) || { [ $? -eq 2 ] && R2R_FILTERED=$((R2R_FILTERED + 1)) || R2R_FAILED=$((R2R_FAILED + 1)); }
+        python3 - "$appfile" "$ASSEMBLY_CACHES" "${BC_KEEP_APP_IDS_FOR_R2R:-}" << 'PYEOF' && R2R_SEEDED=$((R2R_SEEDED + 1)) || { [ $? -eq 2 ] && R2R_FILTERED=$((R2R_FILTERED + 1)) || R2R_FAILED=$((R2R_FAILED + 1)); }
 import sys, zipfile, os, json, re
 
-app_path, dest = sys.argv[1], sys.argv[2]
+app_path = sys.argv[1]
+# Pipe-separated list of destination cache dirs (entrypoint passes both the
+# NST-actual MicrosoftDynamicsNavServer path and the configured-instance path).
+dests = [d for d in sys.argv[2].split('|') if d]
 keep_ids = set(sys.argv[3].split(',')) if len(sys.argv) > 3 and sys.argv[3] else set()
 
 try:
@@ -670,10 +694,18 @@ try:
         basename = os.path.basename(name)
         if not basename:
             continue
-        dest_path = os.path.join(dest, basename)
-        if not os.path.exists(dest_path):
+        # Read the entry once, then write to every destination that doesn't
+        # already have it. Reading is the expensive part (zip decompress);
+        # extra writes to a same-fs target are nearly free.
+        payload = None
+        for dest in dests:
+            dest_path = os.path.join(dest, basename)
+            if os.path.exists(dest_path):
+                continue
+            if payload is None:
+                payload = z.read(name)
             with open(dest_path, 'wb') as f:
-                f.write(z.read(name))
+                f.write(payload)
         extracted += 1
     sys.exit(0 if extracted > 0 else 1)
 except Exception:
@@ -681,9 +713,9 @@ except Exception:
 PYEOF
     done < <(find "$ARTIFACTS/app/Extensions" -name "*.app" -type f -print0 2>/dev/null)
     if [ "$R2R_FILTERED" -gt 0 ]; then
-        log_step "R2R DLL cache seeded: $R2R_SEEDED apps extracted, $R2R_FILTERED filtered (selective), $R2R_FAILED skipped"
+        log_step "R2R DLL cache seeded: $R2R_SEEDED apps extracted, $R2R_FILTERED filtered (selective), $R2R_FAILED skipped — caches: $ASSEMBLY_CACHES"
     else
-        log_step "R2R DLL cache seeded: $R2R_SEEDED apps extracted, $R2R_FAILED skipped — cache: $ASSEMBLY_CACHE"
+        log_step "R2R DLL cache seeded: $R2R_SEEDED apps extracted, $R2R_FAILED skipped — caches: $ASSEMBLY_CACHES"
     fi
 else
     log_step "WARN: Could not determine platform version; skipping R2R pre-seed"
