@@ -202,6 +202,27 @@ Executing 2 codeunits via WebSocket (max 26 iterations)...
 3 total, 3 passed, 0 failed, 0 skipped
 ```
 
+### JUnit XML output
+
+Pass `--junit-output <path>` to also write per-test results as a JUnit
+XML file, compatible with GitHub Checks reporters
+([dorny/test-reporter](https://github.com/dorny/test-reporter),
+[EnricoMi/publish-unit-test-result-action](https://github.com/EnricoMi/publish-unit-test-result-action)),
+the Azure DevOps "Publish Test Results" task, and any other CI tool that
+ingests JUnit:
+
+```bash
+./scripts/run-tests.sh --app MyTestApp.app --junit-output ./test-results.xml
+```
+
+Each codeunit becomes one `<testsuite>`, each `[Test]` procedure one
+`<testcase>`. Failing tests carry the BC error message in the `message`
+attribute and the full AL call stack in the `<failure>` body.
+
+The reusable workflows (`bc-test-from-source.yml`, `bc-test-prebuilt.yml`)
+emit JUnit XML automatically (no opt-in needed) and upload it as a
+`junit-test-results` workflow artifact.
+
 For end-to-end CI examples (compile + publish + test on every PR), see
 [**Templates for your own repo**](#templates-for-your-own-repo) below.
 

@@ -259,14 +259,18 @@ jobs:
           bash scripts/workflow-summary.sh begin TESTS "Run AL tests"
           TESTS_TOTAL=0; TESTS_PASSED=0; TESTS_FAILED=0; CODEUNITS_TOTAL=0
           ANY_TEST_FAILED=0
+          # Per-app JUnit XML — see bc-test-from-source.yml for the rationale.
+          mkdir -p ../build
           for app in $TEST_APP_FILES; do
             [ -z "$app" ] && continue
             base=$(basename "$app")
+            junit_file="../build/junit-${base%.app}.xml"
             echo "=== Running tests in $base ==="
             tmplog=$(mktemp)
             ./scripts/run-tests.sh \
               --app "../project/$app" \
               --codeunit-range "${{ inputs.codeunit_range }}" \
+              --junit-output "$junit_file" \
               --timeout 30 2>&1 | tee "$tmplog"
             # `tee` always exits 0; capture run-tests.sh's real exit code.
             RUN_TESTS_RC=${PIPESTATUS[0]}
@@ -311,6 +315,17 @@ jobs:
             echo "       any [Test] procedures."
             exit 1
           fi
+
+      # Upload per-app JUnit XML as a workflow artifact even on test failure.
+      # See bc-test-from-source.yml for the rationale.
+      - name: Upload JUnit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-test-results
+          path: build/junit-*.xml
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Workflow timing summary + telemetry
         if: always()

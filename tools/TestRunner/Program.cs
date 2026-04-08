@@ -37,6 +37,7 @@ var codeunitFilter = ""; // comma-separated codeunit IDs or ranges
 var maxIterations = 500;
 var numCodeunitsOverride = 0; // explicit codeunit count for progress display
 var verbose = false;
+var junitOutput = ""; // path to write JUnit XML — empty = don't emit
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -52,6 +53,7 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--max-iterations" && i + 1 < args.Length) maxIterations = int.Parse(args[++i]);
     else if (args[i] == "--num-codeunits" && i + 1 < args.Length) numCodeunitsOverride = int.Parse(args[++i]);
     else if (args[i] == "--verbose" || args[i] == "-v") verbose = true;
+    else if (args[i] == "--junit-output" && i + 1 < args.Length) junitOutput = args[++i];
     else if (!args[i].StartsWith("--")) host = args[i];
 }
 
@@ -64,6 +66,9 @@ int odataResultsSeen = 0;
 // Cached across calls — avoid re-resolving company ID and recreating HttpClient
 HttpClient? cachedHttp = null;
 string? cachedCompanyId = null;
+// Per-method result records, populated by PrintLiveResults as tests complete.
+// Used to emit JUnit XML at the end of the run when --junit-output is set.
+var recordedResults = new List<RecordedResult>();
 
 // Verbose logging — only shown with --verbose
 void Log(string msg) { if (verbose) Console.Error.WriteLine(msg); }
@@ -229,6 +234,24 @@ async Task<int> RunTests()
     // Print summary from live counts — no final OData read needed (saves ~3.5 minutes)
     var elapsed = DateTime.UtcNow - startTime;
     int total = livePassed + liveFailed + liveSkipped;
+
+    // JUnit XML emit. Off by default; only writes when --junit-output <path> is set.
+    // Compatible with GitHub Checks reporters (dorny/test-reporter, EnricoMi/publish-unit-test-result-action),
+    // Azure DevOps "Publish Test Results" task with format=JUnit, and AL-Go's AnalyzeTests
+    // post-step which expects JUnit XML at .buildartifacts/TestResults.xml.
+    if (!string.IsNullOrEmpty(junitOutput))
+    {
+        try
+        {
+            JUnitWriter.Write(junitOutput, recordedResults, suiteName, startTime, elapsed);
+            Console.Error.WriteLine($"[junit] wrote {recordedResults.Count} test result(s) to {junitOutput}");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[junit] WARN: failed to write {junitOutput}: {ex.Message}");
+        }
+    }
+
     Console.WriteLine($"\n=== Results ({elapsed.TotalSeconds:F0}s) ===");
     Console.WriteLine($"{total} total, {livePassed} passed, {liveFailed} failed, {liveSkipped} skipped");
     return liveFailed > 0 ? 1 : (livePassed > 0 ? 0 : 1);
@@ -310,6 +333,25 @@ async Task PrintLiveResults(byte[] authBytes, int codeunitsRun, int numCodeunits
 
                 var status = (result == "Success" || result == "2") ? "PASS"
                     : (result == "Failure" || result == "1") ? "FAIL" : "SKIP";
+
+                // Capture per-method duration and timestamps for JUnit emit.
+                // Both fields are optional in BC's response — fall back to 0/now.
+                var fnStart = r["startTime"]?.Value<DateTime?>();
+                var fnEnd = r["finishTime"]?.Value<DateTime?>();
+                double fnSeconds = 0.0;
+                if (fnStart.HasValue && fnEnd.HasValue)
+                    fnSeconds = Math.Max(0.0, (fnEnd.Value - fnStart.Value).TotalSeconds);
+
+                recordedResults.Add(new RecordedResult(
+                    CodeunitId: cuId,
+                    CodeunitName: cuName,
+                    FunctionName: fn,
+                    Status: status,
+                    DurationSeconds: fnSeconds,
+                    StartTime: fnStart ?? DateTime.UtcNow,
+                    ErrorMessage: status == "FAIL" ? errMsg : "",
+                    CallStack: status == "FAIL" ? callStack : ""));
+
                 Console.Write($"    {status}  {fn}");
                 if (status == "FAIL" && errMsg.Length > 0)
                     Console.Write($" — {errMsg[..Math.Min(200, errMsg.Length)]}");
@@ -479,5 +521,153 @@ class MetadataTokenCapture : System.Diagnostics.TraceListener
         var e = m.IndexOfAny(new[] { ',', '}', '\n' }, s);
         if (e < 0) e = m.Length;
         if (long.TryParse(m[s..e].Trim(), out var t) && t > 0) MetadataToken = t;
+    }
+}
+
+// Per-method record captured during PrintLiveResults. Populated as test methods
+// complete; consumed by WriteJUnitXml at the end of the run when --junit-output
+// is set.
+record RecordedResult(
+    int CodeunitId,
+    string CodeunitName,
+    string FunctionName,
+    string Status,             // "PASS" | "FAIL" | "SKIP"
+    double DurationSeconds,
+    DateTime StartTime,
+    string ErrorMessage,
+    string CallStack);
+
+static class JUnitWriter
+{
+    // Emits a JUnit XML file compatible with:
+    //   - GitHub Checks reporters (dorny/test-reporter, EnricoMi/publish-unit-test-result-action)
+    //   - Azure DevOps "Publish Test Results" task with format=JUnit
+    //   - AL-Go's AnalyzeTests post-step (expects .buildartifacts/TestResults.xml)
+    //
+    // Schema: one <testsuite> per BC codeunit. Each <testcase> is one [Test]
+    // procedure. <failure> elements carry the BC error message + call stack
+    // for failing tests. <skipped/> for SKIP. PASS has no children.
+    public static void Write(string path, IReadOnlyList<RecordedResult> results, string suiteName, DateTime runStart, TimeSpan totalElapsed)
+    {
+        // Group by codeunit so each gets one <testsuite>.
+        var byCu = results
+            .GroupBy(r => r.CodeunitId)
+            .OrderBy(g => g.Key)
+            .ToList();
+
+        var sb = new StringBuilder();
+        sb.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+
+        int totalTests = results.Count;
+        int totalFailures = results.Count(r => r.Status == "FAIL");
+        int totalSkipped = results.Count(r => r.Status == "SKIP");
+
+        sb.Append("<testsuites name=\"").Append(XmlEscape(suiteName)).Append("\"");
+        sb.Append(" tests=\"").Append(totalTests).Append("\"");
+        sb.Append(" failures=\"").Append(totalFailures).Append("\"");
+        sb.Append(" errors=\"0\"");
+        sb.Append(" skipped=\"").Append(totalSkipped).Append("\"");
+        sb.Append(" time=\"").Append(totalElapsed.TotalSeconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture)).Append("\"");
+        sb.Append(" timestamp=\"").Append(runStart.ToString("yyyy-MM-ddTHH:mm:ssZ")).Append("\"");
+        sb.AppendLine(">");
+
+        foreach (var g in byCu)
+        {
+            // Classname uses just the codeunit id. BC's Test Method Line table
+            // doesn't expose the codeunit name on Function rows (Rec.Name on a
+            // Function row holds the function name, not the codeunit name —
+            // verified empirically against testResults). The codeunit id is
+            // unambiguous and matches the typical "ClassName.testName" pattern
+            // that JUnit consumers (GitHub Checks, Azure DevOps, dorny) display.
+            // RecordedResult.CodeunitName is preserved as a hint for diagnostic
+            // logs but intentionally not used here.
+            var className = $"Codeunit {g.Key}";
+            int suiteFailures = g.Count(r => r.Status == "FAIL");
+            int suiteSkipped = g.Count(r => r.Status == "SKIP");
+            double suiteSeconds = g.Sum(r => r.DurationSeconds);
+            var suiteStart = g.Min(r => r.StartTime);
+
+            sb.Append("  <testsuite name=\"").Append(XmlEscape(className)).Append("\"");
+            sb.Append(" tests=\"").Append(g.Count()).Append("\"");
+            sb.Append(" failures=\"").Append(suiteFailures).Append("\"");
+            sb.Append(" errors=\"0\"");
+            sb.Append(" skipped=\"").Append(suiteSkipped).Append("\"");
+            sb.Append(" time=\"").Append(suiteSeconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture)).Append("\"");
+            sb.Append(" timestamp=\"").Append(suiteStart.ToString("yyyy-MM-ddTHH:mm:ssZ")).Append("\"");
+            sb.AppendLine(">");
+
+            foreach (var r in g)
+            {
+                sb.Append("    <testcase classname=\"").Append(XmlEscape(className)).Append("\"");
+                sb.Append(" name=\"").Append(XmlEscape(r.FunctionName)).Append("\"");
+                sb.Append(" time=\"").Append(r.DurationSeconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture)).Append("\"");
+
+                if (r.Status == "FAIL")
+                {
+                    sb.AppendLine(">");
+                    sb.Append("      <failure message=\"").Append(XmlEscape(Truncate(r.ErrorMessage, 500))).Append("\" type=\"AssertionFailure\">");
+                    // Body: full message + call stack (BC uses backslash as separator)
+                    var body = new StringBuilder();
+                    if (!string.IsNullOrEmpty(r.ErrorMessage))
+                    {
+                        body.AppendLine(r.ErrorMessage);
+                    }
+                    if (!string.IsNullOrEmpty(r.CallStack))
+                    {
+                        body.AppendLine();
+                        body.AppendLine("Call stack:");
+                        foreach (var line in r.CallStack.Split('\\'))
+                        {
+                            var trimmed = line.Trim();
+                            if (trimmed.Length > 0) body.AppendLine("  " + trimmed);
+                        }
+                    }
+                    sb.Append(XmlEscape(body.ToString()));
+                    sb.AppendLine("</failure>");
+                    sb.AppendLine("    </testcase>");
+                }
+                else if (r.Status == "SKIP")
+                {
+                    sb.AppendLine(">");
+                    sb.AppendLine("      <skipped/>");
+                    sb.AppendLine("    </testcase>");
+                }
+                else
+                {
+                    // PASS — self-closing testcase, no body
+                    sb.AppendLine("/>");
+                }
+            }
+
+            sb.AppendLine("  </testsuite>");
+        }
+
+        sb.AppendLine("</testsuites>");
+
+        // Make sure the parent directory exists; AL-Go expects .buildartifacts/
+        // and similar nested paths.
+        var dir = System.IO.Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
+            System.IO.Directory.CreateDirectory(dir);
+
+        System.IO.File.WriteAllText(path, sb.ToString());
+    }
+
+    private static string XmlEscape(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        // Replace XML metacharacters. Order matters: & first, then the others.
+        return s
+            .Replace("&", "&amp;")
+            .Replace("<", "&lt;")
+            .Replace(">", "&gt;")
+            .Replace("\"", "&quot;")
+            .Replace("'", "&apos;");
+    }
+
+    private static string Truncate(string s, int max)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        return s.Length <= max ? s : s.Substring(0, max);
     }
 }

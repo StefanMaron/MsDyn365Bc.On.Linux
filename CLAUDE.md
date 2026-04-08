@@ -213,6 +213,48 @@ hardened. Don't undo them without understanding why they exist.
   weeks. Don't move this without auditing every consumer's
   `runner_image` default.
 
+## JUnit XML test result emission
+
+`tools/TestRunner/Program.cs` accepts `--junit-output <path>` and writes a
+JUnit-compliant XML file to that path after the run finishes. `run-tests.sh`
+exposes the same flag. The reusable workflows
+(`bc-test-from-source.yml`, `bc-test-prebuilt.yml`) always emit per-app
+JUnit at `build/junit-<test-app-basename>.xml` and upload it as the
+`junit-test-results` workflow artifact (no opt-in needed).
+
+Schema: one `<testsuite>` per BC codeunit, one `<testcase>` per `[Test]`
+procedure. Pass cases are self-closing. Failures use `<failure
+message="...">` with the BC error message in the attribute and the full
+AL call stack in the body. Skipped tests use `<skipped/>`.
+
+### Things not to break
+
+- **`Test Method Line.Name` on Function rows is the function name, not
+  the codeunit name.** I expected the table to expose the codeunit name
+  on Function rows (since the parent record carries it), but BC stores
+  the function name there. Verified empirically by querying
+  `testResults?$filter=lineType eq 'Function'` against a live container.
+  As a result, `JUnitWriter.Write` uses `Codeunit {id}` as the
+  `<testsuite name>` and `<testcase classname>`. **Don't try to "fix"
+  it by adding `funcs[0]["name"]` back** — you'll re-introduce the bug
+  where every classname looks like a function name. If you want the
+  human-readable codeunit name in the JUnit output, the right fix is
+  to do a separate OData query for the Codeunit-type row before
+  emitting, or extend `TestResultsAPI.Page.al` to expose a
+  `codeunitName` field.
+- **The TestRunner.dll is baked into the bc-runner image.** A change to
+  `Program.cs` requires `docker compose build bc` for `run-tests.sh`'s
+  `docker compose exec` path to pick it up. The host-side `dotnet run`
+  fallback path picks up source changes automatically, but most
+  CI/local users go through the docker exec path.
+- **`docker compose cp` is used to extract the XML from the container.**
+  TestRunner runs inside the bc service container, writes to
+  `/tmp/junit-result.xml` (a fixed in-container path), and `run-tests.sh`
+  copies it back to the caller-supplied host path. This avoids needing
+  to bind-mount the destination path into the container — important
+  because the destination path is consumer-controlled and may not exist
+  at container start time.
+
 ## Custom license override (ISV / developer license)
 
 Added in the 2026-04-08 session. Anyone touching the license import path

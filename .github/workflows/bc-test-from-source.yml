@@ -377,17 +377,28 @@ jobs:
           # exactly the bug that wasted multiple debugging cycles in the
           # bc-copilot-blueprint session.
           ANY_TEST_FAILED=0
+          # Per-app JUnit XML output. Always emitted (no opt-in flag) — JUnit is
+          # cheap, the file is small, and downstream consumers either ingest it
+          # via the upload-artifact step below OR via their own steps that read
+          # the workspace path. AL-Go's AnalyzeTests post-step looks for these
+          # files at consumer-controlled paths, so we put them somewhere
+          # predictable: ../build/junit-<test-app-basename>.xml relative to
+          # the bc-linux working dir (= ./build/junit-* relative to the
+          # consumer's repo root after the workflow finishes).
+          mkdir -p ../build
           for d in $TEST_APP_DIRS; do
             [ -z "$d" ] && continue
             app="../build/$(basename "$d").app"
             [ -f "$app" ] || { echo "skip: $app (not built)"; continue; }
             base=$(basename "$app")
+            junit_file="../build/junit-$(basename "$d").xml"
             echo "=== Running tests in $base ==="
             # Capture output so we can parse the totals for telemetry.
             tmplog=$(mktemp)
             ./scripts/run-tests.sh \
               --app "$app" \
               --codeunit-range "${{ inputs.codeunit_range }}" \
+              --junit-output "$junit_file" \
               --timeout 30 2>&1 | tee "$tmplog"
             RUN_TESTS_RC=${PIPESTATUS[0]}
             if [ "$RUN_TESTS_RC" -ne 0 ]; then
@@ -433,6 +444,23 @@ jobs:
             echo "       any [Test] procedures."
             exit 1
           fi
+
+      # Upload per-app JUnit XML as a workflow artifact even on test failure
+      # (if: always()). Consumers can:
+      #   - Download from the run summary page for offline inspection
+      #   - Pull it from another job in the same workflow via actions/download-artifact
+      #   - Feed it to dorny/test-reporter or EnricoMi/publish-unit-test-result-action
+      #     in a follow-up step on their side (we don't auto-publish to GitHub
+      #     Checks here because each consumer may want a different reporter
+      #     UX or none at all)
+      - name: Upload JUnit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-test-results
+          path: build/junit-*.xml
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Workflow timing summary + telemetry
         if: always()

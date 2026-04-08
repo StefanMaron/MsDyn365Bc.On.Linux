@@ -16,6 +16,11 @@
 #                                "50000..50100|130450..130459"      multiple ranges (pipe)
 #                                "50000,50001,50002"                explicit ids
 #                                "50000..50100,130450,200000..210000" mixed
+#   --junit-output <path>      Write per-test results as JUnit XML to <path>.
+#                                Compatible with GitHub Checks reporters
+#                                (dorny/test-reporter, EnricoMi/publish-unit-test-result-action),
+#                                Azure DevOps "Publish Test Results" task, and
+#                                AL-Go's AnalyzeTests post-step. Default off.
 #   --company <name>           Company name (default: auto-detect)
 #   --base-url <url>           BC base URL (default: http://localhost:7048/BC)
 #   --dev-url <url>            BC Dev endpoint (default: http://localhost:7049/BC/dev)
@@ -37,6 +42,7 @@ DISABLED_TESTS_DIR=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_RUNNER_APP=""
+JUNIT_OUTPUT=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -49,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         --timeout) TIMEOUT_MIN="$2"; shift 2;;
         --test-runner-app) TEST_RUNNER_APP="$2"; shift 2;;
         --disabled-tests) DISABLED_TESTS_DIR="$2"; shift 2;;
+        --junit-output) JUNIT_OUTPUT="$2"; shift 2;;
         --host|--test-runner|--suite-name|--codeunit-timeout|--extension-id|--sql-password) shift 2;;
         *) echo "Unknown option: $1"; exit 1;;
     esac
@@ -505,6 +512,15 @@ if [ "$USE_DOCKER_EXEC" = "true" ]; then
     # and there was no way to see *why* — whether it was a connection
     # failure, an empty suite, "All tests executed" on the first iter,
     # or anything else. Verbose stderr is cheap and the right default.
+    #
+    # JUnit output: when --junit-output is set, TestRunner writes inside
+    # the container to /tmp/junit-result.xml, then we docker cp it back
+    # to the caller-supplied host path. This avoids needing to bind-mount
+    # the destination path.
+    JUNIT_FLAGS=()
+    if [ -n "$JUNIT_OUTPUT" ]; then
+        JUNIT_FLAGS+=(--junit-output /tmp/junit-result.xml)
+    fi
     ( cd "$REPO_DIR" && docker compose exec -T bc dotnet /bc/tools/TestRunner/TestRunner.dll \
         --verbose \
         --host "localhost:7085" \
@@ -516,9 +532,23 @@ if [ "$USE_DOCKER_EXEC" = "true" ]; then
         --num-codeunits "$NUM_CODEUNITS" \
         --timeout "$TIMEOUT_MIN" \
         --codeunit-timeout 10 \
-        --max-iterations "$MAX_ITER" )
+        --max-iterations "$MAX_ITER" \
+        "${JUNIT_FLAGS[@]}" )
     EXIT_CODE=$?
+    if [ -n "$JUNIT_OUTPUT" ]; then
+        # Pull the in-container JUnit file out to the host.
+        mkdir -p "$(dirname "$JUNIT_OUTPUT")"
+        if ( cd "$REPO_DIR" && docker compose cp bc:/tmp/junit-result.xml "$JUNIT_OUTPUT" 2>/dev/null ); then
+            echo "[run-tests] JUnit XML copied to $JUNIT_OUTPUT"
+        else
+            echo "[run-tests] WARN: TestRunner did not produce /tmp/junit-result.xml inside the container"
+        fi
+    fi
 elif command -v dotnet >/dev/null 2>&1; then
+    JUNIT_FLAGS=()
+    if [ -n "$JUNIT_OUTPUT" ]; then
+        JUNIT_FLAGS+=(--junit-output "$JUNIT_OUTPUT")
+    fi
     dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
         --verbose \
         --host "$WS_HOST" \
@@ -530,7 +560,8 @@ elif command -v dotnet >/dev/null 2>&1; then
         --num-codeunits "$NUM_CODEUNITS" \
         --timeout "$TIMEOUT_MIN" \
         --codeunit-timeout 10 \
-        --max-iterations "$MAX_ITER"
+        --max-iterations "$MAX_ITER" \
+        "${JUNIT_FLAGS[@]}"
     EXIT_CODE=$?
 else
     echo "ERROR: cannot run TestRunner — neither a local BC docker container nor a host-side dotnet SDK is available."
