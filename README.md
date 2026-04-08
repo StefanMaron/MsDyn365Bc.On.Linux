@@ -167,9 +167,14 @@ setup.
 # Auto-discover test codeunits from the .app's symbols
 ./scripts/run-tests.sh --app MyTestApp.app
 
-# Same, but limit to a specific codeunit (or range)
+# Same, but limit to specific codeunits. --codeunit-range accepts:
+#   50000                                  single id
+#   50000..50099                           single AL range
+#   "50000..50099|130450..130459"          multiple ranges (pipe-separated)
+#   "50000,50001,50002"                    explicit ids
+#   "50000..50099,130450,200000..210000"   mixed
 ./scripts/run-tests.sh --app MyTestApp.app --codeunit-range 50000
-./scripts/run-tests.sh --app MyTestApp.app --codeunit-range 50000..50099
+./scripts/run-tests.sh --app MyTestApp.app --codeunit-range "50000..50099|130450..130459"
 ```
 
 When `--app` is provided the script reads `SymbolReference.json` from the

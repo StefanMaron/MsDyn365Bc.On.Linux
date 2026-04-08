@@ -48,7 +48,7 @@ reproducible CI runs swap it for a release tag once one exists
 | `bc_type` | no | `sandbox` | `sandbox` or `onprem` |
 | `app_dirs` | no | `""` | Space-separated dirs containing `app.json` for production apps |
 | `test_app_dirs` | **yes** | — | Space-separated dirs containing `app.json` for test apps |
-| `codeunit_range` | **yes** | — | ID range of your **test** codeunits to execute (e.g. `50000..99999`). Production app codeunits are published but not run. |
+| `codeunit_range` | **yes** | — | IDs of your **test** codeunits to execute. Production app codeunits are published but not run. Accepts `"50000..99999"` (single AL range), `"50000..50100\|130450..130459"` (multiple ranges, pipe-separated), `"50000,50001,50002"` (explicit ids), or any mix. |
 | `al_tool_version` | no | `16.2.28.57946` | Linux AL compiler tool version |
 | `runner_image` | no | public ghcr.io tag | Override the bc-runner image |
 | `bc_linux_ref` | no | `master` | Git ref of `MsDyn365Bc.On.Linux` to check out for scripts |
@@ -95,8 +95,9 @@ All flavours:
      to directories containing `app.json`.
    - **Pre-built**: `APP_FILES` and `TEST_APP_FILES` — space-separated paths
      to `.app` files in your repo.
-   - `CODEUNIT_RANGE` — AL codeunit ID range that covers your test codeunits
-     (e.g. `70000..70099`).
+   - `CODEUNIT_RANGE` — IDs of your test codeunits. Accepts `70000..70099`
+     (single range), `70000..70099|130450..130459` (multiple ranges,
+     pipe-separated), `70000,70001,70002` (explicit ids), or any mix.
 3. **Commit & push**. The workflow runs on every push and PR to `main`/`master`,
    plus manually via the Actions tab.
 

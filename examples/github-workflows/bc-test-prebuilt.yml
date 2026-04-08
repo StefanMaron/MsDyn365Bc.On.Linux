@@ -52,8 +52,14 @@ env:
   # Test .app files to publish and run.
   TEST_APP_FILES: "tests/MyTests.app"
 
-  # ID range of your TEST codeunits to execute. APP_FILES are published
-  # but their codeunits aren't run.
+  # IDs of your TEST codeunits to execute. APP_FILES are published but
+  # their codeunits aren't run.
+  #
+  # Accepted formats:
+  #   "50000..99999"                       single AL range
+  #   "50000..50100|130450..130459"        multiple ranges (pipe-separated)
+  #   "50000,50001,50002"                  explicit ids
+  #   "50000..50100,130450,200000..210000" mixed
   CODEUNIT_RANGE: "50000..99999"
 
   # --------------------------------------------------------------------

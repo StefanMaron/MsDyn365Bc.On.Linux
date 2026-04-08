@@ -104,7 +104,11 @@ jobs:
       bc_country: w1
       bc_type: sandbox
       test_app_dirs: extensions/smoke-test
-      codeunit_range: "70000..70001"
+      # Pipe form deliberately exercises the multi-range parser end-to-end on
+      # the hosted runner so a regression in run-tests.sh's normalization shows
+      # up here. Equivalent to the legacy "70000..70001" but covers the new
+      # code path. See scripts/run-tests.sh CODEUNIT_RANGE handling.
+      codeunit_range: "70000|70001"
       # Pin to the freshly-built image from this commit. Both build-image
       # above and the reusable workflow's pull step look up the image by
       # this exact tag — guarantees the matrix tests against the same

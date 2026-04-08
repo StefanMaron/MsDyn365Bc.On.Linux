@@ -53,9 +53,15 @@ env:
   # Space-separated paths to your AL test app source dirs.
   TEST_APP_DIRS: "test"
 
-  # ID range of your TEST codeunits to execute. Use "lo..hi" or a single
-  # number. Pick a range that covers all test codeunits in TEST_APP_DIRS —
-  # production codeunits in APP_DIRS are published but not run.
+  # IDs of your TEST codeunits to execute. Pick a range that covers all
+  # test codeunits in TEST_APP_DIRS — production codeunits in APP_DIRS
+  # are published but not run.
+  #
+  # Accepted formats:
+  #   "50000..99999"                       single AL range
+  #   "50000..50100|130450..130459"        multiple ranges (pipe-separated)
+  #   "50000,50001,50002"                  explicit ids
+  #   "50000..50100,130450,200000..210000" mixed
   CODEUNIT_RANGE: "50000..99999"
 
   # AL compiler version. Has to match the major BC version of the

@@ -10,7 +10,12 @@
 #
 # Options:
 #   --app <path>               Test app file (auto-published + codeunit discovery)
-#   --codeunit-range <range>   Codeunit ID range (e.g. "70000" or "70000..70001")
+#   --codeunit-range <range>   Codeunit IDs to test. Accepts:
+#                                "70000"                            single id
+#                                "70000..70010"                     AL range
+#                                "50000..50100|130450..130459"      multiple ranges (pipe)
+#                                "50000,50001,50002"                explicit ids
+#                                "50000..50100,130450,200000..210000" mixed
 #   --company <name>           Company name (default: auto-detect)
 #   --base-url <url>           BC base URL (default: http://localhost:7048/BC)
 #   --dev-url <url>            BC Dev endpoint (default: http://localhost:7049/BC/dev)
@@ -163,14 +168,24 @@ fi
 # Microsoft-shipped test apps where the .app may not be on the host.
 CODEUNIT_IDS=""
 
-# Parse --codeunit-range into a normalized "lo-hi" or "lo,lo,..." form.
+# Parse --codeunit-range into a normalized "lo-hi,lo-hi,id,..." form.
+#
+# Accepted user-facing input shapes:
+#   "50000"                            single id
+#   "50000..70000"                     single AL range
+#   "50000..50100|130450..130459"      multiple ranges (pipe-separated)
+#   "50000,50001,50002"                explicit ids (comma-separated)
+#   "50000..50100,130450,200000..210000"  mixed
+#
+# Normalization (so the Python filter below sees one canonical form):
+#   1. Replace `|` separator with `,` so all parts join into one list
+#   2. Replace `..` AL range syntax with `-` so each part is `lo-hi` or `id`
+#
+# The Python parser at the discovery step already loops over comma-separated
+# parts and handles `lo-hi` ranges and bare ids; this is just the bash side.
 NORMALIZED_RANGE=""
 if [ -n "$CODEUNIT_RANGE" ]; then
-    if [[ "$CODEUNIT_RANGE" == *".."* ]]; then
-        NORMALIZED_RANGE=$(echo "$CODEUNIT_RANGE" | sed 's/\.\.\([0-9]\)/-\1/')
-    else
-        NORMALIZED_RANGE="$CODEUNIT_RANGE"
-    fi
+    NORMALIZED_RANGE=$(printf '%s' "$CODEUNIT_RANGE" | sed -e 's/|/,/g' -e 's/\.\./-/g')
 fi
 
 if [ -n "$APP_FILE" ] && [ -f "$APP_FILE" ]; then

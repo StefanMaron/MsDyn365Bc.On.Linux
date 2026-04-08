@@ -27,6 +27,10 @@ jobs:
       bc_country:     "w1"
       app_dirs:       "app"          # space-separated dirs containing app.json
       test_app_dirs:  "test"         # ditto for test apps
+      # codeunit_range accepts:
+      #   "50000..99999"                  single AL range
+      #   "50000..50100|130450..130459"   multiple ranges (pipe-separated)
+      #   "50000,50001,50002"             explicit ids
       codeunit_range: "50000..99999"
 
   # ─── Prebuilt flavour example (commented out) ─────────────────────────
@@ -36,4 +40,5 @@ jobs:
   #   with:
   #     bc_version:     "27.5"
   #     test_app_files: "tests/MyTests.app"
+  #     # See above for the accepted codeunit_range formats.
   #     codeunit_range: "50000..99999"

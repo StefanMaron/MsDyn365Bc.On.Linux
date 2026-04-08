@@ -23,8 +23,9 @@ execute tests via the bundled TestRunnerExtension.
      to directories containing `app.json`.
    - **Pre-built**: `APP_FILES` and `TEST_APP_FILES` — space-separated paths
      to `.app` files in your repo.
-   - `CODEUNIT_RANGE` — AL codeunit ID range that covers your test codeunits
-     (e.g. `70000..70099`).
+   - `CODEUNIT_RANGE` — IDs of your test codeunits. Accepts `70000..70099`
+     (single range), `70000..70099|130450..130459` (multiple ranges,
+     pipe-separated), `70000,70001,70002` (explicit ids), or any mix.
 3. In Azure DevOps: **Pipelines → New pipeline → Existing Azure Pipelines
    YAML file**, point at the file you just committed, save and run.
 

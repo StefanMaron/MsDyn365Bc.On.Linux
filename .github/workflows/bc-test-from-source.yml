@@ -47,7 +47,13 @@ on:
         required: true
         type: string
       codeunit_range:
-        description: "Test codeunit ID range to execute (e.g. 50000..99999). This is the range of your TEST codeunits — production app codeunits aren't run, only published."
+        description: |
+          Test codeunit IDs to execute. This is the range of your TEST codeunits —
+          production app codeunits aren't run, only published. Accepted formats:
+            "50000..99999"                       single AL range
+            "50000..50100|130450..130459"        multiple ranges (pipe-separated)
+            "50000,50001,50002"                  explicit ids (comma-separated)
+            "50000..50100,130450,200000..210000" mixed
         required: true
         type: string
       al_tool_version:
