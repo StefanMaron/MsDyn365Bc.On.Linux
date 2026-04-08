@@ -75,18 +75,14 @@ on:
 
     secrets:
       bc_license:
-        description: |
-          Optional ISV/developer BC license, base64-encoded. When provided, the
-          workflow decodes it to a tempfile in the runner workspace, mounts it
-          into the bc-runner + sql containers, and the entrypoint imports it
-          BEFORE NST starts — eliminating the legacy boot → import → restart
-          cycle that ISVs would otherwise need.
-
-          To prepare the secret on your repo:
-            base64 -w0 < your-license.bclicense | gh secret set BC_LICENSE
-          Then call the reusable workflow with:
-            secrets:
-              bc_license: ${{ secrets.BC_LICENSE }}
+        description: >-
+          Optional ISV/developer BC license, base64-encoded.
+          When provided, the workflow decodes it to a tempfile in the runner
+          workspace, mounts it into the bc-runner + sql containers, and the
+          entrypoint imports it BEFORE NST starts — eliminating the legacy
+          boot/import/restart cycle that ISVs would otherwise need.
+          See README.md "Custom license" section in the bc-linux repo for
+          how to prepare the secret and pass it from the caller workflow.
         required: false
 
 jobs:
@@ -176,12 +172,18 @@ jobs:
       # the env vars that wire it into the docker-compose mounts. The
       # entrypoint will then import this license INSTEAD of the default
       # Cronus.bclicense, before NST starts — no boot/import/restart cycle.
+      # No `if: secrets.bc_license != ''` — the `secrets` context isn't
+      # allowed in step `if:` expressions (rejected by GitHub at parse time).
+      # Step always runs, body skips itself when the env var is empty.
       - name: Stage ISV license (if provided)
-        if: ${{ secrets.bc_license != '' }}
         env:
           BC_LICENSE_B64: ${{ secrets.bc_license }}
         run: |
           set -e
+          if [ -z "${BC_LICENSE_B64:-}" ]; then
+            echo "No bc_license secret provided — using default Cronus license"
+            exit 0
+          fi
           LICENSE_PATH="$RUNNER_TEMP/bc-license.bclicense"
           printf '%s' "$BC_LICENSE_B64" | base64 -d > "$LICENSE_PATH"
           if [ ! -s "$LICENSE_PATH" ]; then

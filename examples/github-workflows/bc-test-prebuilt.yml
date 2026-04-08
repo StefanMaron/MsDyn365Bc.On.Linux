@@ -137,12 +137,19 @@ jobs:
       #   base64 -w0 < your-license.bclicense | gh secret set BC_LICENSE
       # The entrypoint imports the license BEFORE NST starts, so no
       # boot/import/restart cycle is needed. No-op when the secret is unset.
+      # Step always runs; the body skips itself when the secret is unset.
+      # We can NOT use `if: secrets.BC_LICENSE != ''` — the `secrets`
+      # context isn't allowed in step `if:` expressions (rejected by
+      # GitHub at parse time, verified with actionlint).
       - name: Stage ISV license (if provided)
-        if: ${{ secrets.BC_LICENSE != '' }}
         env:
           BC_LICENSE_B64: ${{ secrets.BC_LICENSE }}
         run: |
           set -e
+          if [ -z "${BC_LICENSE_B64:-}" ]; then
+            echo "BC_LICENSE secret not set; using default Cronus license"
+            exit 0
+          fi
           LICENSE_PATH="$RUNNER_TEMP/bc-license.bclicense"
           printf '%s' "$BC_LICENSE_B64" | base64 -d > "$LICENSE_PATH"
           [ -s "$LICENSE_PATH" ] || { echo "ERROR: BC_LICENSE secret decoded to an empty file"; exit 1; }
