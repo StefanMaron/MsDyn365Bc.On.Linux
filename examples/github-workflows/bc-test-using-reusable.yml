@@ -33,6 +33,20 @@ jobs:
       #   "50000,50001,50002"             explicit ids
       codeunit_range: "50000..99999"
 
+    # Optional: ISV / developer license. Without this, BC boots with the
+    # public Cronus license (which is fine for most test scenarios). If
+    # you need your own license, base64-encode it and store as a repo
+    # secret named BC_LICENSE:
+    #
+    #   base64 -w0 < your-license.bclicense | gh secret set BC_LICENSE
+    #
+    # Then uncomment the secrets block below. The reusable workflow
+    # imports the license BEFORE NST starts, so no boot/import/restart
+    # cycle is needed.
+    #
+    # secrets:
+    #   bc_license: ${{ secrets.BC_LICENSE }}
+
   # ─── Prebuilt flavour example (commented out) ─────────────────────────
   #
   # bc-tests-prebuilt:
@@ -42,3 +56,6 @@ jobs:
   #     test_app_files: "tests/MyTests.app"
   #     # See above for the accepted codeunit_range formats.
   #     codeunit_range: "50000..99999"
+  #   # Same optional license pattern as above:
+  #   # secrets:
+  #   #   bc_license: ${{ secrets.BC_LICENSE }}

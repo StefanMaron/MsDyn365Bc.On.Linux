@@ -26,7 +26,18 @@ execute tests via the bundled TestRunnerExtension.
    - `CODEUNIT_RANGE` — IDs of your test codeunits. Accepts `70000..70099`
      (single range), `70000..70099|130450..130459` (multiple ranges,
      pipe-separated), `70000,70001,70002` (explicit ids), or any mix.
-3. In Azure DevOps: **Pipelines → New pipeline → Existing Azure Pipelines
+3. **Optional ISV license**: if you need your own developer / partner
+   license instead of the public Cronus one, base64-encode it and add
+   it to your pipeline's variable group as **secret variable**
+   `BC_LICENSE_B64`:
+   ```bash
+   base64 -w0 < your-license.bclicense
+   # paste the output as a secret variable in Azure DevOps
+   ```
+   The pipeline imports the license BEFORE the BC service tier starts,
+   so no boot-import-restart cycle is needed. Leave the variable unset
+   to use the default Cronus license.
+4. In Azure DevOps: **Pipelines → New pipeline → Existing Azure Pipelines
    YAML file**, point at the file you just committed, save and run.
 
 The pipelines use the **Microsoft-hosted `ubuntu-latest` agent**, which

@@ -130,6 +130,27 @@ steps:
       bash "$(Agent.BuildDirectory)/bc-linux/scripts/workflow-summary.sh" end RESOLVE
     displayName: 'Resolve apps to keep in BC database'
 
+  # Optional: stage an ISV/developer license. Without this step BC boots
+  # with the public Cronus license. To use your own license, store its
+  # base64-encoded content in the variable group as BC_LICENSE_B64 and
+  # mark it as a secret. The entrypoint imports the license BEFORE NST
+  # starts, so no boot/import/restart cycle is needed. No-op when unset.
+  - bash: |
+      set -e
+      if [ -z "${BC_LICENSE_B64:-}" ]; then
+        echo "BC_LICENSE_B64 not set; skipping (default Cronus license will be used)"
+        exit 0
+      fi
+      LICENSE_PATH="$(Agent.TempDirectory)/bc-license.bclicense"
+      printf '%s' "$BC_LICENSE_B64" | base64 -d > "$LICENSE_PATH"
+      [ -s "$LICENSE_PATH" ] || { echo "ERROR: BC_LICENSE_B64 decoded to an empty file"; exit 1; }
+      chmod 644 "$LICENSE_PATH"
+      echo "##vso[task.setvariable variable=BC_LICENSE_HOST_PATH]$LICENSE_PATH"
+      echo "##vso[task.setvariable variable=BC_LICENSE_FILE]/bc/custom-license.bclicense"
+    env:
+      BC_LICENSE_B64: $(BC_LICENSE_B64)
+    displayName: 'Stage ISV license (if BC_LICENSE_B64 is set)'
+
   - bash: |
       set -e
       bash "$(Agent.BuildDirectory)/bc-linux/scripts/workflow-summary.sh" begin BC_BOOT "BC startup (background → wait for healthy)"
@@ -141,6 +162,10 @@ steps:
       export BC_RUNNER_IMAGE="$(BC_RUNNER_IMAGE)"
       export BC_CLEAR_ALL_APPS="$(BC_CLEAR_ALL_APPS)"
       export BC_KEEP_APP_IDS="$(BC_KEEP_APP_IDS)"
+      # ISV license overrides (set by the previous step when BC_LICENSE_B64
+      # is provided as a secret variable). Empty/unset = default Cronus.
+      export BC_LICENSE_HOST_PATH="${BC_LICENSE_HOST_PATH:-}"
+      export BC_LICENSE_FILE="${BC_LICENSE_FILE:-}"
       docker compose up -d
       echo "BC container started in background — continuing with other work."
     displayName: 'Start BC on Linux (background)'

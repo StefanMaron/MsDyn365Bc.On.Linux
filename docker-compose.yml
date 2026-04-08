@@ -11,6 +11,11 @@ services:
       - /var/opt/mssql/data:size=4g
     volumes:
       - ${BC_ARTIFACTS_DIR:-bc-artifacts}:/bc/artifacts:ro
+      # Custom license bind mount also exposed to SQL Server, because the
+      # entrypoint imports the license via OPENROWSET BULK which reads the
+      # file from SQL's filesystem (not bc's). Same default of /dev/null
+      # when BC_LICENSE_HOST_PATH is unset — see notes on the bc service.
+      - ${BC_LICENSE_HOST_PATH:-/dev/null}:/bc/custom-license.bclicense:ro
     healthcheck:
       test: /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P '${SA_PASSWORD:-Passw0rd123!}' -C -No -Q "SELECT 1" || exit 1
       interval: 10s
@@ -40,6 +45,14 @@ services:
       BC_CLEAR_ALL_APPS: ${BC_CLEAR_ALL_APPS:-false}
       BC_SKIP_APP_PUBLISH: ${BC_SKIP_APP_PUBLISH:-false}
       BC_KEEP_APP_IDS: ${BC_KEEP_APP_IDS:-}
+      # Custom license override: when set, the entrypoint imports the file
+      # at this path INSTEAD of the artifact's default Cronus.bclicense.
+      # The volume mount below makes /bc/custom-license.bclicense the
+      # canonical mount point — set BC_LICENSE_HOST_PATH on the host shell
+      # to the source file and BC_LICENSE_FILE=/bc/custom-license.bclicense
+      # to wire it through. ISVs use this to skip the boot → import →
+      # restart NST cycle on every fresh container.
+      BC_LICENSE_FILE: ${BC_LICENSE_FILE:-}
       # Diagnostic only — comma-separated patch IDs to skip (e.g. "14,15,15a,15b,checkfile").
       # Used to bisect Cecil patches that may cause AL→C# emission drift. Empty = production.
       BC_DISABLE_PATCHES: ${BC_DISABLE_PATCHES:-}
@@ -62,6 +75,13 @@ services:
     volumes:
       - ${BC_ARTIFACTS_DIR:-bc-artifacts}:/bc/artifacts
       - bc-service:/bc/service
+      # Optional bind mount for an ISV/developer license. Set BC_LICENSE_HOST_PATH
+      # to the absolute path of a .bclicense file on the host; the entrypoint will
+      # import it (when BC_LICENSE_FILE=/bc/custom-license.bclicense is also set)
+      # before NST starts. Defaults to /dev/null when unset, so the file appears as
+      # a character device — the entrypoint's `[ -f ]` check fails and the default
+      # Cronus license is used. No effect when unset.
+      - ${BC_LICENSE_HOST_PATH:-/dev/null}:/bc/custom-license.bclicense:ro
     healthcheck:
       test: test -f /tmp/bc-ready && curl -sf -o /dev/null -u BCRUNNER:Admin123! http://localhost:7048/BC/ODataV4/Company || exit 1
       # 5s interval (was 15s) so wait-for-bc-healthy.sh sees the transition within ~5s

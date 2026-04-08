@@ -59,6 +59,30 @@ reproducible CI runs swap it for a release tag once one exists
 Same as above but with `app_files` / `test_app_files` (paths to `.app`
 files) instead of `app_dirs` / `test_app_dirs`, and no `al_tool_version`.
 
+### Secrets (both flavours)
+
+| Secret | Required | Description |
+|---|---|---|
+| `bc_license` | no | Optional ISV/developer BC license, **base64-encoded**. When set, the workflow imports this license BEFORE NST starts — no boot/import/restart cycle. Leave unset to use the public Cronus license. |
+
+To prepare the secret:
+
+```bash
+base64 -w0 < your-license.bclicense | gh secret set BC_LICENSE
+```
+
+Then call the reusable workflow with:
+
+```yaml
+jobs:
+  bc-tests:
+    uses: StefanMaron/MsDyn365Bc.On.Linux/.github/workflows/bc-test-from-source.yml@master
+    with:
+      ...
+    secrets:
+      bc_license: ${{ secrets.BC_LICENSE }}
+```
+
 
 ## Alternative: inlined templates (paste into your repo)
 

@@ -343,13 +343,42 @@ INSERT INTO [dbo].[\$ndo\$publicencryptionkey] ([id], [publickey]) VALUES (0,
 N'<RSAKeyValue><Modulus>xbzyD+SGxykyAv82XOEFtDzWEIok0MM5SAc+CS6Mq0W5LwiyXeakWyblq1XgYi3CDu700986ZVRi4KJjruZlzBeZ7IWXD4lEEpTCRuqoxasRTnwVpyVqGuHclJAnUpjeBS6HvaS/iesYWwxZcmlsmzJHvF3hXdDmLj+8GSKgo4IhschPCIpnoH8+FREX++VpwfZH1ejMk5Izds/ZI70Xc/OWfRfaYy3rtCFeZQ1R5T1AhlNJDgpn0a1oP86F8yDGYawB2GJKIewdcWE8usu4QesrFnlS1g/IJcFXe71/TiJjryqRJPk8ze3Jh9+atx57OnI4R3QvuM/lQ7YoN1RVjw==</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>');
 " 2>/dev/null
 
-# License
-if [ -n "$LICENSE_FILE" ] && [ -f "$ARTIFACTS/app/$LICENSE_FILE" ]; then
+# License import.
+#
+# By default the entrypoint imports the Cronus.bclicense that ships with
+# Microsoft's BC artifact. ISVs typically need their own developer or
+# partner license — historically that meant booting BC, importing the
+# license via SQL/PowerShell, and restarting NST so the new license takes
+# effect. That round-trip costs a full extra NST cold boot.
+#
+# BC_LICENSE_FILE override: if set and points to a regular file (typically
+# a path inside the container, mounted via the optional license volume in
+# docker-compose.yml — see BC_LICENSE_HOST_PATH there), import THAT file
+# instead of the artifact's default. NST sees the right license at first
+# boot, no restart needed.
+#
+# Workflow integration: the reusable bc-test-* workflows accept a
+# `bc_license` secret (base64-encoded license bytes), decode it to a
+# tempfile in the runner workspace, mount that into the container, and
+# set BC_LICENSE_FILE for the entrypoint. See bc-test-from-source.yml.
+LICENSE_TO_IMPORT=""
+if [ -n "${BC_LICENSE_FILE:-}" ]; then
+    if [ -f "$BC_LICENSE_FILE" ]; then
+        LICENSE_TO_IMPORT="$BC_LICENSE_FILE"
+        log_step "BC_LICENSE_FILE override: $BC_LICENSE_FILE"
+    else
+        log_step "WARN: BC_LICENSE_FILE=$BC_LICENSE_FILE not found or not a regular file — falling back to artifact default"
+    fi
+fi
+if [ -z "$LICENSE_TO_IMPORT" ] && [ -n "$LICENSE_FILE" ] && [ -f "$ARTIFACTS/app/$LICENSE_FILE" ]; then
+    LICENSE_TO_IMPORT="$ARTIFACTS/app/$LICENSE_FILE"
+fi
+if [ -n "$LICENSE_TO_IMPORT" ]; then
     $SQLCMD_DB -Q "
     UPDATE [\$ndo\$dbproperty]
-    SET [license] = (SELECT BulkColumn FROM OPENROWSET(BULK '$ARTIFACTS/app/$LICENSE_FILE', SINGLE_BLOB) AS f);
+    SET [license] = (SELECT BulkColumn FROM OPENROWSET(BULK '$LICENSE_TO_IMPORT', SINGLE_BLOB) AS f);
     " 2>/dev/null
-    log_step "License imported."
+    log_step "License imported: $(basename "$LICENSE_TO_IMPORT")"
 fi
 
 # Sandbox tenant type

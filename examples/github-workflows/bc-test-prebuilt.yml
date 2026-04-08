@@ -131,6 +131,25 @@ jobs:
           echo "BC_KEEP_APP_IDS=$KEEP_IDS" >> "$GITHUB_ENV"
           bash bc-linux/scripts/workflow-summary.sh end RESOLVE
 
+      # Optional: stage an ISV/developer license. Without this step BC boots
+      # with the public Cronus license. To use your own license, store it
+      # base64-encoded as a repo secret named BC_LICENSE:
+      #   base64 -w0 < your-license.bclicense | gh secret set BC_LICENSE
+      # The entrypoint imports the license BEFORE NST starts, so no
+      # boot/import/restart cycle is needed. No-op when the secret is unset.
+      - name: Stage ISV license (if provided)
+        if: ${{ secrets.BC_LICENSE != '' }}
+        env:
+          BC_LICENSE_B64: ${{ secrets.BC_LICENSE }}
+        run: |
+          set -e
+          LICENSE_PATH="$RUNNER_TEMP/bc-license.bclicense"
+          printf '%s' "$BC_LICENSE_B64" | base64 -d > "$LICENSE_PATH"
+          [ -s "$LICENSE_PATH" ] || { echo "ERROR: BC_LICENSE secret decoded to an empty file"; exit 1; }
+          chmod 644 "$LICENSE_PATH"
+          echo "BC_LICENSE_HOST_PATH=$LICENSE_PATH" >> "$GITHUB_ENV"
+          echo "BC_LICENSE_FILE=/bc/custom-license.bclicense" >> "$GITHUB_ENV"
+
       - name: Start BC on Linux (background)
         env:
           BC_ARTIFACTS_DIR: ${{ github.workspace }}/artifact-cache/${{ env.BC_VERSION }}

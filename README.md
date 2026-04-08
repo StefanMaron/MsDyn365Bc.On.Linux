@@ -235,6 +235,23 @@ BC_DEV_PORT=17049 docker compose up -d
 | `BC_API_PORT`     | `7052`           | API v2.0 port                                                                |
 | `BC_MGMT_PORT`    | `7045`           | Management endpoint port                                                     |
 | `BC_CLIENT_PORT`  | `7085`           | WebSocket client services port (used by `run-tests.sh`)                      |
+| `BC_LICENSE_HOST_PATH` | unset       | Optional host path to a `.bclicense` file. Mounted into bc + sql containers and imported INSTEAD of the default Cronus license. See "Custom license" below. |
+| `BC_LICENSE_FILE` | unset            | Path INSIDE the container of the license file to import. Set to `/bc/custom-license.bclicense` together with `BC_LICENSE_HOST_PATH`. |
+
+**Custom license (ISVs / developer license):** by default the entrypoint
+imports the public Cronus.bclicense that ships with the BC artifact. To
+use your own license without the boot/import/restart cycle:
+
+```bash
+BC_LICENSE_HOST_PATH=/path/to/your-license.bclicense \
+BC_LICENSE_FILE=/bc/custom-license.bclicense \
+docker compose up -d
+```
+
+The entrypoint imports the override BEFORE NST starts, so the service
+tier comes up with the right license on first boot. The reusable CI
+workflows (`bc-test-from-source.yml` / `bc-test-prebuilt.yml`) accept
+the same license via a `bc_license` secret (base64-encoded).
 
 **Reset state:** `docker compose down -v` removes the containers *and* the
 named volumes (`bc-artifacts`, `bc-service`), forcing a fresh artifact
