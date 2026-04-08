@@ -319,12 +319,14 @@ jobs:
           fi
 
       # Upload per-app JUnit XML as a workflow artifact even on test failure.
+      # Name includes bc_version to avoid actions/upload-artifact@v4's 409
+      # collision when multiple matrix jobs upload to the same name.
       # See bc-test-from-source.yml for the rationale.
       - name: Upload JUnit test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-test-results
+          name: junit-test-results-${{ inputs.bc_version }}
           path: build/junit-*.xml
           if-no-files-found: ignore
           retention-days: 14

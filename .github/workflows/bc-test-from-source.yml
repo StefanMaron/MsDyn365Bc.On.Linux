@@ -458,11 +458,17 @@ jobs:
       #     in a follow-up step on their side (we don't auto-publish to GitHub
       #     Checks here because each consumer may want a different reporter
       #     UX or none at all)
+      #
+      # Name MUST include bc_version because actions/upload-artifact@v4 errors
+      # if multiple matrix jobs in the same workflow run try to upload to the
+      # same artifact name. test-versions.yml's matrix calls this reusable
+      # workflow once per BC version; without the suffix every job after the
+      # first one would fail with "409 Conflict".
       - name: Upload JUnit test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-test-results
+          name: junit-test-results-${{ inputs.bc_version }}
           path: build/junit-*.xml
           if-no-files-found: ignore
           retention-days: 14
