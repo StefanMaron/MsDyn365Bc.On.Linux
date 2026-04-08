@@ -971,6 +971,13 @@ PYEOF
             # Skips the application stack baseline ids — they're already
             # installed for the tenant by BC's sandbox setup, re-POSTing
             # them is wasteful and slow.
+            #
+            # Tried client-side parallelization within dependency layers
+            # (concurrency=4) on 2026-04-08 — measured zero wall-clock gain
+            # because NST's dev endpoint serializes publishes server-side
+            # (probably for SQL transaction safety / schema sync ordering).
+            # 5+2+1 layered POSTs took the same ~27s as 8 serial POSTs.
+            # Don't bother trying again unless NST changes behavior upstream.
             INSTALL_ORDER=$(BC_KEEP_APP_IDS="$BC_KEEP_APP_IDS" python3 - "$ARTIFACTS" << 'PYEOF'
 import os, sys
 sys.path.insert(0, "/bc/scripts")
@@ -1008,19 +1015,22 @@ PYEOF
             while IFS= read -r APP_PATH; do
                 [ -z "$APP_PATH" ] && continue
                 NAME=$(basename "$APP_PATH")
-                # forcesync alone is enough: the 5 core test framework apps
-                # were wiped by the SQL above so this POST publishes them
-                # fresh as Dev/tenant-installed. Other apps in the keep set
-                # (BaseApp helpers like Tests-TestLibraries) were never in
-                # the BC database to begin with, so they also publish fresh.
+                # SchemaUpdateMode=synchronize: only run schema sync if the
+                # schema actually changed. Test framework apps have NO tables
+                # (codeunits only), so schema sync is a no-op and synchronize
+                # avoids unnecessary work compared to forcesync. The Test
+                # Runner Extension publish below also uses synchronize and
+                # works fine.
+                #
                 # Tried &DependencyPublishingOption=Install — BC rejects
-                # 'Install' as an invalid value (the actual valid values are
-                # Default/Strict/Ignore, none of which auto-install missing
-                # tenant deps), so we have to wipe instead.
+                # 'Install' as an invalid value (Default/Strict/Ignore are
+                # the only valid values, none of which auto-install missing
+                # tenant deps), so we have to wipe stuck-published apps in
+                # SQL beforehand instead.
                 HTTP=$(curl -s -o /tmp/install-tenant.out -w "%{http_code}" --max-time 120 \
                     -u "BCRUNNER:Admin123!" -X POST \
                     -F "file=@$APP_PATH;type=application/octet-stream" \
-                    "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
+                    "$DEV_URL/apps?SchemaUpdateMode=synchronize" 2>/dev/null)
                 # Treat "already deployed as Global" 422s as benign — they
                 # mean the app was pre-installed by BC's sandbox image and
                 # doesn't need a republish.
