@@ -23,6 +23,15 @@ Inputs (all optional; defaults produce zero output → no analyzers):
                                           Microsoft.Dynamics.Nav.*.dll cops.
                                           Default: auto-detect under
                                           ~/.dotnet/tools/.store/...
+  --project-root <path>                   Prepended to all NON-URL entries in
+                                          --custom-code-cops and --ruleset-file
+                                          before path validation. Use this when
+                                          the consumer's repo is checked out
+                                          under a subdirectory (e.g. project/)
+                                          but their input paths are written
+                                          relative to their repo root. URLs
+                                          pass through untouched. Empty by
+                                          default — paths used as-is.
 
 Output (one flag per line, suitable for `mapfile -t` in bash):
   /analyzer:<comma-separated DLL paths>
@@ -102,6 +111,24 @@ def resolve_ms_cops(al_tool_dir: str, enabled: dict[str, bool]) -> list[str]:
 
 def is_url(s: str) -> bool:
     return s.startswith("http://") or s.startswith("https://")
+
+
+def apply_project_root(value: str, project_root: str) -> str:
+    """Prepend project_root to value when value is a non-URL local path.
+
+    URLs and absolute paths pass through unchanged. Empty project_root is
+    a no-op. This is what makes the helper usable from a workflow that
+    checks the consumer repo into a subdirectory: the consumer writes
+    paths relative to their repo root, and the workflow tells the helper
+    where that root lives on disk.
+    """
+    if not project_root or not value:
+        return value
+    if is_url(value):
+        return value
+    if os.path.isabs(value):
+        return value
+    return os.path.join(project_root, value)
 
 
 def download(url: str, dest_dir: str) -> str:
@@ -221,6 +248,10 @@ def main():
     parser.add_argument("--temp-dir", default=os.environ.get("RUNNER_TEMP") or "/tmp")
     parser.add_argument("--al-tool-dir", default="",
                         help="Override Microsoft cop DLL search dir")
+    parser.add_argument("--project-root", default="",
+                        help="Prepend to non-URL entries in --custom-code-cops "
+                             "and --ruleset-file (e.g. 'project' when the "
+                             "consumer repo is checked out at ./project/)")
     args = parser.parse_args()
 
     enabled = {
@@ -248,13 +279,18 @@ def main():
 
     custom_entries = parse_list(args.custom_code_cops)
     if custom_entries:
+        # Apply --project-root to local entries so a workflow that checks
+        # the consumer repo into ./project/ can pass paths relative to
+        # the consumer's repo root.
+        custom_entries = [apply_project_root(e, args.project_root) for e in custom_entries]
         # Stage all downloads under a single subdir so re-runs are tidy
         # and the workflow can clean up by removing one path.
         cop_temp = os.path.join(args.temp_dir, "bc-linux-cops")
         analyzer_paths.extend(resolve_custom_cops(custom_entries, cop_temp))
 
     ruleset_temp = os.path.join(args.temp_dir, "bc-linux-rulesets")
-    ruleset_path = resolve_ruleset(args.ruleset_file, ruleset_temp)
+    ruleset_input = apply_project_root(args.ruleset_file, args.project_root)
+    ruleset_path = resolve_ruleset(ruleset_input, ruleset_temp)
 
     print(f"resolved {len(analyzer_paths)} analyzer DLL(s)", file=sys.stderr)
     if ruleset_path:

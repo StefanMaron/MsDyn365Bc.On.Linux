@@ -251,9 +251,25 @@ steps:
       [ -n "$(RULESET_FILE)" ] && HELPER_ARGS+=(--ruleset-file "$(RULESET_FILE)")
       [ "$(ENABLE_EXTERNAL_RULESETS)" = "true" ] && HELPER_ARGS+=(--enable-external-rulesets)
 
+      # Run the helper to a tempfile rather than via process substitution.
+      # `mapfile -t < <(python3 ...)` SILENTLY SWALLOWS the helper's exit
+      # code, so if the helper bails on a missing path the pipeline
+      # silently compiles without analyzers and reports a green build.
+      # The tempfile pattern lets `if ! ...` see the real exit code.
+      # --project-root tells the helper where the consumer checkout
+      # lives so non-URL paths get resolved relative to the repo root.
       ANALYZER_FLAGS=()
       if [ ${#HELPER_ARGS[@]} -gt 0 ]; then
-        mapfile -t ANALYZER_FLAGS < <(python3 "$(Agent.BuildDirectory)/bc-linux/scripts/resolve-analyzers.py" "${HELPER_ARGS[@]}")
+        HELPER_OUT=$(mktemp)
+        if ! python3 "$(Agent.BuildDirectory)/bc-linux/scripts/resolve-analyzers.py" \
+            --project-root "$(Pipeline.Workspace)/project" \
+            "${HELPER_ARGS[@]}" > "$HELPER_OUT"; then
+          echo "ERROR: resolve-analyzers.py failed — check stderr above" >&2
+          rm -f "$HELPER_OUT"
+          exit 1
+        fi
+        mapfile -t ANALYZER_FLAGS < "$HELPER_OUT"
+        rm -f "$HELPER_OUT"
         echo "Analyzer flags: ${ANALYZER_FLAGS[*]}"
       fi
 

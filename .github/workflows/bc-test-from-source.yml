@@ -381,9 +381,30 @@ jobs:
           [ -n "$RULESET_FILE" ] && HELPER_ARGS+=(--ruleset-file "$RULESET_FILE")
           [ "$ENABLE_EXTERNAL_RULESETS" = "true" ] && HELPER_ARGS+=(--enable-external-rulesets)
 
+          # Run the helper to a tempfile rather than via process substitution.
+          # `mapfile -t < <(python3 ...)` SILENTLY SWALLOWS the helper's exit
+          # code — if the helper bails on a missing path or download error,
+          # mapfile just gets an empty array, ANALYZER_FLAGS stays empty, the
+          # compile runs WITHOUT any cops, and the workflow reports a green
+          # build with zero analyzer enforcement. Exactly the false-green
+          # failure mode the load-failure guard is supposed to prevent —
+          # but the load-failure guard only fires DURING compile, so a
+          # helper crash BEFORE compile slips past it.
+          # The pass --project-root project so consumer-supplied paths
+          # (which are written relative to their repo root) get prepended
+          # with the project/ checkout dir. URLs pass through untouched.
           ANALYZER_FLAGS=()
           if [ ${#HELPER_ARGS[@]} -gt 0 ]; then
-            mapfile -t ANALYZER_FLAGS < <(python3 bc-linux/scripts/resolve-analyzers.py "${HELPER_ARGS[@]}")
+            HELPER_OUT=$(mktemp)
+            if ! python3 bc-linux/scripts/resolve-analyzers.py \
+                --project-root project \
+                "${HELPER_ARGS[@]}" > "$HELPER_OUT"; then
+              echo "ERROR: resolve-analyzers.py failed — check stderr above" >&2
+              rm -f "$HELPER_OUT"
+              exit 1
+            fi
+            mapfile -t ANALYZER_FLAGS < "$HELPER_OUT"
+            rm -f "$HELPER_OUT"
             echo "Analyzer flags: ${ANALYZER_FLAGS[*]}"
           else
             echo "No analyzers configured — compiling without /analyzer or /ruleset flags."
