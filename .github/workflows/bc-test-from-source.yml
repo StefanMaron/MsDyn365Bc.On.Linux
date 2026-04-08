@@ -77,6 +77,70 @@ on:
         type: number
         default: 45
 
+      # ─── Analyzer / ruleset configuration ──────────────────────────────
+      # All optional. Default behavior is "no analyzers, no ruleset" — same
+      # as before these inputs existed, so existing consumers see no change.
+      # When ANY of these are set, the compile step calls
+      # scripts/resolve-analyzers.py to turn them into AL compile flags
+      # (/analyzer:, /ruleset:, /enableexternalrulesets). See
+      # ANALYZER-SUPPORT-PLAN.md for the full design + gotchas.
+      enable_code_cop:
+        description: "Enable Microsoft CodeCop"
+        required: false
+        type: boolean
+        default: false
+      enable_ui_cop:
+        description: "Enable Microsoft UICop"
+        required: false
+        type: boolean
+        default: false
+      enable_app_source_cop:
+        description: "Enable Microsoft AppSourceCop"
+        required: false
+        type: boolean
+        default: false
+      enable_per_tenant_extension_cop:
+        description: "Enable Microsoft PerTenantExtensionCop"
+        required: false
+        type: boolean
+        default: false
+      custom_code_cops:
+        description: >-
+          Comma- or newline-separated list of additional cop DLLs.
+          Each entry is either a local path (relative to your repo) or an
+          https:// URL. URLs are downloaded fresh per run; .nupkg URLs are
+          unzipped and every DLL under lib/net8.0/ is added (so pointing
+          at the ALCops.Analyzers nupkg release just works — all 7 cop
+          DLLs + ALCops.Common.dll come along automatically).
+        required: false
+        type: string
+        default: ""
+      ruleset_file:
+        description: >-
+          Local path or https:// URL to a JSON ruleset file. Passed as
+          /ruleset:. Note: AL compiler accepts JSON only, not Visual
+          Studio's classic XML .ruleset format.
+        required: false
+        type: string
+        default: ""
+      enable_external_rulesets:
+        description: >-
+          When true, pass /enableexternalrulesets so the ruleset file can
+          include remote rulesets via includedRuleSets[].path entries
+          pointing at https:// URLs (e.g. shared org-wide rulesets in a
+          public repo).
+        required: false
+        type: boolean
+        default: false
+      enable_code_analyzers_on_test_apps:
+        description: >-
+          When false (default — matches AL-Go's default), test app
+          compiles skip the analyzer/ruleset flags entirely. Production
+          apps still get them.
+        required: false
+        type: boolean
+        default: false
+
     secrets:
       bc_license:
         description: >-
@@ -292,11 +356,51 @@ jobs:
         env:
           APP_DIRS: ${{ inputs.app_dirs }}
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
+          ENABLE_CODE_COP: ${{ inputs.enable_code_cop }}
+          ENABLE_UI_COP: ${{ inputs.enable_ui_cop }}
+          ENABLE_APP_SOURCE_COP: ${{ inputs.enable_app_source_cop }}
+          ENABLE_PER_TENANT_EXTENSION_COP: ${{ inputs.enable_per_tenant_extension_cop }}
+          CUSTOM_CODE_COPS: ${{ inputs.custom_code_cops }}
+          RULESET_FILE: ${{ inputs.ruleset_file }}
+          ENABLE_EXTERNAL_RULESETS: ${{ inputs.enable_external_rulesets }}
+          ENABLE_CODE_ANALYZERS_ON_TEST_APPS: ${{ inputs.enable_code_analyzers_on_test_apps }}
         run: |
           set -e
           bash bc-linux/scripts/workflow-summary.sh begin COMPILE "Compile AL apps"
+
+          # ─── Resolve analyzer flags via the helper ─────────────────────
+          # Build the helper invocation only when SOMETHING is configured.
+          # When nothing is set, ANALYZER_FLAGS stays empty and the compile
+          # commands run exactly as they did before these inputs existed.
+          HELPER_ARGS=()
+          [ "$ENABLE_CODE_COP" = "true" ] && HELPER_ARGS+=(--enable-code-cop)
+          [ "$ENABLE_UI_COP" = "true" ] && HELPER_ARGS+=(--enable-ui-cop)
+          [ "$ENABLE_APP_SOURCE_COP" = "true" ] && HELPER_ARGS+=(--enable-app-source-cop)
+          [ "$ENABLE_PER_TENANT_EXTENSION_COP" = "true" ] && HELPER_ARGS+=(--enable-per-tenant-extension-cop)
+          [ -n "$CUSTOM_CODE_COPS" ] && HELPER_ARGS+=(--custom-code-cops "$CUSTOM_CODE_COPS")
+          [ -n "$RULESET_FILE" ] && HELPER_ARGS+=(--ruleset-file "$RULESET_FILE")
+          [ "$ENABLE_EXTERNAL_RULESETS" = "true" ] && HELPER_ARGS+=(--enable-external-rulesets)
+
+          ANALYZER_FLAGS=()
+          if [ ${#HELPER_ARGS[@]} -gt 0 ]; then
+            mapfile -t ANALYZER_FLAGS < <(python3 bc-linux/scripts/resolve-analyzers.py "${HELPER_ARGS[@]}")
+            echo "Analyzer flags: ${ANALYZER_FLAGS[*]}"
+          else
+            echo "No analyzers configured — compiling without /analyzer or /ruleset flags."
+          fi
+
+          # Pattern that catches every "analyzer DLL didn't load properly"
+          # failure mode the AL compiler reports. These are emitted as
+          # WARNINGS (AD0001 specifically) so AL compile still exits 0
+          # — without this guard, a misconfigured analyzer would silently
+          # disable itself and the workflow would report a green build
+          # with no cops enforced. Failing here is the only way the
+          # consumer learns their cop wiring is broken.
+          ANALYZER_LOAD_FAIL_PATTERN='AD0001|Could not load|BadImageFormatException|PlatformNotSupportedException'
+
           compile_dir() {
             local src="$1"
+            shift
             [ -f "$src/app.json" ] || { echo "skip $src (no app.json)" >&2; return 0; }
             mkdir -p "$src/.alpackages"
             cp symbols/*.app "$src/.alpackages/" 2>/dev/null || true
@@ -304,19 +408,56 @@ jobs:
             out="$(pwd)/build/$(basename "$src").app"
             mkdir -p build
             echo ">>> Compiling $src → $out"
-            AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out"
+            # Remaining args ($@) are the analyzer flag fragments — may be empty.
+            # When analyzers are configured, capture output so we can grep
+            # for load failures after the compile succeeds. When not, let
+            # AL compile write straight to stdout/stderr (cheaper, simpler
+            # output, same behavior as before this feature existed).
+            if [ "$#" -gt 0 ]; then
+              local tmplog rc
+              tmplog=$(mktemp)
+              AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" "$@" 2>&1 | tee "$tmplog"
+              # tee always exits 0; capture AL compile's real exit code.
+              rc=${PIPESTATUS[0]}
+              if [ "$rc" -ne 0 ]; then
+                rm -f "$tmplog"
+                return $rc
+              fi
+              if grep -qE "$ANALYZER_LOAD_FAIL_PATTERN" "$tmplog"; then
+                echo "ERROR: analyzer load failure detected in compile output for $src" >&2
+                echo "       (cop DLL did not initialize correctly — see lines below)" >&2
+                grep -E "$ANALYZER_LOAD_FAIL_PATTERN" "$tmplog" >&2
+                rm -f "$tmplog"
+                return 1
+              fi
+              rm -f "$tmplog"
+            else
+              AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out"
+            fi
           }
+
           # Compile production apps first so test apps can resolve them as deps.
+          # Production apps always get the analyzer flags (when configured).
           for d in $APP_DIRS; do
             [ -z "$d" ] && continue
-            compile_dir "project/$d"
+            compile_dir "project/$d" "${ANALYZER_FLAGS[@]}"
           done
+
+          # Test apps get analyzer flags only when explicitly opted in via
+          # enable_code_analyzers_on_test_apps. AL-Go's default is false
+          # (analyzers don't run on test apps) and we mirror that so the
+          # behavior matches what consumers see today.
           for d in $TEST_APP_DIRS; do
             [ -z "$d" ] && continue
             mkdir -p "project/$d/.alpackages"
             cp build/*.app "project/$d/.alpackages/" 2>/dev/null || true
-            compile_dir "project/$d"
+            if [ "$ENABLE_CODE_ANALYZERS_ON_TEST_APPS" = "true" ]; then
+              compile_dir "project/$d" "${ANALYZER_FLAGS[@]}"
+            else
+              compile_dir "project/$d"
+            fi
           done
+
           bash bc-linux/scripts/workflow-summary.sh end COMPILE
 
       # ─── Phase 6: synchronization point — wait for BC to be healthy ──

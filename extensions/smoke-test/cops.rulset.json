@@ -1,0 +1,11 @@
+{
+    "name": "bc-linux smoke-test cop validation ruleset",
+    "description": "Used by test-versions.yml to verify that all four Microsoft cops + ALCops load on Linux against every supported BC version. Pulls in StefanMaron/RulesetFiles/base.rulset.json as a remote include so the matrix also exercises /enableexternalrulesets end-to-end. NOT consumed by the template — consumers configure their own rulesets via the workflow inputs.",
+    "includedRuleSets": [
+        {
+            "action": "Default",
+            "path": "https://raw.githubusercontent.com/StefanMaron/RulesetFiles/main/base.rulset.json"
+        }
+    ],
+    "rules": []
+}

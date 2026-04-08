@@ -34,6 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
+      alcops_url: ${{ steps.alcops.outputs.url }}
     steps:
     - id: set
       run: |
@@ -47,6 +48,26 @@ jobs:
         fi
         JSON=$(echo "$VERSIONS" | python3 -c "import sys,json; print(json.dumps({'bc_version': sys.stdin.read().strip().split(',')}))")
         echo "matrix=$JSON" >> $GITHUB_OUTPUT
+
+    - id: alcops
+      # Resolve the latest ALCops.Analyzers nupkg URL via the GitHub API.
+      # ALCops bakes the version into the asset filename, so the static
+      # /releases/latest/download/<file> redirect doesn't work for them
+      # — we have to read the release JSON. This intentionally pulls
+      # 'latest' on every run so the matrix catches any regression
+      # introduced by an ALCops release that breaks Linux .NET 8 loading.
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        URL=$(gh api repos/ALCops/Analyzers/releases/latest \
+          --jq '.assets[] | select(.name | endswith(".nupkg")) | .browser_download_url' \
+          | head -1)
+        if [ -z "$URL" ]; then
+          echo "ERROR: could not resolve latest ALCops nupkg URL" >&2
+          exit 1
+        fi
+        echo "Resolved latest ALCops: $URL"
+        echo "url=$URL" >> $GITHUB_OUTPUT
 
   build-image:
     # Builds the bc-runner image from THIS commit and pushes both :latest and
@@ -119,6 +140,25 @@ jobs:
       # wait-for-bc-healthy.sh from SHA X. Without this we'd test the
       # SHA X image with master scripts.
       bc_linux_ref: ${{ github.sha }}
+      # ─── Analyzer load validation ───────────────────────────────────────
+      # Every matrix leg compiles the smoke test with all four Microsoft cops
+      # PLUS the latest ALCops nupkg PLUS a JSON ruleset that includes
+      # StefanMaron/RulesetFiles/base.rulset.json as a remote include. The
+      # reusable workflow's compile step greps the AL compiler output for
+      # AD0001 / "Could not load" / BadImageFormatException /
+      # PlatformNotSupportedException and fails the job if any of those
+      # appear — catches "cop DLL silently failed to load on a new BC
+      # version" regressions immediately, across the whole support matrix.
+      # extensions/smoke-test/cops.rulset.json is bc-linux-internal and
+      # NOT shipped to consumers via the template — they bring their own
+      # ruleset and customCodeCops via the workflow inputs.
+      enable_code_cop: true
+      enable_ui_cop: true
+      enable_app_source_cop: true
+      enable_per_tenant_extension_cop: true
+      custom_code_cops: ${{ needs.prepare.outputs.alcops_url }}
+      ruleset_file: "extensions/smoke-test/cops.rulset.json"
+      enable_external_rulesets: true
 
   # Exercises the container's own artifact download path (no pre-cached
   # artifacts). Verifies the in-container download feature and lets us
