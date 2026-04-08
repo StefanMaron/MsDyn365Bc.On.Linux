@@ -54,10 +54,14 @@ services:
       - bc-service:/bc/service
     healthcheck:
       test: test -f /tmp/bc-ready && curl -sf -o /dev/null -u BCRUNNER:Admin123! http://localhost:7048/BC/ODataV4/Company || exit 1
-      interval: 15s
-      retries: 120
+      # 5s interval (was 15s) so wait-for-bc-healthy.sh sees the transition within ~5s
+      # of the entrypoint touching /tmp/bc-ready. Saves ~10-15s of slack on every cold
+      # boot. The OData /Company probe is cheap; running it every 5s instead of every
+      # 15s during the start_period grace window adds negligible NST load.
+      interval: 5s
+      retries: 360            # 5s × 360 = 30 min after start_period (was 15s × 120)
       start_period: 60s
-      timeout: 10s
+      timeout: 5s             # was 10s; the probe is cheap, fail fast
 
 volumes:
   bc-artifacts:
