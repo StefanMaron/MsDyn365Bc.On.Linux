@@ -43,12 +43,22 @@ services:
       # Diagnostic only — comma-separated patch IDs to skip (e.g. "14,15,15a,15b,checkfile").
       # Used to bisect Cecil patches that may cause AL→C# emission drift. Empty = production.
       BC_DISABLE_PATCHES: ${BC_DISABLE_PATCHES:-}
+      # Diagnostic only — when 1, NST suspends at startup waiting for a diagnostic
+      # client (dotnet-trace) on /tmp/nst-diag.sock. Used to profile cold boot.
+      BC_PROFILE_NST: ${BC_PROFILE_NST:-0}
       BC_ARTIFACT_URL: ${BC_ARTIFACT_URL:-}
       BC_TEST_APPS: ${BC_TEST_APPS:-}
       SQL_SERVER: sql
-      # .NET runtime tuning (Server GC breaks API — do NOT enable gcServer)
+      # .NET runtime tuning. Defaults are inherited from the entrypoint
+      # (gcServer=1, TieredCompilation=0). These pass-throughs let us A/B
+      # test additional knobs without rebuilding the image.
       DOTNET_TieredCompilation: ${DOTNET_TieredCompilation:-}
       DOTNET_TC_QuickJitForLoops: ${DOTNET_TC_QuickJitForLoops:-}
+      DOTNET_ReadyToRun: ${DOTNET_ReadyToRun:-}
+      DOTNET_GCRetainVM: ${DOTNET_GCRetainVM:-}
+      DOTNET_GCConserveMemory: ${DOTNET_GCConserveMemory:-}
+      DOTNET_GCHeapCount: ${DOTNET_GCHeapCount:-}
+      DOTNET_GCNoAffinitize: ${DOTNET_GCNoAffinitize:-}
     volumes:
       - ${BC_ARTIFACTS_DIR:-bc-artifacts}:/bc/artifacts
       - bc-service:/bc/service

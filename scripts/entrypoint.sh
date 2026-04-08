@@ -732,6 +732,21 @@ mkfifo /tmp/bc-stdin 2>/dev/null || true
 export DOTNET_gcServer=1
 export DOTNET_TieredCompilation=0
 
+# Diagnostic-only: when BC_PROFILE_NST=1, suspend NST at process startup until
+# a diagnostic client (typically dotnet-trace) connects on /tmp/nst-diag.sock.
+# This is the canonical way to profile .NET app startup from the very first
+# instruction. Attach from the host with:
+#   docker exec bc-linux-bc-1 /tmp/dotnet-trace collect \
+#     --diagnostic-port /tmp/nst-diag.sock \
+#     --duration 00:02:30 --format Speedscope -o /tmp/full-cold.nettrace
+# The container must already have /tmp/dotnet-trace staged (curl from
+# https://aka.ms/dotnet-trace/linux-x64 — it's a self-contained ELF).
+if [ "${BC_PROFILE_NST:-0}" = "1" ]; then
+    log_step "BC_PROFILE_NST=1: NST will suspend at startup until /tmp/nst-diag.sock client connects"
+    rm -f /tmp/nst-diag.sock
+    export DOTNET_DiagnosticPorts="/tmp/nst-diag.sock,suspend"
+fi
+
 DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll dotnet Microsoft.Dynamics.Nav.Server.dll /console < /tmp/bc-stdin &
 BC_PID=$!
 # Keep the FIFO writer open in background (prevents EOF)
