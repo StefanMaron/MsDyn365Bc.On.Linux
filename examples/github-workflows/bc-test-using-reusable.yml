@@ -33,6 +33,37 @@ jobs:
       #   "50000,50001,50002"             explicit ids
       codeunit_range: "50000..99999"
 
+      # ─── Optional: analyzers + rulesets ─────────────────────────────
+      # All off by default. Uncomment to enable. The reusable workflow
+      # fails the job if any analyzer DLL fails to load (AD0001,
+      # "Could not load", BadImageFormatException, PlatformNotSupportedException),
+      # so a misconfigured cop can never produce a silently green build.
+      #
+      # See ANALYZER-SUPPORT-PLAN.md in the bc-linux repo for the full
+      # list of gotchas (JSON-only rulesets, /enableexternalrulesets
+      # requirement, ALCops.Common.dll co-load, etc.).
+      #
+      # enable_code_cop: true
+      # enable_ui_cop: true
+      # enable_app_source_cop: true
+      # enable_per_tenant_extension_cop: true
+      #
+      # Custom cop DLLs — local paths or https:// URLs, comma-separated.
+      # .nupkg URLs are unzipped and every DLL under lib/net8.0/ is
+      # added automatically, which makes ALCops and similar "just work":
+      #
+      # custom_code_cops: "https://github.com/ALCops/Analyzers/releases/download/v0.6.1/ALCops.Analyzers.0.6.1.nupkg"
+      #
+      # JSON ruleset (NOT the classic Visual Studio XML .ruleset format).
+      # Can be a local repo path or an https:// URL:
+      #
+      # ruleset_file: "rules.rulset.json"
+      # enable_external_rulesets: true    # needed if your ruleset has includedRuleSets[].path entries pointing at URLs
+      #
+      # Mirror AL-Go's default: analyzers don't run on test apps. Flip
+      # this to true to enforce cops on test apps too.
+      # enable_code_analyzers_on_test_apps: false
+
     # Optional: ISV / developer license. Without this, BC boots with the
     # public Cronus license (which is fine for most test scenarios). If
     # you need your own license, base64-encode it and store as a repo

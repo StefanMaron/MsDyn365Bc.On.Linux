@@ -65,6 +65,41 @@ preinstalled — no service connection or self-hosted agent required.
   Microsoft-hosted Ubuntu agent (~88 MB/s observed in practice), which is
   not worth the complexity of a cache step.
 
+## Custom analyzers and rulesets
+
+The from-source template supports Microsoft's four cops (CodeCop /
+AppSourceCop / PerTenantExtensionCop / UICop), arbitrary custom cops,
+and JSON rulesets — including rulesets that include remote ones via
+`includedRuleSets[].path` URLs.
+
+The relevant pipeline variables (all default off) live in the same
+`variables:` block as the BC version / app dirs:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `ENABLE_CODE_COP` | `false` | Enable Microsoft CodeCop |
+| `ENABLE_UI_COP` | `false` | Enable Microsoft UICop |
+| `ENABLE_APP_SOURCE_COP` | `false` | Enable Microsoft AppSourceCop |
+| `ENABLE_PER_TENANT_EXTENSION_COP` | `false` | Enable Microsoft PerTenantExtensionCop |
+| `CUSTOM_CODE_COPS` | `''` | Comma- or newline-separated list of additional cop DLLs (local paths or `https://` URLs). `.nupkg` URLs are unzipped and every DLL under `lib/net8.0/` is added — point at the [ALCops](https://github.com/ALCops/Analyzers) release nupkg to enable all 7 community cops in one shot. |
+| `RULESET_FILE` | `''` | Local repo path or `https://` URL to a JSON ruleset file. AL compiler accepts JSON only, not the classic Visual Studio XML `.ruleset` format. |
+| `ENABLE_EXTERNAL_RULESETS` | `'false'` | Required when your `RULESET_FILE` includes remote rulesets via `includedRuleSets[].path` URL entries. |
+| `ENABLE_CODE_ANALYZERS_ON_TEST_APPS` | `'false'` | When `'false'` (default — matches AL-Go), test app compiles skip the analyzer flags entirely. Production apps still get them. |
+
+When **any** analyzer is configured, the compile step captures
+output and fails the pipeline if it sees `AD0001`, `Could not load`,
+`BadImageFormatException`, or `PlatformNotSupportedException` — so a
+silently-broken cop can never produce a green build with disabled
+enforcement. This is the load guarantee bc-linux gives you on top of
+AL compile's normal exit-code semantics.
+
+The full design + the six gotchas the empirical investigation surfaced
+(JSON-only rulesets, `.rulset.json` typo, no `app.json` ruleset prop,
+`/enableexternalrulesets` requirement, `AL1033` is a catch-all error
+that hides the real cause, `ALCops.Common.dll` co-load) live in
+[`ANALYZER-SUPPORT-PLAN.md`](../../ANALYZER-SUPPORT-PLAN.md) in the
+bc-linux repo.
+
 ## Customising further
 
 - **Multiple BC versions**: convert the single job into a matrix using a

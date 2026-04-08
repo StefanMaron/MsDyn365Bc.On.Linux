@@ -65,6 +65,34 @@ variables:
   # AL compiler version. Has to match the major BC version. The version
   # below is known to work with BC 27.x. For BC 28.x bump it.
   AL_TOOL_VERSION: '16.2.28.57946'
+
+  # ─── Optional: analyzers + ruleset ───────────────────────────────────
+  # All off by default. Set to 'true' / fill in to enable. The compile
+  # step fails the pipeline if any cop DLL fails to load (AD0001,
+  # 'Could not load', BadImageFormatException, PlatformNotSupportedException),
+  # so a misconfigured cop can never produce a silently green build.
+  # See ANALYZER-SUPPORT-PLAN.md in the bc-linux repo for the gotchas.
+  ENABLE_CODE_COP: 'false'
+  ENABLE_UI_COP: 'false'
+  ENABLE_APP_SOURCE_COP: 'false'
+  ENABLE_PER_TENANT_EXTENSION_COP: 'false'
+  # Comma- or newline-separated list of additional cop DLLs. Each entry
+  # is either a local path or an https:// URL. .nupkg URLs are unzipped
+  # and every DLL under lib/net8.0/ is added — pointing at the ALCops
+  # release nupkg makes all 7 cops + ALCops.Common.dll come along
+  # automatically. Example:
+  #   'https://github.com/ALCops/Analyzers/releases/download/v0.6.1/ALCops.Analyzers.0.6.1.nupkg'
+  CUSTOM_CODE_COPS: ''
+  # JSON ruleset (NOT the classic VS XML .ruleset format). Local repo
+  # path or https:// URL.
+  RULESET_FILE: ''
+  # Set to 'true' if RULESET_FILE has includedRuleSets[].path entries
+  # pointing at https:// URLs (e.g. shared org-wide rulesets in a public
+  # repo). Required by the AL compiler for any URL-scheme include.
+  ENABLE_EXTERNAL_RULESETS: 'false'
+  # Mirror AL-Go's default: analyzers don't run on test apps. Set to
+  # 'true' to enforce cops on test apps too.
+  ENABLE_CODE_ANALYZERS_ON_TEST_APPS: 'false'
   # --------------------------------------------------------------------
 
   # bc-linux runtime image (publicly available on GHCR — no auth needed).
@@ -205,25 +233,85 @@ steps:
       SYMBOLS="$(Pipeline.Workspace)/symbols"
       BUILD_DIR="$(Pipeline.Workspace)/build"
       mkdir -p "$BUILD_DIR"
+
+      # ─── Resolve analyzer flags via the helper ──────────────────────
+      # Build the helper invocation only when SOMETHING is configured.
+      # When nothing is set, ANALYZER_FLAGS stays empty and the compile
+      # commands run exactly as they did before this feature existed.
+      # resolve-analyzers.py handles Microsoft cop path resolution from
+      # the AL tool dir, downloading URL-referenced custom cops, .nupkg
+      # auto-extraction (so ALCops.Common.dll comes along automatically),
+      # and remote ruleset downloads.
+      HELPER_ARGS=()
+      [ "$(ENABLE_CODE_COP)" = "true" ] && HELPER_ARGS+=(--enable-code-cop)
+      [ "$(ENABLE_UI_COP)" = "true" ] && HELPER_ARGS+=(--enable-ui-cop)
+      [ "$(ENABLE_APP_SOURCE_COP)" = "true" ] && HELPER_ARGS+=(--enable-app-source-cop)
+      [ "$(ENABLE_PER_TENANT_EXTENSION_COP)" = "true" ] && HELPER_ARGS+=(--enable-per-tenant-extension-cop)
+      [ -n "$(CUSTOM_CODE_COPS)" ] && HELPER_ARGS+=(--custom-code-cops "$(CUSTOM_CODE_COPS)")
+      [ -n "$(RULESET_FILE)" ] && HELPER_ARGS+=(--ruleset-file "$(RULESET_FILE)")
+      [ "$(ENABLE_EXTERNAL_RULESETS)" = "true" ] && HELPER_ARGS+=(--enable-external-rulesets)
+
+      ANALYZER_FLAGS=()
+      if [ ${#HELPER_ARGS[@]} -gt 0 ]; then
+        mapfile -t ANALYZER_FLAGS < <(python3 "$(Agent.BuildDirectory)/bc-linux/scripts/resolve-analyzers.py" "${HELPER_ARGS[@]}")
+        echo "Analyzer flags: ${ANALYZER_FLAGS[*]}"
+      fi
+
+      # ─── Pattern that catches every analyzer load failure mode ─────
+      # AL compile reports these as WARNINGS (AD0001 specifically), so
+      # without this guard a misconfigured cop would silently disable
+      # itself and the pipeline would report a green build with no cops
+      # actually enforced. Failing here is the only way you learn your
+      # cop wiring is broken.
+      ANALYZER_LOAD_FAIL_PATTERN='AD0001|Could not load|BadImageFormatException|PlatformNotSupportedException'
+
       compile_dir() {
         local src="$1"
+        shift
         [ -f "$src/app.json" ] || { echo "skip $src (no app.json)" >&2; return 0; }
         mkdir -p "$src/.alpackages"
         cp "$SYMBOLS"/*.app "$src/.alpackages/" 2>/dev/null || true
         local out="$BUILD_DIR/$(basename "$src").app"
         echo ">>> Compiling $src → $out"
-        AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out"
+        # Remaining args ($@) are the analyzer flag fragments — may be empty.
+        if [ "$#" -gt 0 ]; then
+          local tmplog rc
+          tmplog=$(mktemp)
+          AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" "$@" 2>&1 | tee "$tmplog"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            rm -f "$tmplog"
+            return $rc
+          fi
+          if grep -qE "$ANALYZER_LOAD_FAIL_PATTERN" "$tmplog"; then
+            echo "ERROR: analyzer load failure detected in compile output for $src" >&2
+            grep -E "$ANALYZER_LOAD_FAIL_PATTERN" "$tmplog" >&2
+            rm -f "$tmplog"
+            return 1
+          fi
+          rm -f "$tmplog"
+        else
+          AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out"
+        fi
       }
+
       cd "$(Pipeline.Workspace)/project"
+      # Production apps always get the analyzer flags (when configured).
       for d in $(APP_DIRS); do
         [ -z "$d" ] && continue
-        compile_dir "$d"
+        compile_dir "$d" "${ANALYZER_FLAGS[@]}"
       done
+      # Test apps get analyzer flags only when explicitly opted in.
+      # Mirrors AL-Go's default of "analyzers don't run on test apps."
       for d in $(TEST_APP_DIRS); do
         [ -z "$d" ] && continue
         mkdir -p "$d/.alpackages"
         cp "$BUILD_DIR"/*.app "$d/.alpackages/" 2>/dev/null || true
-        compile_dir "$d"
+        if [ "$(ENABLE_CODE_ANALYZERS_ON_TEST_APPS)" = "true" ]; then
+          compile_dir "$d" "${ANALYZER_FLAGS[@]}"
+        else
+          compile_dir "$d"
+        fi
       done
       bash "$(Agent.BuildDirectory)/bc-linux/scripts/workflow-summary.sh" end COMPILE
     displayName: 'Compile AL apps (no publish yet)'
