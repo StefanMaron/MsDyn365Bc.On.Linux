@@ -382,6 +382,8 @@ jobs:
               AL_TOOL_DIR="$EXTRACT_DIR/lib/net8.0"
             fi
             chmod +x "$AL_TOOL_DIR/alc" 2>/dev/null || true
+            echo "alc usage/flags (for diagnostics):"
+            "$AL_TOOL_DIR/alc" 2>&1 | grep -i -E "(preprocess|symbol|usage|option)" || true
             # Create an AL wrapper so `AL compile ...` works in later steps.
             # The v16 dotnet tool ships AL.dll which routes the `compile`
             # subcommand; raw alc doesn't accept it — strip it here.

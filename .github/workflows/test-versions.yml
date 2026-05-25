@@ -157,6 +157,10 @@ jobs:
       custom_code_cops: ${{ needs.prepare.outputs.alcops_url }}
       ruleset_file: "extensions/smoke-test/cops.rulset.json"
       enable_external_rulesets: true
+      # Exercise preprocessor_symbols end-to-end on every matrix leg.
+      # The smoke test has no #if guards so the symbol is a no-op at the AL
+      # level, but it exercises the flag wiring through the workflow and alc.
+      preprocessor_symbols: "SMOKE"
 
   # Exercises the container's own artifact download path (no pre-cached
   # artifacts). Verifies the in-container download feature and lets us
