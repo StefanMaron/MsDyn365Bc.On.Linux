@@ -346,23 +346,54 @@ jobs:
             esac
           fi
           echo "Installing AL compiler $AL_TOOL"
-          dotnet tool install -g \
-            Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-            --version "$AL_TOOL" 2>&1 || \
-          dotnet tool update -g \
-            Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-            --version "$AL_TOOL" 2>&1 || true
-          echo "Installed global tools:"
-          dotnet tool list -g
-          echo "AL tool store contents:"
-          find "$HOME/.dotnet/tools/.store/microsoft.dynamics.businesscentral.development.tools.linux" \
-            -maxdepth 4 -type d 2>/dev/null || echo "(nothing at ~/.dotnet/tools/.store)"
-          if [ -n "${DOTNET_ROOT:-}" ]; then
-            echo "DOTNET_ROOT=$DOTNET_ROOT"
-            find "$DOTNET_ROOT/tools/.store/microsoft.dynamics.businesscentral.development.tools.linux" \
-              -maxdepth 4 -type d 2>/dev/null || echo "(nothing at DOTNET_ROOT/tools/.store)"
+          PKG="microsoft.dynamics.businesscentral.development.tools.linux"
+          AL_TOOL_DIR=""
+
+          # Try dotnet global tool first (BC 27 / v16 packages ship with
+          # DotnetToolSettings.xml and install correctly this way).
+          # BC 28+ dropped the tool manifest — the package is now a plain
+          # library nupkg and `dotnet tool install` rejects it; fall through
+          # to the nupkg-extraction path in that case.
+          if dotnet tool install -g \
+              Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
+              --version "$AL_TOOL" 2>&1 \
+          || dotnet tool update -g \
+              Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
+              --version "$AL_TOOL" 2>&1; then
+            echo "Installed as dotnet global tool"
+            echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+            AL_TOOL_DIR=$(find "$HOME/.dotnet/tools/.store/$PKG" \
+              -type d -name "any" -path "*/tools/net8.0/any" 2>/dev/null \
+              | sort | tail -1)
+          else
+            # Not a dotnet tool — download and extract the nupkg directly.
+            echo "Package is not a dotnet global tool; extracting nupkg"
+            EXTRACT_DIR="$HOME/.al-tool-cache/$AL_TOOL"
+            mkdir -p "$EXTRACT_DIR"
+            curl -fsSL \
+              "https://api.nuget.org/v3-flatcontainer/${PKG}/${AL_TOOL}/${PKG}.${AL_TOOL}.nupkg" \
+              -o "$EXTRACT_DIR/pkg.zip"
+            unzip -q -o "$EXTRACT_DIR/pkg.zip" -d "$EXTRACT_DIR"
+            rm "$EXTRACT_DIR/pkg.zip"
+            # Prefer dotnet tool layout (tools/net8.0/any); fall back to lib/net8.0
+            if [ -d "$EXTRACT_DIR/tools/net8.0/any" ]; then
+              AL_TOOL_DIR="$EXTRACT_DIR/tools/net8.0/any"
+            else
+              AL_TOOL_DIR="$EXTRACT_DIR/lib/net8.0"
+            fi
+            chmod +x "$AL_TOOL_DIR/alc" 2>/dev/null || true
+            # Create an AL wrapper so `AL compile ...` works in later steps.
+            # The dotnet global tool install would normally create this in
+            # ~/.dotnet/tools/; we replicate it here for the nupkg path.
+            mkdir -p "$HOME/.al-bin"
+            printf '#!/bin/bash\nexec "%s/alc" "$@"\n' "$AL_TOOL_DIR" \
+              > "$HOME/.al-bin/AL"
+            chmod +x "$HOME/.al-bin/AL"
+            echo "$HOME/.al-bin" >> "$GITHUB_PATH"
           fi
-          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+          echo "AL_TOOL_DIR=$AL_TOOL_DIR" >> "$GITHUB_ENV"
+          echo "AL compiler ready: $AL_TOOL_DIR"
           bash bc-linux/scripts/workflow-summary.sh end AL_INSTALL
 
       - name: Stage symbols from BC artifacts
@@ -476,6 +507,7 @@ jobs:
             HELPER_OUT=$(mktemp)
             if ! python3 bc-linux/scripts/resolve-analyzers.py \
                 --project-root project \
+                ${AL_TOOL_DIR:+--al-tool-dir "$AL_TOOL_DIR"} \
                 "${HELPER_ARGS[@]}" > "$HELPER_OUT"; then
               echo "ERROR: resolve-analyzers.py failed — check stderr above" >&2
               rm -f "$HELPER_OUT"

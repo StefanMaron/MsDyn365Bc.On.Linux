@@ -81,27 +81,16 @@ def auto_detect_al_tool_dir() -> str | None:
       ~/.dotnet/tools/.store/microsoft.dynamics.businesscentral.development.tools.linux/<ver>/
         microsoft.dynamics.businesscentral.development.tools.linux/<ver>/tools/net8.0/any/
 
-    Also checks $DOTNET_ROOT/tools/.store/ — GitHub Actions runners set
-    DOTNET_ROOT=/usr/share/dotnet via setup-dotnet, which redirects
-    `dotnet tool install -g` there instead of ~/.dotnet/tools.
-
     Picks the highest version when multiple are installed.
     """
-    tool_bases = [os.path.join(os.path.expanduser("~"), ".dotnet", "tools")]
-    dotnet_root = os.environ.get("DOTNET_ROOT", "")
-    if dotnet_root:
-        tool_bases.append(os.path.join(dotnet_root, "tools"))
-
-    all_matches = []
-    for base in tool_bases:
-        pattern = os.path.join(
-            base, ".store",
-            "microsoft.dynamics.businesscentral.development.tools.linux",
-            "*", "microsoft.dynamics.businesscentral.development.tools.linux",
-            "*", "tools", "net8.0", "any",
-        )
-        all_matches.extend(glob(pattern))
-    matches = sorted(all_matches)
+    home = os.path.expanduser("~")
+    pattern = os.path.join(
+        home, ".dotnet", "tools", ".store",
+        "microsoft.dynamics.businesscentral.development.tools.linux",
+        "*", "microsoft.dynamics.businesscentral.development.tools.linux",
+        "*", "tools", "net8.0", "any",
+    )
+    matches = sorted(glob(pattern))
     return matches[-1] if matches else None
 
 
