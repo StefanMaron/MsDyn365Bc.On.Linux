@@ -56,11 +56,26 @@ on:
             "50000..50100,130450,200000..210000" mixed
         required: true
         type: string
-      al_tool_version:
-        description: "Linux AL compiler tool version (Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux)"
+      preprocessor_symbols:
+        description: >-
+          Comma-separated preprocessor symbols passed to /preprocessorsymbols
+          (e.g. "BC27PLUS,BC28PLUS"). Empty = no flag passed to the compiler.
         required: false
         type: string
-        default: "16.2.28.57946"
+        default: ""
+      runtime_version:
+        description: >-
+          Override app.json "runtime" before compile (e.g. "16.0" for BC 27,
+          "17.0" for BC 28). Auto-derived from bc_version when blank.
+          Set explicitly to suppress auto-derive for edge cases.
+        required: false
+        type: string
+        default: ""
+      al_tool_version:
+        description: "Linux AL compiler tool version (Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux NuGet). Auto-derived from bc_version when blank: BC 27 → 16.2.28.57946, BC 28 → 17.0.34.45391."
+        required: false
+        type: string
+        default: ""
       runner_image:
         description: "Override the bc-runner image (defaults to the public ghcr.io tag)"
         required: false
@@ -318,9 +333,22 @@ jobs:
       - name: Install AL compiler (Linux)
         run: |
           bash bc-linux/scripts/workflow-summary.sh begin AL_INSTALL "Install AL compiler"
+          AL_TOOL="${{ inputs.al_tool_version }}"
+          BC_MAJOR=$(echo "${{ inputs.bc_version }}" | cut -d. -f1)
+          if [ -z "$AL_TOOL" ]; then
+            case "$BC_MAJOR" in
+              27) AL_TOOL="16.2.28.57946" ;;
+              28) AL_TOOL="17.0.34.45391" ;;
+              *)
+                echo "::warning::bc_version major $BC_MAJOR is not in the al_tool lookup table — using fallback 16.2.28.57946"
+                AL_TOOL="16.2.28.57946"
+                ;;
+            esac
+          fi
+          echo "Installing AL compiler $AL_TOOL"
           dotnet tool install -g \
             Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-            --version "${{ inputs.al_tool_version }}" 2>/dev/null || true
+            --version "$AL_TOOL" 2>/dev/null || true
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
           bash bc-linux/scripts/workflow-summary.sh end AL_INSTALL
 
@@ -352,6 +380,42 @@ jobs:
           echo "Staged $(ls symbols/*.app 2>/dev/null | wc -l) symbol files"
           bash bc-linux/scripts/workflow-summary.sh end SYMBOLS
 
+      - name: Patch app.json runtime
+        env:
+          APP_DIRS: ${{ inputs.app_dirs }}
+          TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
+          RUNTIME_VERSION: ${{ inputs.runtime_version }}
+        run: |
+          EFFECTIVE_RUNTIME="$RUNTIME_VERSION"
+          BC_MAJOR=$(echo "${{ inputs.bc_version }}" | cut -d. -f1)
+          if [ -z "$EFFECTIVE_RUNTIME" ]; then
+            case "$BC_MAJOR" in
+              27) EFFECTIVE_RUNTIME="16.0" ;;
+              28) EFFECTIVE_RUNTIME="17.0" ;;
+              *)
+                echo "::warning::bc_version major $BC_MAJOR is not in the runtime lookup table — using fallback 14.0"
+                EFFECTIVE_RUNTIME="14.0"
+                ;;
+            esac
+          fi
+          echo "Patching app.json runtime → $EFFECTIVE_RUNTIME"
+          for d in $APP_DIRS $TEST_APP_DIRS; do
+            [ -z "$d" ] && continue
+            F="project/$d/app.json"
+            [ -f "$F" ] || continue
+            python3 - "$F" "$EFFECTIVE_RUNTIME" <<'PYEOF'
+          import sys, json, pathlib
+          p = pathlib.Path(sys.argv[1])
+          d = json.loads(p.read_text())
+          if d.get("runtime") != sys.argv[2]:
+              d["runtime"] = sys.argv[2]
+              p.write_text(json.dumps(d, indent=2) + "\n")
+              print(f"  patched {p}: runtime → {sys.argv[2]}")
+          else:
+              print(f"  {p}: runtime already {sys.argv[2]}, skip")
+          PYEOF
+          done
+
       - name: Compile AL apps (no publish yet)
         env:
           APP_DIRS: ${{ inputs.app_dirs }}
@@ -364,6 +428,7 @@ jobs:
           RULESET_FILE: ${{ inputs.ruleset_file }}
           ENABLE_EXTERNAL_RULESETS: ${{ inputs.enable_external_rulesets }}
           ENABLE_CODE_ANALYZERS_ON_TEST_APPS: ${{ inputs.enable_code_analyzers_on_test_apps }}
+          PREPROCESSOR_SYMBOLS: ${{ inputs.preprocessor_symbols }}
         run: |
           set -e
           bash bc-linux/scripts/workflow-summary.sh begin COMPILE "Compile AL apps"
@@ -419,6 +484,9 @@ jobs:
           # consumer learns their cop wiring is broken.
           ANALYZER_LOAD_FAIL_PATTERN='AD0001|Could not load|BadImageFormatException|PlatformNotSupportedException'
 
+          PP_FLAG=()
+          [ -n "$PREPROCESSOR_SYMBOLS" ] && PP_FLAG=("/preprocessorsymbols:$PREPROCESSOR_SYMBOLS")
+
           compile_dir() {
             local src="$1"
             shift
@@ -437,7 +505,7 @@ jobs:
             if [ "$#" -gt 0 ]; then
               local tmplog rc
               tmplog=$(mktemp)
-              AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" "$@" 2>&1 | tee "$tmplog"
+              AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" "${PP_FLAG[@]}" "$@" 2>&1 | tee "$tmplog"
               # tee always exits 0; capture AL compile's real exit code.
               rc=${PIPESTATUS[0]}
               if [ "$rc" -ne 0 ]; then
@@ -453,7 +521,7 @@ jobs:
               fi
               rm -f "$tmplog"
             else
-              AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out"
+              AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" "${PP_FLAG[@]}"
             fi
           }
 
