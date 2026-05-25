@@ -1090,6 +1090,60 @@ PYEOF
             done <<< "$INSTALL_ORDER"
         fi
 
+        # Default flow: republish the test framework apps that were wiped
+        # from SQL (lines 573-579) plus test toolkit apps that aren't in
+        # the sandbox DB but are needed by most real test apps.
+        # The selective/keep-set path above handles this when BC_KEEP_APP_IDS
+        # is set; this block covers the interactive / Codespace case.
+        if [ -z "${BC_KEEP_APP_IDS:-}" ]; then
+            echo "[entrypoint] Publishing test toolkit apps (default flow)..."
+            TF_INSTALL_ORDER=$(python3 - "$ARTIFACTS" << 'PYEOF'
+import sys
+sys.path.insert(0, "/bc/scripts")
+from _bcapp import load_artifact_apps
+apps = load_artifact_apps(sys.argv[1])
+# Core test framework (wiped from SQL, need republish) + test toolkit
+# apps that aren't in the sandbox DB but most test apps depend on.
+# This list rarely changes — last change was ~5 years ago.
+NAMES = {
+    "Test Runner", "Library Assert", "Library Variable Storage",
+    "Permissions Mock", "Any",
+    "System Application Test Library", "Business Foundation Test Libraries",
+    "Tests-TestLibraries",
+}
+by_name = {}
+for aid, info in apps.items():
+    if info.get("name") in NAMES:
+        by_name[aid] = info
+visited, ordered = set(), []
+def visit(aid):
+    if aid in visited:
+        return
+    visited.add(aid)
+    info = apps.get(aid)
+    if info is None:
+        return
+    for dep in info.get("dependencies", []):
+        visit(dep["id"])
+    if aid in by_name:
+        ordered.append(info["path"])
+for aid in by_name:
+    visit(aid)
+for path in ordered:
+    print(path)
+PYEOF
+            )
+            while IFS= read -r APP_PATH; do
+                [ -z "$APP_PATH" ] && continue
+                NAME=$(basename "$APP_PATH")
+                HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
+                    -u "BCRUNNER:Admin123!" -X POST \
+                    -F "file=@$APP_PATH;type=application/octet-stream" \
+                    "$DEV_URL/apps?SchemaUpdateMode=synchronize" 2>/dev/null)
+                echo "[entrypoint]   $NAME: HTTP $HTTP"
+            done <<< "$TF_INSTALL_ORDER"
+        fi
+
         # Publish additional test app dependencies (e.g. System App Test Library, Tests-TestLibraries)
         # and the actual test app (e.g. Tests-SINGLESERVER) if BC_TEST_APPS is set.
         # BC_TEST_APPS is a semicolon-separated list of .app file paths.

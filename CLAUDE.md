@@ -400,7 +400,6 @@ that touches `src/`, `scripts/`, or `extensions/`. Both
 `build-image.yml` and `test-versions.yml`'s inline build job share
 registry layer cache via the same `:cache` tag.
 
-Trigger `test-versions` manually with a `versions: "27.0,27.5"`
+Trigger `test-versions` manually with a `versions: "27.0,28.1"`
 input to test specific versions. The default matrix runs every
-supported BC version on push/PR. 28.0 will be added once Microsoft
-ships an officially-released AL compiler that supports it.
+supported BC version on push/PR (currently 27.0–27.5 and 28.0–28.1).

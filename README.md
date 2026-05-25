@@ -15,9 +15,10 @@ The `--wait` flag returns once BC is healthy. **First boot takes ~5 minutes**
 starts take ~1 minute.
 
 When the command returns, BC is running with a CRONUS demo database, dev
-endpoint, OData, API, and the test framework (Test Runner, Library Assert,
-Variable Storage, Permissions Mock, Any) all published — ready for extension
-development and testing.
+endpoint, OData, API, and the test toolkit (Test Runner, Library Assert,
+Variable Storage, Permissions Mock, Any, System Application Test Library,
+Business Foundation Test Libraries, Tests-TestLibraries) all published —
+ready for extension development and testing.
 
 **Verify it's up:**
 

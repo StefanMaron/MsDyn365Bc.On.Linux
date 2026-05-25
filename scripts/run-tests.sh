@@ -44,8 +44,41 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_RUNNER_APP=""
 JUNIT_OUTPUT=""
 
+show_help() {
+    cat <<'HELPEOF'
+Usage: run-tests.sh [options]
+
+Options:
+  --app <path>               Test app file (auto-published + codeunit discovery)
+  --codeunit-range <range>   Codeunit IDs to test. Accepts:
+                               "70000"                            single id
+                               "70000..70010"                     AL range
+                               "50000..50100|130450..130459"      multiple ranges (pipe)
+                               "50000,50001,50002"                explicit ids
+                               "50000..50100,130450,200000..210000" mixed
+  --junit-output <path>      Write per-test results as JUnit XML to <path>
+  --company <name>           Company name (default: auto-detect)
+  --base-url <url>           BC OData base URL (default: http://localhost:7048/BC)
+  --dev-url <url>            BC Dev endpoint (default: http://localhost:7049/BC/dev)
+  --auth <user:pass>         Authentication (default: BCRUNNER:Admin123!)
+  --timeout <minutes>        Overall timeout (default: 30)
+  --test-runner-app <path>   TestRunnerExtension .app (auto-detected)
+  --disabled-tests <dir>     Directory with DisabledTests JSON files
+  -h, --help                 Show this help
+
+Examples:
+  # Run tests from a compiled .app
+  ./scripts/run-tests.sh --app MyTestApp.app --codeunit-range 50000..50100
+
+  # Remote BC (e.g. from a devcontainer / Codespace)
+  ./scripts/run-tests.sh --base-url http://172.17.0.1:7048/BC --app MyTestApp.app
+HELPEOF
+    exit 0
+}
+
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -h|--help) show_help;;
         --app) APP_FILE="$2"; shift 2;;
         --codeunit-range) CODEUNIT_RANGE="$2"; shift 2;;
         --company) COMPANY="$2"; shift 2;;
@@ -57,7 +90,7 @@ while [[ $# -gt 0 ]]; do
         --disabled-tests) DISABLED_TESTS_DIR="$2"; shift 2;;
         --junit-output) JUNIT_OUTPUT="$2"; shift 2;;
         --host|--test-runner|--suite-name|--codeunit-timeout|--extension-id|--sql-password) shift 2;;
-        *) echo "Unknown option: $1"; exit 1;;
+        *) echo "Unknown option: $1 (try --help)"; exit 1;;
     esac
 done
 
@@ -65,6 +98,14 @@ echo "=== BC Test Runner ==="
 
 # --- Helper ---
 py3() { env -u PYTHONHOME -u PYTHONPATH python3 "$@"; }
+
+# Derive scheme://host (no port, no path) and instance path from BASE_URL
+# so fallback URLs on other ports use the same host instead of hardcoded localhost.
+_URL_ORIGIN=$(echo "$BASE_URL" | sed -E 's|(https?://[^:/]+).*|\1|')
+_BC_PATH=$(echo "$BASE_URL" | sed -E 's|https?://[^/]+(/.*)$|\1|')
+[ -z "$_URL_ORIGIN" ] && _URL_ORIGIN="http://localhost"
+[ -z "$_BC_PATH" ] && _BC_PATH="/BC"
+_API_FALLBACK="${_URL_ORIGIN}:7052${_BC_PATH}"
 
 # --- Find TestRunnerExtension .app ---
 if [ -z "$TEST_RUNNER_APP" ]; then
@@ -77,7 +118,7 @@ fi
 
 # === Company Auto-Detection ===
 COMPANIES_JSON=""
-for url in "${BASE_URL}/api/v2.0/companies" "http://localhost:7052/BC/api/v2.0/companies"; do
+for url in "${BASE_URL}/api/v2.0/companies" "${_API_FALLBACK}/api/v2.0/companies"; do
     COMPANIES_JSON=$(curl -sf --max-time 10 -u "$AUTH" "$url" 2>/dev/null || true)
     [ -n "$COMPANIES_JSON" ] && break
 done
@@ -94,7 +135,7 @@ COMPANY_ID=$(echo "$COMPANIES_JSON" | py3 -c "import sys,json; c=json.load(sys.s
 [ -z "$COMPANY" ] && COMPANY="${COMPANY_AUTO:-CRONUS International Ltd.}"
 
 if [ -z "$COMPANY_ID" ]; then
-    for url in "${BASE_URL}/api/v2.0/companies" "http://localhost:7052/BC/api/v2.0/companies"; do
+    for url in "${BASE_URL}/api/v2.0/companies" "${_API_FALLBACK}/api/v2.0/companies"; do
         COMPANY_ID=$(curl -sf --max-time 10 -u "$AUTH" "$url" 2>/dev/null \
             | py3 -c "import sys,json; [print(c.get('id',c.get('SystemId',''))) for c in json.load(sys.stdin)['value'] if c.get('name',c.get('Name',''))==sys.argv[1]]" "$COMPANY" 2>/dev/null || true)
         [ -n "$COMPANY_ID" ] && break
@@ -108,13 +149,13 @@ echo "Company: $COMPANY ($COMPANY_ID)"
 
 # === Determine API Base URL ===
 API_PORT_BASE=""
-for base in "${BASE_URL}" "http://localhost:7052/BC"; do
+for base in "${BASE_URL}" "$_API_FALLBACK"; do
     HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" \
         "${base}/api/custom/automation/v1.0/companies(${COMPANY_ID})/codeunitRunRequests" 2>/dev/null || echo "000")
     [ "$HTTP" = "200" ] && API_PORT_BASE="$base" && break
 done
 if [ -z "$API_PORT_BASE" ]; then
-    for base in "${BASE_URL}" "http://localhost:7052/BC"; do
+    for base in "${BASE_URL}" "$_API_FALLBACK"; do
         T=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -u "$AUTH" "${base}/api/v2.0/companies" 2>/dev/null || echo "000")
         [ "$T" = "200" ] && API_PORT_BASE="$base" && break
     done
@@ -387,7 +428,7 @@ if ! verify_suite_populated "$REQUEST_ID" "$CODEUNIT_IDS"; then
     echo ""
     echo "       Cross-check installed extensions:"
     echo "         curl -u $AUTH '${BASE_URL}/api/v2.0/extensionDeployments'"
-    echo "         curl -u $AUTH 'http://localhost:7052/BC/api/v2.0/extensionDeployments'"
+    echo "         curl -u $AUTH '${_API_FALLBACK}/api/v2.0/extensionDeployments'"
     exit 1
 fi
 echo "Test suite populated."
@@ -452,8 +493,9 @@ fi
 echo ""
 echo "=== Running Tests ==="
 
-# Extract host from BASE_URL for WebSocket connection
-BC_HOST=$(echo "$BASE_URL" | sed 's|http[s]*://||' | sed 's|/.*||' | sed 's|:.*||')
+# Extract host from BASE_URL for WebSocket and API connections.
+# Reuses _URL_ORIGIN (scheme://host) parsed earlier.
+BC_HOST=$(echo "$_URL_ORIGIN" | sed 's|http[s]*://||')
 [ -z "$BC_HOST" ] && BC_HOST="localhost"
 WS_HOST="${BC_HOST}:7085"
 ODATA_HOST="${BC_HOST}:7052"
@@ -473,30 +515,42 @@ echo "Executing $NUM_CODEUNITS codeunits via WebSocket (max $MAX_ITER iterations
 # We pass --num-codeunits for correct progress display only.
 #
 # TestRunner execution strategy:
-#   1. If BC is in a local docker compose stack, run it INSIDE the bc container
-#      via `docker compose exec`. This requires NO host-side .NET 8 SDK because
-#      the container already has the .NET 8 runtime (and we pre-publish the
-#      TestRunner.dll into the image at /bc/tools/TestRunner/).
-#   2. Otherwise (remote BC, or no docker), fall back to `dotnet run` against
-#      the source project — requires .NET 8 SDK on the host.
+#   1. If a bc-linux docker compose stack is running, run TestRunner INSIDE the
+#      bc container via `docker compose exec`. This requires NO host-side .NET 8
+#      SDK because the container already has the runtime and the pre-built
+#      TestRunner.dll at /bc/tools/TestRunner/. Works regardless of whether
+#      BC_HOST is localhost, 127.0.0.1, or a docker bridge IP like 172.17.0.1
+#      (e.g. when called from a devcontainer / Codespace).
+#   2. Otherwise, try a pre-built TestRunner.dll on the host (no SDK needed).
+#   3. Last resort: `dotnet run` against the source project (needs .NET 8 SDK).
 USE_DOCKER_EXEC=false
+HOST_PREBUILT=""
 DOCKER_BC_CONTAINER=""
-if [ "$BC_HOST" = "localhost" ] || [ "$BC_HOST" = "127.0.0.1" ]; then
-    if command -v docker >/dev/null 2>&1; then
-        # Try to find a running bc container in the bc-linux compose project.
-        DOCKER_BC_CONTAINER=$(cd "$REPO_DIR" 2>/dev/null && docker compose ps -q bc 2>/dev/null | head -1)
-        if [ -n "$DOCKER_BC_CONTAINER" ]; then
-            # Verify TestRunner.dll is bundled in the image. Older bc-runner
-            # images (built before this change) don't have it; in that case
-            # we fall back to host dotnet run so the script keeps working.
-            if (cd "$REPO_DIR" 2>/dev/null && docker compose exec -T bc test -f /bc/tools/TestRunner/TestRunner.dll 2>/dev/null); then
-                USE_DOCKER_EXEC=true
-            else
-                echo "[run-tests] bc-runner image does not bundle TestRunner.dll — falling back to host dotnet run."
-                echo "[run-tests]   (rebuild with 'docker compose build bc' to drop the host SDK requirement.)"
-            fi
+if command -v docker >/dev/null 2>&1; then
+    # Try to find a running bc container in the bc-linux compose project.
+    DOCKER_BC_CONTAINER=$(cd "$REPO_DIR" 2>/dev/null && docker compose ps -q bc 2>/dev/null | head -1)
+    if [ -n "$DOCKER_BC_CONTAINER" ]; then
+        # Verify TestRunner.dll is bundled in the image. Older bc-runner
+        # images (built before this change) don't have it; in that case
+        # we fall through to the host-side paths.
+        if (cd "$REPO_DIR" 2>/dev/null && docker compose exec -T bc test -f /bc/tools/TestRunner/TestRunner.dll 2>/dev/null); then
+            USE_DOCKER_EXEC=true
+        else
+            echo "[run-tests] bc-runner image does not bundle TestRunner.dll — trying host-side paths."
+            echo "[run-tests]   (rebuild with 'docker compose build bc' to drop the host SDK requirement.)"
         fi
     fi
+fi
+# Check for a pre-built binary on the host (from a previous `dotnet publish`).
+if [ "$USE_DOCKER_EXEC" = "false" ]; then
+    for candidate in \
+        "$REPO_DIR/tools/TestRunner/bin/Release/net8.0/publish/TestRunner.dll" \
+        "$REPO_DIR/tools/TestRunner/bin/Release/net8.0/TestRunner.dll"; do
+        if [ -f "$candidate" ]; then
+            HOST_PREBUILT="$candidate"
+            break
+        fi
+    done
 fi
 
 if [ "$USE_DOCKER_EXEC" = "true" ]; then
@@ -544,6 +598,27 @@ if [ "$USE_DOCKER_EXEC" = "true" ]; then
             echo "[run-tests] WARN: TestRunner did not produce /tmp/junit-result.xml inside the container"
         fi
     fi
+elif [ -n "$HOST_PREBUILT" ]; then
+    # Pre-built binary on the host — no SDK needed, just the .NET 8 runtime.
+    echo "[run-tests] Using pre-built TestRunner at $HOST_PREBUILT"
+    JUNIT_FLAGS=()
+    if [ -n "$JUNIT_OUTPUT" ]; then
+        JUNIT_FLAGS+=(--junit-output "$JUNIT_OUTPUT")
+    fi
+    dotnet "$HOST_PREBUILT" \
+        --verbose \
+        --host "$WS_HOST" \
+        --odata-host "$ODATA_HOST" \
+        --company "$COMPANY" \
+        --user "$AUTH_USER" \
+        --password "$AUTH_PASS" \
+        --suite "DEFAULT" \
+        --num-codeunits "$NUM_CODEUNITS" \
+        --timeout "$TIMEOUT_MIN" \
+        --codeunit-timeout 10 \
+        --max-iterations "$MAX_ITER" \
+        "${JUNIT_FLAGS[@]}"
+    EXIT_CODE=$?
 elif command -v dotnet >/dev/null 2>&1; then
     JUNIT_FLAGS=()
     if [ -n "$JUNIT_OUTPUT" ]; then
@@ -564,8 +639,14 @@ elif command -v dotnet >/dev/null 2>&1; then
         "${JUNIT_FLAGS[@]}"
     EXIT_CODE=$?
 else
-    echo "ERROR: cannot run TestRunner — neither a local BC docker container nor a host-side dotnet SDK is available."
-    echo "  Either: start BC via 'docker compose up -d --wait' from the bc-linux directory, or install .NET 8 SDK on the host."
+    echo "ERROR: cannot run TestRunner — no execution method available."
+    echo "  Tried (in order):"
+    echo "    1. docker compose exec bc (container not found or missing TestRunner.dll)"
+    echo "    2. Pre-built binary at tools/TestRunner/bin/Release/net8.0/ (not found)"
+    echo "    3. dotnet run (dotnet SDK not installed)"
+    echo ""
+    echo "  Fix: start BC via 'docker compose up -d --wait', or run 'dotnet publish -c Release'"
+    echo "  in tools/TestRunner/, or install .NET 8 SDK."
     exit 1
 fi
 

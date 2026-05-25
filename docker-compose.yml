@@ -38,7 +38,7 @@ services:
       - "${BC_MGMT_PORT:-7045}:7045"
       - "${BC_CLIENT_PORT:-7085}:7085"
     environment:
-      BC_VERSION: ${BC_VERSION:-27.5}
+      BC_VERSION: ${BC_VERSION:-28.1}
       BC_COUNTRY: ${BC_COUNTRY:-w1}
       BC_TYPE: ${BC_TYPE:-sandbox}
       SA_PASSWORD: ${SA_PASSWORD:-Passw0rd123!}
