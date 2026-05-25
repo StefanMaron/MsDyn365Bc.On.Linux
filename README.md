@@ -50,19 +50,32 @@ fallback path needs the .NET 8 SDK.)
 **Optional — only if you want to compile AL projects from the command line**
 without using the VS Code AL extension's F5 build:
 
-- `.NET 8 SDK` plus the Linux AL compiler tool:
+- `.NET 8 SDK` plus the Linux AL compiler tool. Pick the version that matches your BC major:
+
+  | BC version | AL runtime (`app.json`) | `al_tool_version` (NuGet) |
+  |---|---|---|
+  | BC 27.x | `16.0` | `16.2.28.57946` |
+  | BC 28.x | `17.0` | `17.0.34.45391` |
 
   ```bash
+  # BC 27.x
   dotnet tool install -g \
     Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
     --version 16.2.28.57946
   echo 'export PATH="$HOME/.dotnet/tools:$PATH"' >> ~/.bashrc
   ```
 
-  (Bump the version for newer BC majors. The version above is known to
-  work with BC 27.x. If you use VS Code with the AL Language extension,
-  F5 / Ctrl+F5 publishes via the dev endpoint without ever needing the
-  CLI compiler — skip this section.)
+  The reusable workflow (`bc-test-from-source.yml`) auto-derives both values
+  from `bc_version` — you only need to set `al_tool_version` explicitly to
+  pin a specific build. If you use VS Code with the AL Language extension,
+  F5 / Ctrl+F5 publishes via the dev endpoint without the CLI compiler —
+  skip this section.
+
+  **Why does the smoke test use `runtime: "14.0"`?**
+  `extensions/smoke-test/app.json` uses a deliberately low runtime value so
+  the same committed file compiles cleanly against any supported BC version
+  without patching. Consumer apps should use the runtime matching their
+  minimum supported BC version (auto-derived by the workflow).
 
 ---
 
