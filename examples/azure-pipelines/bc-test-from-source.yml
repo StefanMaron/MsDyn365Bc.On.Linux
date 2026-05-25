@@ -62,9 +62,18 @@ variables:
   CODEUNIT_RANGE: '50000..99999'
 
 
-  # AL compiler version. Has to match the major BC version. The version
-  # below is known to work with BC 27.x. For BC 28.x bump it.
-  AL_TOOL_VERSION: '16.2.28.57946'
+  # AL compiler tool version. Leave blank to auto-derive from BC_VERSION
+  # (recommended): BC 27.x → 16.2.28.57946, BC 28.x → 17.0.34.45391.
+  # Set explicitly to pin a specific version.
+  AL_TOOL_VERSION: ''
+
+  # AL runtime version written into all app.json files before compile.
+  # Auto-derived from BC_VERSION when blank: BC 27 → 16.0, BC 28 → 17.0.
+  RUNTIME_VERSION: ''
+
+  # Comma-separated preprocessor symbols passed to /preprocessorsymbols.
+  # Example: 'BC27PLUS,BC28PLUS' for a version-gated matrix leg.
+  PREPROCESSOR_SYMBOLS: ''
 
   # ─── Optional: analyzers + ruleset ───────────────────────────────────
   # All off by default. Set to 'true' / fill in to enable. The compile
@@ -206,9 +215,22 @@ steps:
 
   - bash: |
       bash "$(Agent.BuildDirectory)/bc-linux/scripts/workflow-summary.sh" begin AL_INSTALL "Install AL compiler"
+      TOOL="$(AL_TOOL_VERSION)"
+      BC_MAJOR=$(echo "$(BC_VERSION)" | cut -d. -f1)
+      if [ -z "$TOOL" ]; then
+        case "$BC_MAJOR" in
+          27) TOOL="16.2.28.57946" ;;
+          28) TOOL="17.0.34.45391" ;;
+          *)
+            echo "##vso[task.logissue type=warning]BC_VERSION major $BC_MAJOR not in al_tool table — using fallback 16.2.28.57946"
+            TOOL="16.2.28.57946"
+            ;;
+        esac
+      fi
+      echo "Installing AL compiler $TOOL"
       dotnet tool install -g \
         Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-        --version "$(AL_TOOL_VERSION)" 2>/dev/null || true
+        --version "$TOOL" 2>/dev/null || true
       echo "##vso[task.prependpath]$HOME/.dotnet/tools"
       bash "$(Agent.BuildDirectory)/bc-linux/scripts/workflow-summary.sh" end AL_INSTALL
     displayName: 'Install Linux AL compiler'
@@ -226,6 +248,38 @@ steps:
       echo "Staged $(ls $(Pipeline.Workspace)/symbols/*.app 2>/dev/null | wc -l) symbol files"
       bash "$(Agent.BuildDirectory)/bc-linux/scripts/workflow-summary.sh" end SYMBOLS
     displayName: 'Stage symbols from BC artifacts'
+
+  - bash: |
+      EFFECTIVE_RUNTIME="$(RUNTIME_VERSION)"
+      BC_MAJOR=$(echo "$(BC_VERSION)" | cut -d. -f1)
+      if [ -z "$EFFECTIVE_RUNTIME" ]; then
+        case "$BC_MAJOR" in
+          27) EFFECTIVE_RUNTIME="16.0" ;;
+          28) EFFECTIVE_RUNTIME="17.0" ;;
+          *)
+            echo "##vso[task.logissue type=warning]BC_VERSION major $BC_MAJOR not in runtime table — using fallback 14.0"
+            EFFECTIVE_RUNTIME="14.0"
+            ;;
+        esac
+      fi
+      echo "Patching app.json runtime → $EFFECTIVE_RUNTIME"
+      for d in $(APP_DIRS) $(TEST_APP_DIRS); do
+        [ -z "$d" ] && continue
+        F="$(Pipeline.Workspace)/project/$d/app.json"
+        [ -f "$F" ] || continue
+        python3 - "$F" "$EFFECTIVE_RUNTIME" <<'PYEOF'
+      import sys, json, pathlib
+      p = pathlib.Path(sys.argv[1])
+      d = json.loads(p.read_text())
+      if d.get("runtime") != sys.argv[2]:
+          d["runtime"] = sys.argv[2]
+          p.write_text(json.dumps(d, indent=2) + "\n")
+          print(f"  patched {p}: runtime → {sys.argv[2]}")
+      else:
+          print(f"  {p}: runtime already {sys.argv[2]}, skip")
+      PYEOF
+      done
+    displayName: 'Patch app.json runtime'
 
   - bash: |
       set -e
@@ -281,6 +335,9 @@ steps:
       # cop wiring is broken.
       ANALYZER_LOAD_FAIL_PATTERN='AD0001|Could not load|BadImageFormatException|PlatformNotSupportedException'
 
+      PP_FLAG=()
+      [ -n "$(PREPROCESSOR_SYMBOLS)" ] && PP_FLAG=("/preprocessorsymbols:$(PREPROCESSOR_SYMBOLS)")
+
       compile_dir() {
         local src="$1"
         shift
@@ -293,7 +350,7 @@ steps:
         if [ "$#" -gt 0 ]; then
           local tmplog rc
           tmplog=$(mktemp)
-          AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" "$@" 2>&1 | tee "$tmplog"
+          AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" "${PP_FLAG[@]}" "$@" 2>&1 | tee "$tmplog"
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
             rm -f "$tmplog"
@@ -307,7 +364,7 @@ steps:
           fi
           rm -f "$tmplog"
         else
-          AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out"
+          AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" "${PP_FLAG[@]}"
         fi
       }
 
