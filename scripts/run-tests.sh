@@ -39,8 +39,8 @@ CODEUNIT_RANGE=""
 APP_FILE=""
 TIMEOUT_MIN=30
 DISABLED_TESTS_DIR=""
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
 TEST_RUNNER_APP=""
 JUNIT_OUTPUT=""
 
@@ -130,14 +130,14 @@ if [ -z "$COMPANIES_JSON" ]; then
     exit 1
 fi
 
-COMPANY_AUTO=$(echo "$COMPANIES_JSON" | py3 -c "import sys,json; c=json.load(sys.stdin)['value'][0]; print(c.get('name',c.get('Name','')))" 2>/dev/null || true)
-COMPANY_ID=$(echo "$COMPANIES_JSON" | py3 -c "import sys,json; c=json.load(sys.stdin)['value'][0]; print(c.get('id',c.get('SystemId','')))" 2>/dev/null || true)
+COMPANY_AUTO=$(echo "$COMPANIES_JSON" | py3 -c "import sys,json; c=json.load(sys.stdin)['value'][0]; m={k.lower():v for k,v in c.items()}; print(m.get('name',''))" 2>/dev/null || true)
+COMPANY_ID=$(echo "$COMPANIES_JSON" | py3 -c "import sys,json; c=json.load(sys.stdin)['value'][0]; m={k.lower():v for k,v in c.items()}; print(m.get('id',''))" 2>/dev/null || true)
 [ -z "$COMPANY" ] && COMPANY="${COMPANY_AUTO:-CRONUS International Ltd.}"
 
 if [ -z "$COMPANY_ID" ]; then
     for url in "${BASE_URL}/api/v2.0/companies" "${_API_FALLBACK}/api/v2.0/companies"; do
         COMPANY_ID=$(curl -sf --max-time 10 -u "$AUTH" "$url" 2>/dev/null \
-            | py3 -c "import sys,json; [print(c.get('id',c.get('SystemId',''))) for c in json.load(sys.stdin)['value'] if c.get('name',c.get('Name',''))==sys.argv[1]]" "$COMPANY" 2>/dev/null || true)
+            | py3 -c "import sys,json; [print({k.lower():v for k,v in c.items()}.get('id','')) for c in json.load(sys.stdin)['value'] if {k.lower():v for k,v in c.items()}.get('name','')==sys.argv[1]]" "$COMPANY" 2>/dev/null || true)
         [ -n "$COMPANY_ID" ] && break
     done
 fi
