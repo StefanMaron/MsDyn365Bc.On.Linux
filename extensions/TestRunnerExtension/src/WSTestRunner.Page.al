@@ -52,24 +52,6 @@ page 99905 "WS Test Runner"
                     DoRunNextCodeunit();
                 end;
             }
-            action(AddUserTests)
-            {
-                ApplicationArea = All;
-                Caption = 'Add User Tests';
-                trigger OnAction()
-                begin
-                    DoAddUserTests();
-                end;
-            }
-            action(GetResultsJson)
-            {
-                ApplicationArea = All;
-                Caption = 'Get Results Json';
-                trigger OnAction()
-                begin
-                    DoGetResultsJson();
-                end;
-            }
         }
     }
 
@@ -220,97 +202,6 @@ page 99905 "WS Test Runner"
             StatusText := StrSubstNo('CU %1: %2 passed', TestMethodLine."Test Codeunit", Passed);
 
         Commit();
-    end;
-
-    procedure LoadExtension(ExtId: Text)
-    var
-        TestSuiteMgt: Codeunit "Test Suite Mgt.";
-        TestMethodLine: Record "Test Method Line";
-    begin
-        EnsureSuite();
-        TestMethodLine.SetRange("Test Suite", SuiteName);
-        TestMethodLine.DeleteAll(true);
-
-        Rec.Get(SuiteName);
-        TestSuiteMgt.SelectTestMethodsByExtension(Rec, ExtId);
-        Commit();
-
-        UpdateCounts();
-        StatusText := StrSubstNo('Loaded %1 test codeunits from extension %2', TotalCodeunits, ExtId);
-    end;
-
-    procedure DoAddUserTests()
-    var
-        TestSuiteMgt: Codeunit "Test Suite Mgt.";
-        TestMethodLine: Record "Test Method Line";
-        ExtId: Guid;
-    begin
-        EnsureSuite();
-        TestMethodLine.SetRange("Test Suite", SuiteName);
-        TestMethodLine.DeleteAll(true);
-
-        Rec.Get(SuiteName);
-        if (CodeunitIds <> '') and Evaluate(ExtId, CodeunitIds) then
-            TestSuiteMgt.SelectTestMethodsByExtension(Rec, CodeunitIds)
-        else
-            TestSuiteMgt.SelectTestMethodsByRange(Rec, '50000..99999');
-        Commit();
-
-        UpdateCounts();
-        StatusText := StrSubstNo('Added %1 test codeunits', TotalCodeunits);
-    end;
-
-    procedure DoGetResultsJson()
-    var
-        CodeunitLine: Record "Test Method Line";
-        FuncLine: Record "Test Method Line";
-        Arr: JsonArray;
-        Obj: JsonObject;
-        Methods: JsonArray;
-        MethodObj: JsonObject;
-    begin
-        EnsureSuite();
-        CodeunitLine.SetRange("Test Suite", SuiteName);
-        CodeunitLine.SetRange("Line Type", CodeunitLine."Line Type"::Codeunit);
-        if CodeunitLine.FindSet() then
-            repeat
-                Clear(Obj);
-                Clear(Methods);
-                Obj.Add('codeUnit', CodeunitLine."Test Codeunit");
-                Obj.Add('name', CodeunitLine.Name);
-
-                FuncLine.SetRange("Test Suite", SuiteName);
-                FuncLine.SetRange("Test Codeunit", CodeunitLine."Test Codeunit");
-                FuncLine.SetRange("Line Type", FuncLine."Line Type"::"Function");
-                if FuncLine.FindSet() then
-                    repeat
-                        Clear(MethodObj);
-                        MethodObj.Add('method', FuncLine."Function");
-                        case FuncLine.Result of
-                            FuncLine.Result::Success:
-                                begin
-                                    MethodObj.Add('result', 2);
-                                    MethodObj.Add('message', '');
-                                end;
-                            FuncLine.Result::Failure:
-                                begin
-                                    MethodObj.Add('result', 1);
-                                    MethodObj.Add('message', FuncLine."Error Message Preview");
-                                end;
-                            else begin
-                                MethodObj.Add('result', 0);
-                                MethodObj.Add('message', '');
-                            end;
-                        end;
-                        Methods.Add(MethodObj);
-                    until FuncLine.Next() = 0;
-
-                Obj.Add('testResults', Methods);
-                Arr.Add(Obj);
-            until CodeunitLine.Next() = 0;
-
-        Clear(TestResultJson);
-        Arr.WriteTo(TestResultJson);
     end;
 
     local procedure UpdateCounts()

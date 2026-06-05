@@ -402,9 +402,9 @@ namespace Microsoft.AspNetCore.Hosting
         private bool _testsRun;
         private readonly Queue<string> _resultQueue = new();
 
-        // al-rs drives the web client pages 130451 (populate) and 130455 (run).
-        // The shim keeps those synthetic control trees for al-rs, but uses the
-        // extension's API for modal-free suite population and opens Microsoft's
+        // Headless WebClient test flows drive pages 130451 (populate) and
+        // 130455 (run). The shim keeps those synthetic control trees, but uses
+        // the extension API for modal-free suite population and opens Microsoft's
         // Command Line Test Tool page for the real Client Services test session.
         private const int CsRunPageId = 130455;
         private string _company = "CRONUS International Ltd.";
@@ -556,29 +556,21 @@ namespace Microsoft.AspNetCore.Hosting
                             {
                                 try
                                 {
-                                    // Translate al-rs's Microsoft-page actions into WS Test Runner
-                                    // (page 99905) method invocations.
+                                    // Translate Microsoft-page actions into modal-free runner calls.
                                     switch (actionName)
                                     {
-                                        // Suite population: al-rs's GetTestCodeunits opens a modal on
-                                        // page 130451. We instead invoke page 99905's AddUserTests
-                                        // action (no modal). Actions — unlike page procedures — are
-                                        // invokable via CS InvokeApplicationMethod. AddUserTests reads
-                                        // the extension GUID from the CodeunitIds field if set (we don't
-                                        // yet forward it via CS SaveValue), else scopes to the PTE range.
+                                        // Suite population: GetTestCodeunits opens a modal on page
+                                        // 130451. Use the extension API instead.
                                         case "GetTestCodeunits":
                                         case "GetTestCodeunitsForSuite":
                                             if (!await SetupSuiteByExtensionApiAsync(ct))
                                                 Console.WriteLine("[shimdbg] SetupSuiteByExtension API did not populate a suite");
                                             break;
 
-                                        // al-rs calls RunNextTest in a loop, expecting one codeunit's
-                                        // result per call. BC test isolation kills the CS session on
-                                        // every codeunit run, so we can't reliably read a result from
-                                        // the run itself. Instead, on the first RunNextTest we run ALL
-                                        // codeunits (reconnecting per run) then read the full result set
-                                        // via the read-only GetResultsJson action, and dispense one
-                                        // result per subsequent call.
+                                        // WebClient test runners call RunNextTest in a loop, expecting
+                                        // one codeunit's result per call. BC test isolation kills the CS
+                                        // session on every codeunit run, so run all codeunits once, read
+                                        // the result set, and dispense one result per subsequent call.
                                         case "RunNextTest":
                                         {
                                             if (!_testsRun) { await RunAllAndCollectAsync(ct); _testsRun = true; }
@@ -666,7 +658,7 @@ namespace Microsoft.AspNetCore.Hosting
         /// BC test isolation drops the CS session after each codeunit run, so we
         /// reconnect before each RunNextTest and treat a thrown invoke as "a
         /// codeunit ran". Results are read afterwards via the TestRunnerExtension
-        /// API page and queued for al-rs.
+        /// API page and queued for the WebClient caller.
         /// </summary>
         private async Task RunAllAndCollectAsync(CancellationToken ct)
         {
