@@ -249,44 +249,6 @@ page 99902 "Codeunit Run Requests"
     end;
 
     /// <summary>
-    /// Sets up the DEFAULT suite from an extension app ID. This is used by
-    /// WebClient-compatible headless runners that already know the app ID but
-    /// cannot drive the modal "Get Test Codeunits" page flow.
-    /// </summary>
-    [ServiceEnabled]
-    procedure SetupSuiteByExtension(): Boolean
-    var
-        ALTestSuite: Record "AL Test Suite";
-        TestMethodLine: Record "Test Method Line";
-        TestSuiteMgt: Codeunit "Test Suite Mgt.";
-        ExtId: Guid;
-    begin
-        if (Rec.CodeunitIds = '') or not Evaluate(ExtId, Rec.CodeunitIds) then
-            exit(false);
-
-        if not ALTestSuite.Get('DEFAULT') then begin
-            ALTestSuite.Init();
-            ALTestSuite.Name := 'DEFAULT';
-            ALTestSuite."Test Runner Id" := 130450;
-            ALTestSuite.Insert(true);
-        end else begin
-            ALTestSuite."Test Runner Id" := 130450;
-            ALTestSuite.Modify(true);
-        end;
-
-        TestMethodLine.SetRange("Test Suite", 'DEFAULT');
-        TestMethodLine.DeleteAll(true);
-
-        TestSuiteMgt.SelectTestMethodsByExtension(ALTestSuite, Rec.CodeunitIds);
-        OverrideSuiteRunner('DEFAULT', 130450);
-
-        Rec.Status := Rec.Status::Pending;
-        Rec.LastResult := 'Suite ready';
-        Rec.Modify(true);
-        exit(true);
-    end;
-
-    /// <summary>
     /// Disables specific test methods in the DEFAULT suite.
     /// DisabledTests field format: "codeunitId:method,codeunitId:method,..."
     /// Use "*" as method to disable the entire codeunit.

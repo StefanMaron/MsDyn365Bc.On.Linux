@@ -10,7 +10,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -399,13 +398,10 @@ namespace Microsoft.AspNetCore.Hosting
         private int _openPageId;
         private string _suiteName = "DEFAULT";
         private string _extensionId = "";
-        private bool _testsRun;
-        private readonly Queue<string> _resultQueue = new();
 
         // Headless WebClient test flows drive pages 130451 (populate) and
-        // 130455 (run). The shim keeps those synthetic control trees, but uses
-        // the extension API for modal-free suite population and opens Microsoft's
-        // Command Line Test Tool page for the real Client Services test session.
+        // 130455 (run). The shim keeps those synthetic control trees and
+        // forwards actions to Microsoft's Command Line Test Tool page.
         private const int CsRunPageId = 130455;
         private string _company = "CRONUS International Ltd.";
         private string _formServerId = "f0";
@@ -556,35 +552,10 @@ namespace Microsoft.AspNetCore.Hosting
                             {
                                 try
                                 {
-                                    // Translate Microsoft-page actions into modal-free runner calls.
                                     switch (actionName)
                                     {
-                                        // Suite population: GetTestCodeunits opens a modal on page
-                                        // 130451. Use the extension API instead.
-                                        case "GetTestCodeunits":
-                                        case "GetTestCodeunitsForSuite":
-                                            if (!await SetupSuiteByExtensionApiAsync(ct))
-                                                Console.WriteLine("[shimdbg] SetupSuiteByExtension API did not populate a suite");
-                                            break;
-
-                                        // WebClient test runners call RunNextTest in a loop, expecting
-                                        // one codeunit's result per call. BC test isolation kills the CS
-                                        // session on every codeunit run, so run all codeunits once, read
-                                        // the result set, and dispense one result per subsequent call.
                                         case "RunNextTest":
-                                        {
-                                            if (!_testsRun) { await RunAllAndCollectAsync(ct); _testsRun = true; }
-                                            testResultJson = _resultQueue.Count > 0
-                                                ? _resultQueue.Dequeue()
-                                                : "All tests executed.";
-                                            Console.WriteLine($"[shimdbg] RunNextTest dispense (remaining {_resultQueue.Count}) -> [{testResultJson.Length}]: {Trunc(testResultJson, 400)}");
-                                            break;
-                                        }
-
-                                        // DeleteLines / ClearTestResults are implicit in LoadExtension
-                                        // (it clears and repopulates a fresh suite), so they're no-ops.
-                                        case "DeleteLines":
-                                        case "ClearTestResults":
+                                            testResultJson = await InvokeCsAsync(actionName, null, ct);
                                             break;
 
                                         default:
@@ -651,231 +622,6 @@ namespace Microsoft.AspNetCore.Hosting
             }
             Console.WriteLine($"[shimdbg] CS {methodName}({args?.ToJsonString() ?? ""}) result[{csResult.Length}]: {Trunc(csResult, 400)}");
             return csResult;
-        }
-
-        /// <summary>
-        /// Runs every pending codeunit in the suite, then reads the full result set.
-        /// BC test isolation drops the CS session after each codeunit run, so we
-        /// reconnect before each RunNextTest and treat a thrown invoke as "a
-        /// codeunit ran". Results are read afterwards via the TestRunnerExtension
-        /// API page and queued for the WebClient caller.
-        /// </summary>
-        private async Task RunAllAndCollectAsync(CancellationToken ct)
-        {
-            await RunExternalTestRunnerAsync(ct);
-            var objects = await FetchResultObjectsFromApiAsync(ct);
-            foreach (var o in objects) _resultQueue.Enqueue(o);
-            Console.WriteLine($"[shimdbg] collected {_resultQueue.Count} codeunit result(s)");
-        }
-
-        private async Task RunExternalTestRunnerAsync(CancellationToken ct)
-        {
-            var runnerDll = "/bc/tools/TestRunner/TestRunner.dll";
-            if (!File.Exists(runnerDll))
-                throw new FileNotFoundException("Bundled TestRunner.dll not found", runnerDll);
-            var codeunitCount = await CountCodeunitsInSuiteAsync(ct);
-
-            var psi = new ProcessStartInfo("dotnet")
-            {
-                RedirectStandardError = true,
-                RedirectStandardOutput = true,
-                UseShellExecute = false
-            };
-            psi.ArgumentList.Add(runnerDll);
-            psi.ArgumentList.Add("--host");
-            psi.ArgumentList.Add("localhost:7085");
-            psi.ArgumentList.Add("--odata-host");
-            psi.ArgumentList.Add("localhost:7048");
-            psi.ArgumentList.Add("--company");
-            psi.ArgumentList.Add(_company);
-            psi.ArgumentList.Add("--user");
-            psi.ArgumentList.Add("BCRUNNER");
-            psi.ArgumentList.Add("--password");
-            psi.ArgumentList.Add("Admin123!");
-            psi.ArgumentList.Add("--suite");
-            psi.ArgumentList.Add(_suiteName);
-            psi.ArgumentList.Add("--num-codeunits");
-            psi.ArgumentList.Add(Math.Max(codeunitCount, 1).ToString(System.Globalization.CultureInfo.InvariantCulture));
-            psi.ArgumentList.Add("--timeout");
-            psi.ArgumentList.Add("2");
-            psi.ArgumentList.Add("--codeunit-timeout");
-            psi.ArgumentList.Add("10");
-            psi.ArgumentList.Add("--max-iterations");
-            psi.ArgumentList.Add("320");
-
-            using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start TestRunner.dll");
-            var stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
-            var stderrTask = proc.StandardError.ReadToEndAsync(ct);
-            await proc.WaitForExitAsync(ct);
-            var stdout = await stdoutTask;
-            var stderr = await stderrTask;
-            Console.WriteLine($"[shimdbg] TestRunner exit={proc.ExitCode} stdout={Trunc(stdout, 500)} stderr={Trunc(stderr, 500)}");
-            if (proc.ExitCode != 0)
-                throw new InvalidOperationException($"TestRunner.dll failed with exit code {proc.ExitCode}");
-        }
-
-        private async Task<int> CountCodeunitsInSuiteAsync(CancellationToken ct)
-        {
-            try
-            {
-                using var http = NewBcHttpClient();
-                var apiBase = await GetAutomationApiBaseAsync(http, ct);
-                var suite = Uri.EscapeDataString(_suiteName);
-                using var resp = await http.GetAsync($"{apiBase}/testResults?$filter=testSuite%20eq%20%27{suite}%27&$top=10000", ct);
-                var text = await resp.Content.ReadAsStringAsync(ct);
-                if (!resp.IsSuccessStatusCode) return 0;
-                var rows = JsonNode.Parse(text)?["value"]?.AsArray();
-                if (rows == null) return 0;
-                return rows.Count(row =>
-                    string.Equals(row?["lineType"]?.GetValue<string>(), "Codeunit", StringComparison.OrdinalIgnoreCase));
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[shimdbg] CountCodeunitsInSuite error: {Trunc(ex.Message, 160)}");
-                return 0;
-            }
-        }
-
-        private async Task<bool> SetupSuiteByExtensionApiAsync(CancellationToken ct)
-        {
-            if (string.IsNullOrWhiteSpace(_extensionId)) return false;
-
-            try
-            {
-                using var http = NewBcHttpClient();
-                var apiBase = await GetAutomationApiBaseAsync(http, ct);
-                var createBody = new JsonObject { ["CodeunitIds"] = _extensionId }.ToJsonString();
-                using var createResp = await http.PostAsync(
-                    $"{apiBase}/codeunitRunRequests",
-                    new StringContent(createBody, Encoding.UTF8, "application/json"),
-                    ct);
-                var createText = await createResp.Content.ReadAsStringAsync(ct);
-                if (!createResp.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"[shimdbg] create codeunitRunRequest failed: {(int)createResp.StatusCode} {Trunc(createText, 300)}");
-                    return false;
-                }
-
-                var requestId = JsonNode.Parse(createText)?["Id"]?.GetValue<string>();
-                if (string.IsNullOrWhiteSpace(requestId)) return false;
-
-                using var setupResp = await http.PostAsync(
-                    $"{apiBase}/codeunitRunRequests({requestId})/Microsoft.NAV.setupSuiteByExtension",
-                    new StringContent("", Encoding.UTF8, "application/json"),
-                    ct);
-                var setupText = await setupResp.Content.ReadAsStringAsync(ct);
-                Console.WriteLine($"[shimdbg] SetupSuiteByExtension ext={_extensionId} -> {(int)setupResp.StatusCode} {Trunc(setupText, 200)}");
-                return setupResp.IsSuccessStatusCode;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[shimdbg] SetupSuiteByExtension API error: {Trunc(ex.Message, 200)}");
-                return false;
-            }
-        }
-
-        private async Task<List<string>> FetchResultObjectsFromApiAsync(CancellationToken ct)
-        {
-            var byCodeunit = new SortedDictionary<int, (string Name, JsonArray Methods)>();
-
-            try
-            {
-                using var http = NewBcHttpClient();
-                var apiBase = await GetAutomationApiBaseAsync(http, ct);
-                var suite = Uri.EscapeDataString(_suiteName);
-                var url = $"{apiBase}/testResults?$filter=testSuite%20eq%20%27{suite}%27&$top=10000";
-                using var resp = await http.GetAsync(url, ct);
-                var text = await resp.Content.ReadAsStringAsync(ct);
-                if (!resp.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"[shimdbg] fetch testResults failed: {(int)resp.StatusCode} {Trunc(text, 300)}");
-                    return new List<string>();
-                }
-
-                var rows = JsonNode.Parse(text)?["value"]?.AsArray();
-                if (rows == null) return new List<string>();
-
-                foreach (var row in rows)
-                {
-                    if (row == null) continue;
-                    var codeunit = row["testCodeunit"]?.GetValue<int>() ?? 0;
-                    if (codeunit == 0) continue;
-
-                    var lineType = row["lineType"]?.GetValue<string>() ?? "";
-                    if (!byCodeunit.ContainsKey(codeunit))
-                        byCodeunit[codeunit] = ($"Codeunit {codeunit}", new JsonArray());
-
-                    if (lineType.Equals("Codeunit", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var name = row["name"]?.GetValue<string>() ?? "";
-                        if (!string.IsNullOrWhiteSpace(name))
-                            byCodeunit[codeunit] = (name, byCodeunit[codeunit].Methods);
-                        continue;
-                    }
-
-                    if (!lineType.Equals("Function", StringComparison.OrdinalIgnoreCase)) continue;
-
-                    var resultText = row["result"]?.GetValue<string>() ?? "";
-                    var result = resultText.Equals("Failure", StringComparison.OrdinalIgnoreCase) ? 1
-                        : resultText.Equals("Success", StringComparison.OrdinalIgnoreCase) ? 2
-                        : 0;
-                    byCodeunit[codeunit].Methods.Add(new JsonObject
-                    {
-                        ["method"] = row["functionName"]?.GetValue<string>() ?? row["name"]?.GetValue<string>() ?? "",
-                        ["result"] = result,
-                        ["message"] = row["errorMessagePreview"]?.GetValue<string>() ?? row["errorMessage"]?.GetValue<string>() ?? "",
-                        ["stackTrace"] = row["errorCallStack"]?.GetValue<string>() ?? ""
-                    });
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[shimdbg] FetchResultObjectsFromApi error: {Trunc(ex.Message, 200)}");
-            }
-
-            var objects = new List<string>();
-            foreach (var (codeunit, value) in byCodeunit)
-            {
-                if (value.Methods.Count == 0) continue;
-                var obj = new JsonObject
-                {
-                    ["codeUnit"] = codeunit,
-                    ["name"] = value.Name,
-                    ["testResults"] = value.Methods
-                };
-                objects.Add(obj.ToJsonString());
-            }
-            return objects;
-        }
-
-        private static HttpClient NewBcHttpClient()
-        {
-            var http = new HttpClient { BaseAddress = new Uri("http://localhost:7048/BC/") };
-            http.DefaultRequestHeaders.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue(
-                    "Basic",
-                    Convert.ToBase64String(Encoding.UTF8.GetBytes("BCRUNNER:Admin123!")));
-            return http;
-        }
-
-        private async Task<string> GetAutomationApiBaseAsync(HttpClient http, CancellationToken ct)
-        {
-            using var resp = await http.GetAsync("api/v2.0/companies", ct);
-            var text = await resp.Content.ReadAsStringAsync(ct);
-            resp.EnsureSuccessStatusCode();
-
-            var companies = JsonNode.Parse(text)?["value"]?.AsArray();
-            var companyId = companies?
-                .FirstOrDefault(c => string.Equals(
-                    c?["name"]?.GetValue<string>(),
-                    _company,
-                    StringComparison.OrdinalIgnoreCase))?["id"]?.GetValue<string>()
-                ?? companies?.FirstOrDefault()?["id"]?.GetValue<string>();
-
-            if (string.IsNullOrWhiteSpace(companyId))
-                throw new InvalidOperationException("BC API returned no companies");
-
-            return $"api/custom/automation/v1.0/companies({companyId})";
         }
 
         /// <summary>Forces a fresh CS session + page open (drops any dead session first).</summary>
