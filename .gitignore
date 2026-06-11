@@ -30,3 +30,9 @@ tools/TestRunner/lib/
 # lives in here.
 .snapshots/
 extensions/minimal-test/*.app
+
+# Local-only docker overrides (session/environment-specific, e.g. TLS-inspecting
+# proxy CA injection for sandboxed build environments)
+docker-compose.override.yml
+.local-ca/
+src/Dockerfile.local-ca
