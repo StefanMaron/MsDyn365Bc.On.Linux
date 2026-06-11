@@ -1,13 +1,12 @@
 services:
   sql:
-    image: mcr.microsoft.com/mssql/server:2022-CU17-ubuntu-22.04
+    image: mcr.microsoft.com/mssql/server:2022-latest
     environment:
       ACCEPT_EULA: "Y"
       SA_PASSWORD: ${SA_PASSWORD:-Passw0rd123!}
       MSSQL_MEMORY_LIMIT_MB: ${MSSQL_MEMORY_LIMIT_MB:-2048}
     ports:
       - "${SQL_PORT:-11433}:1433"
-    user: "0:0"
     tmpfs:
       - /var/opt/mssql/data:size=4g
     volumes:

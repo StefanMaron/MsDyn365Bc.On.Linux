@@ -1,0 +1,17 @@
+# macOS (Apple Silicon + podman) overrides — see MacOS.md for full setup steps.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.macos.yml up -d --wait
+#
+# These settings are needed only when running under Rosetta emulation on
+# Apple Silicon; applying them on Linux would pin SQL to an old CU and run
+# it as root for no reason, so they live in this overlay instead of the
+# main compose file.
+services:
+  sql:
+    # SQL Server 2022 CU18+ crashes under Rosetta 2 emulation; CU17 is the
+    # last 2022 CU that works on Apple Silicon (SQL Server 2025 fixes it).
+    image: mcr.microsoft.com/mssql/server:2022-CU17-ubuntu-22.04
+    # Rootful podman mounts the tmpfs at /var/opt/mssql/data owned by root,
+    # which the image's non-root mssql user cannot write to.
+    user: "0:0"
