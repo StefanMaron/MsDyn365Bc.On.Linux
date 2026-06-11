@@ -58,8 +58,14 @@ from xml.sax.saxutils import escape, quoteattr
 
 # `al runtests` per-method result line, e.g. "  PASS MyTest (123ms)".
 # Anchored on the trailing "(<n>ms)" so method names containing spaces or
-# parentheses don't break the match.
-RESULT_LINE = re.compile(r"^\s{2}(PASS|FAIL|SKIP)\s(.+)\s\((\d+)ms\)$")
+# parentheses don't break the match. The name group is .* (not .+) because
+# the hub emits one EXTRA result per codeunit with an EMPTY method name —
+# a codeunit-level completion pseudo-result ("  PASS  (656ms)", observed
+# live against BC 28.1). Empty-name PASS lines are dropped from the counts
+# (they aren't [Test] procedures and the legacy runner never counted them);
+# empty-name FAIL/SKIP lines are recorded as "(codeunit)" so a codeunit-
+# level failure (e.g. OnRun error) can't vanish silently.
+RESULT_LINE = re.compile(r"^\s{2}(PASS|FAIL|SKIP)\s(.*)\((\d+)ms\)$")
 SUMMARY_LINE = re.compile(
     r"Test run completed: (\d+) passed, (\d+) failed, (\d+) skipped\."
 )
@@ -222,7 +228,12 @@ def run_codeunit(
         m = RESULT_LINE.match(line)
         if m:
             in_results = True
-            status, name, ms = m.group(1), m.group(2), int(m.group(3))
+            status, name, ms = m.group(1), m.group(2).strip(), int(m.group(3))
+            if not name:
+                if status == "PASS":
+                    last_fail_idx = None
+                    continue  # codeunit-level pseudo-result, see RESULT_LINE
+                name = "(codeunit)"
             run.results.append((status, name, ms, ""))
             last_fail_idx = len(run.results) - 1 if status == "FAIL" else None
             continue
