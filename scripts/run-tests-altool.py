@@ -151,6 +151,40 @@ def detect_company(base_urls: list[str], user: str, password: str) -> str | None
     return None
 
 
+def probe_test_running_support(
+    server: str, instance: str, port: int, user: str, password: str
+) -> tuple[bool, str]:
+    """Check whether the NST's dev endpoint advertises Dev API 7.0+.
+
+    GET <server>:<port>/<instance>/dev/metadata returns a ServerInfo JSON
+    whose WebApiVersion gates the AL tool's feature checks — TestRunning
+    (the /dev/TestRunnerHub SignalR hub) requires 7.0, which shipped with
+    BC 28.0. Returns (supported, human-readable reason). Key lookup is
+    case-insensitive since the exact casing the server emits isn't part
+    of any contract we control.
+    """
+    url = f"{server}:{port}/{instance}/dev/metadata"
+    token = base64.b64encode(f"{user}:{password}".encode()).decode()
+    req = urllib.request.Request(url, headers={"Authorization": f"Basic {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, OSError, ValueError) as ex:
+        return False, f"dev/metadata unreachable or unparseable at {url}: {ex}"
+    api_version = next(
+        (v for k, v in data.items() if k.lower() == "webapiversion"), None
+    )
+    if not api_version:
+        return False, f"dev/metadata has no WebApiVersion field (keys: {sorted(data)})"
+    try:
+        major = int(str(api_version).split(".")[0])
+    except ValueError:
+        return False, f"unparseable WebApiVersion '{api_version}'"
+    if major >= 7:
+        return True, f"Dev API {api_version} (TestRunnerHub requires 7.0)"
+    return False, f"Dev API {api_version} < 7.0 — no TestRunnerHub on this server"
+
+
 class CodeunitRun:
     """Parsed outcome of one `al runtests <id>` invocation."""
 
@@ -343,7 +377,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Run AL tests via `al runtests` (dev-endpoint TestRunnerHub, BC 28+)"
     )
-    ap.add_argument("--app", required=True, help="compiled test .app (for codeunit discovery; must already be published+installed)")
+    ap.add_argument("--app", default="", help="compiled test .app (for codeunit discovery; must already be published+installed). Required unless --probe.")
+    ap.add_argument("--probe", action="store_true", help="don't run tests — just check whether the server supports the TestRunnerHub. Exit 0 = supported, 2 = not supported/unreachable. Used by the workflow's test_runner=auto mode.")
     ap.add_argument("--codeunit-range", default="", help="range filter, same syntax as run-tests.sh")
     ap.add_argument("--junit-output", default="", help="write JUnit XML to this path")
     ap.add_argument("--company", default="", help="company name (default: auto-detect via OData)")
@@ -357,8 +392,20 @@ def main() -> int:
     ap.add_argument("--altool-cmd", default="al", help="AL dotnet tool command or path (default 'al')")
     args = ap.parse_args()
 
+    user, _, password = args.auth.partition(":")
+
+    if args.probe:
+        supported, reason = probe_test_running_support(
+            args.server, args.server_instance, args.port, user, password
+        )
+        print(f"[probe] {'supported' if supported else 'NOT supported'}: {reason}")
+        return 0 if supported else 2
+
     print("=== BC Test Runner (altool / TestRunnerHub) ===")
 
+    if not args.app:
+        print("ERROR: --app is required (unless --probe)")
+        return 1
     if not os.path.isfile(args.app):
         print(f"ERROR: app file not found: {args.app}")
         return 1
@@ -375,7 +422,17 @@ def main() -> int:
         return 1
     print("Test codeunits: " + ",".join(str(c) for c in codeunits))
 
-    user, _, password = args.auth.partition(":")
+    # Fail fast with one clear message instead of N per-codeunit
+    # "Server does not support test running" errors.
+    supported, reason = probe_test_running_support(
+        args.server, args.server_instance, args.port, user, password
+    )
+    if not supported:
+        print(f"ERROR: {reason}")
+        print("       The altool runner needs BC 28.0+ (Dev API 7.0 / TestRunnerHub).")
+        print("       Use run-tests.sh (websocket runner) for this server.")
+        return 1
+
     company = args.company
     if not company:
         origin = re.sub(r"(https?://[^:/]+).*", r"\1", args.base_url)

@@ -78,18 +78,23 @@ on:
         default: ""
       test_runner:
         description: >-
-          Test execution engine. "websocket" (default) = the OData suite +
-          WebSocket client-session flow (scripts/run-tests.sh) — works on
-          every supported BC version. "altool" = EXPERIMENTAL: the AL dotnet
-          tool's native `al runtests` command driving the NST's built-in
-          /dev/TestRunnerHub SignalR hub (scripts/run-tests-altool.py).
-          Requires BC 28.0+ (the hub / Dev API 7.0 doesn't exist in 27.x).
-          Note: altool runs tests WITHOUT an AL test runner codeunit — AI
-          tests are unsupported and isolation comes from the
-          RequiredTestIsolation property (default Codeunit).
+          Test execution engine. "auto" (default) = probe the live server
+          after BC is healthy and use the altool runner when the dev
+          endpoint advertises Dev API 7.0 (BC 28.0+), otherwise fall back
+          to the websocket runner — leaner where supported, works
+          everywhere. "websocket" = force the OData suite + WebSocket
+          client-session flow (scripts/run-tests.sh), which works on every
+          supported BC version. "altool" = force the AL dotnet tool's
+          native `al runtests` command driving the NST's built-in
+          /dev/TestRunnerHub SignalR hub (scripts/run-tests-altool.py);
+          fails hard when the server doesn't support it — useful to catch
+          "hub stopped working" regressions that auto would silently
+          paper over. Note: the altool path runs tests WITHOUT an AL test
+          runner codeunit — AI tests are unsupported and isolation comes
+          from the RequiredTestIsolation property (default Codeunit).
         required: false
         type: string
-        default: "websocket"
+        default: "auto"
       altool_version:
         description: >-
           Version of the Microsoft.Dynamics.BusinessCentral.Development.Tools
@@ -419,24 +424,32 @@ jobs:
           echo "AL compiler ready: $AL_TOOL_DIR"
           bash bc-linux/scripts/workflow-summary.sh end AL_INSTALL
 
-      # ─── Experimental altool test runner (BC 28+) ────────────────────
+      # ─── altool test runner (BC 28+) ─────────────────────────────────
       # Installs the cross-platform Microsoft.Dynamics.BusinessCentral.
       # Development.Tools dotnet tool whose `al runtests` command drives
       # the NST's built-in /dev/TestRunnerHub SignalR hub. This is a
       # DIFFERENT package from the .Linux compiler package above (that one
       # only compiles). The hub requires Dev API 7.0, which only ships
-      # with BC 28.0+ — fail fast here on older versions instead of
-      # timing out at test time.
+      # with BC 28.0+:
+      #   - test_runner=altool on an older version → hard error here
+      #     (forcing altool is the "catch hub regressions" mode)
+      #   - test_runner=auto on an older version → skip the install; the
+      #     run step's live probe will route to the websocket runner
       - name: Install AL dotnet tool (altool test runner)
-        if: inputs.test_runner == 'altool'
+        if: inputs.test_runner != 'websocket'
         run: |
           set -e
           BC_MAJOR=$(echo "${{ inputs.bc_version }}" | cut -d. -f1)
           if [ "$BC_MAJOR" -lt 28 ]; then
-            echo "ERROR: test_runner=altool requires BC 28.0+ — the server-side"
-            echo "       /dev/TestRunnerHub (Dev API 7.0) does not exist in BC ${BC_MAJOR}.x."
-            echo "       Use the default test_runner=websocket for this version."
-            exit 1
+            if [ "${{ inputs.test_runner }}" = "altool" ]; then
+              echo "ERROR: test_runner=altool requires BC 28.0+ — the server-side"
+              echo "       /dev/TestRunnerHub (Dev API 7.0) does not exist in BC ${BC_MAJOR}.x."
+              echo "       Use test_runner=auto (probes + falls back) or websocket."
+              exit 1
+            fi
+            echo "test_runner=auto on BC ${BC_MAJOR}.x — skipping altool install;"
+            echo "tests will use the websocket runner."
+            exit 0
           fi
           dotnet tool install -g Microsoft.Dynamics.BusinessCentral.Development.Tools \
             --version "${{ inputs.altool_version }}" \
@@ -710,6 +723,25 @@ jobs:
           # exactly the bug that wasted multiple debugging cycles in the
           # bc-copilot-blueprint session.
           ANY_TEST_FAILED=0
+          # ─── Select the effective test runner ─────────────────────────
+          # "auto" probes the LIVE server (BC is healthy at this point):
+          # GET /dev/metadata must advertise Dev API 7.0+ for the
+          # TestRunnerHub to exist, AND the al tool must have been
+          # installed (the install step skips it on BC < 28). Anything
+          # short of both → websocket. Explicit values pass through:
+          # "altool" without server support fails inside the script with
+          # a clear error instead of silently degrading.
+          EFFECTIVE_RUNNER="${{ inputs.test_runner }}"
+          if [ "$EFFECTIVE_RUNNER" = "auto" ]; then
+            if [ -x "$HOME/.dotnet/tools/al" ] \
+               && python3 scripts/run-tests-altool.py --probe; then
+              EFFECTIVE_RUNNER="altool"
+              echo "auto: server supports the TestRunnerHub — using the altool runner"
+            else
+              EFFECTIVE_RUNNER="websocket"
+              echo "auto: TestRunnerHub not available — using the websocket runner"
+            fi
+          fi
           # Per-app JUnit XML output. Always emitted (no opt-in flag) — JUnit is
           # cheap, the file is small, and downstream consumers either ingest it
           # via the upload-artifact step below OR via their own steps that read
@@ -728,9 +760,9 @@ jobs:
             echo "=== Running tests in $base ==="
             # Capture output so we can parse the totals for telemetry.
             tmplog=$(mktemp)
-            if [ "${{ inputs.test_runner }}" = "altool" ]; then
-              # EXPERIMENTAL (BC 28+): native `al runtests` against the
-              # NST's /dev/TestRunnerHub. The script prints the same
+            if [ "$EFFECTIVE_RUNNER" = "altool" ]; then
+              # BC 28+: native `al runtests` against the NST's
+              # /dev/TestRunnerHub. The script prints the same
               # "N total, P passed, F failed" and "Test codeunits:" lines
               # as run-tests.sh, so the parsing below works for both.
               python3 scripts/run-tests-altool.py \

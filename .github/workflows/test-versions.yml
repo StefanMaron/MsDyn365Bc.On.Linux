@@ -128,14 +128,13 @@ jobs:
       # up here. Equivalent to the legacy "70000..70001" but covers the new
       # code path. See scripts/run-tests.sh CODEUNIT_RANGE handling.
       codeunit_range: "70000|70001"
-      # EXPERIMENTAL: BC 28.x legs run tests through `al runtests` — the AL
-      # dotnet tool's native test runner driving the NST's built-in
-      # /dev/TestRunnerHub SignalR hub — instead of the OData+WebSocket
-      # runner. The hub requires Dev API 7.0, which only exists in BC 28.0+,
-      # so 27.x legs stay on the websocket runner. See
-      # scripts/run-tests-altool.py for the full limitation list (no AL
-      # test runner codeunit, prerelease-only CLI, etc.).
-      test_runner: ${{ startsWith(matrix.bc_version, '28') && 'altool' || 'websocket' }}
+      # test_runner is left at its default ("auto"): each leg probes the
+      # live server's dev endpoint and uses `al runtests` (the AL dotnet
+      # tool's native runner driving the NST's /dev/TestRunnerHub) when
+      # Dev API 7.0+ is advertised — BC 28.0+ — falling back to the
+      # OData+WebSocket runner on older versions. See
+      # scripts/run-tests-altool.py for the altool path's limitations
+      # (no AL test runner codeunit, prerelease-only CLI, etc.).
       # Pin to the freshly-built image from this commit. Both build-image
       # above and the reusable workflow's pull step look up the image by
       # this exact tag — guarantees the matrix tests against the same
