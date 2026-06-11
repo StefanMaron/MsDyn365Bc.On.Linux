@@ -27,7 +27,8 @@ on:
 
 permissions:
   contents: read
-  packages: write
+  # Needed to pull runner_image from GHCR in reusable workflow/test jobs.
+  packages: read
 
 jobs:
   prepare:
@@ -68,44 +69,37 @@ jobs:
         echo "url=$URL" >> $GITHUB_OUTPUT
 
   build-image:
-    # Builds the bc-runner image from THIS commit and pushes both :latest and
-    # :${{ github.sha }}. The matrix test job below pins runner_image to the
-    # SHA tag so it tests exactly the image built from this commit, not
-    # whatever happens to be on :latest at run time.
-    #
-    # This duplicates build-image.yml on master pushes (both run on the same
-    # commit, both push the same content — race is harmless) but it's needed
-    # for PR runs where build-image.yml does NOT fire and the PR's image
-    # would otherwise be missing.
+    # Build the bc-runner image from THIS commit as a compile/smoke check,
+    # but never push it from this workflow. test-versions consumes an existing
+    # repository image tag for runtime execution.
     runs-on: ubuntu-latest
+    outputs:
+      runner_image: ${{ steps.select-image.outputs.runner_image }}
     steps:
     - uses: actions/checkout@v4
 
     - name: Set lowercase image name
       run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/bc-runner" >> $GITHUB_ENV
 
-    - name: Log in to GHCR
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Build and push BC runner image
+    - name: Build BC runner image (no push)
       uses: docker/build-push-action@v6
       with:
         context: .
         file: src/Dockerfile
-        push: true
-        tags: |
-          ${{ env.IMAGE }}:${{ github.sha }}
-          ${{ env.IMAGE }}:latest
-        # Shares cache with build-image.yml via the same :cache tag.
-        cache-from: type=registry,ref=${{ env.IMAGE }}:cache
-        cache-to: type=registry,ref=${{ env.IMAGE }}:cache,mode=max
+        push: false
+        # Keep build acceleration without requiring registry push rights.
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - id: select-image
+      name: Select runner image reference
+      # The build job verifies the current commit still builds successfully.
+      # The matrix/container test jobs intentionally run against the latest
+      # published runner image because this workflow does not push.
+      run: echo "runner_image=${{ env.IMAGE }}:latest" >> "$GITHUB_OUTPUT"
 
   # ─── Matrix test: each BC version runs through the canonical reusable
   #     workflow with the smoke test extension. The reusable workflow
@@ -135,11 +129,9 @@ jobs:
       # OData+WebSocket runner on older versions. See
       # scripts/run-tests-altool.py for the altool path's limitations
       # (no AL test runner codeunit, prerelease-only CLI, etc.).
-      # Pin to the freshly-built image from this commit. Both build-image
-      # above and the reusable workflow's pull step look up the image by
-      # this exact tag — guarantees the matrix tests against the same
-      # image we just built, even if :latest changes underneath us.
-      runner_image: ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner:${{ github.sha }}
+      # Use the selected repository tag from build-image (latest) because
+      # test-versions does not publish images.
+      runner_image: ${{ needs.build-image.outputs.runner_image }}
       # Pin the bc-linux scripts checkout to this commit too, so a test
       # at SHA X uses entrypoint.sh / run-tests.sh / publish-app.sh /
       # wait-for-bc-healthy.sh from SHA X. Without this we'd test the
@@ -200,7 +192,7 @@ jobs:
       # download artifacts itself. This validates the container download feature.
       env:
         BC_VERSION: "28.1"
-        BC_RUNNER_IMAGE: ${{ env.IMAGE }}:${{ github.sha }}
+        BC_RUNNER_IMAGE: ${{ needs.build-image.outputs.runner_image }}
       run: |
         STEP_START=$(date +%s)
         docker compose up -d 2>&1 | tail -10
