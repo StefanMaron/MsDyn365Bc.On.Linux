@@ -208,3 +208,68 @@ jobs:
         docker compose logs bc 2>&1 | grep "\[artifacts\]"
         echo ""
         echo "Total start time (download + DB restore + BC startup): ${TOTAL_DURATION:-n/a}s"
+
+  # Exercises the macOS compose overlay (docker-compose.macos.yml) on a
+  # Linux runner. GitHub-hosted macOS runners cannot run containers at
+  # all — Apple's Virtualization framework forbids nested virtualization
+  # on the M1/M2 hardware GitHub uses — so the podman/Rosetta side of
+  # MacOS.md is untestable in hosted CI. This leg verifies everything
+  # else the overlay changes: the 2022-CU17 image tag still exists on
+  # MCR, SQL Server boots and restores the demo DB while running as
+  # root (user 0:0), and BC comes up healthy on top of that SQL.
+  # COMPOSE_FILE makes every docker compose invocation (including the
+  # shared wait-for-bc-healthy.sh) apply the overlay consistently.
+  test-macos-overlay:
+    needs: [build-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: macOS overlay test (BC 28.1)
+    env:
+      COMPOSE_FILE: docker-compose.yml:docker-compose.macos.yml
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set lowercase image name
+      run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/bc-runner" >> $GITHUB_ENV
+
+    - name: Log in to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Validate compose files merge
+      run: |
+        # Catches YAML/merge errors in the overlay without booting anything,
+        # and proves the overlay actually overrides what it claims to.
+        MERGED=$(docker compose config)
+        echo "$MERGED" | grep -q "mssql/server:2022-CU17-ubuntu-22.04" \
+          || { echo "ERROR: overlay did not apply the CU17 SQL image pin"; exit 1; }
+        echo "$MERGED" | grep -q 'user: "0:0"' \
+          || { echo "ERROR: overlay did not apply user 0:0 on the sql service"; exit 1; }
+
+    - name: Start BC with macOS overlay
+      env:
+        BC_VERSION: "28.1"
+        BC_RUNNER_IMAGE: ${{ needs.build-image.outputs.runner_image }}
+      run: |
+        docker compose up -d 2>&1 | tail -10
+        ./scripts/wait-for-bc-healthy.sh 30
+
+    - name: Verify overlay applied to running stack
+      run: |
+        SQL_CID=$(docker compose ps -q sql)
+        SQL_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$SQL_CID")
+        SQL_UID=$(docker compose exec -T sql id -u)
+        echo "sql image: $SQL_IMAGE, uid: $SQL_UID"
+        [ "$SQL_IMAGE" = "mcr.microsoft.com/mssql/server:2022-CU17-ubuntu-22.04" ] \
+          || { echo "ERROR: sql container is not running the CU17 image"; exit 1; }
+        [ "$SQL_UID" = "0" ] \
+          || { echo "ERROR: sql container is not running as root"; exit 1; }
+
+    - name: SQL log excerpt
+      if: failure()
+      run: docker compose logs sql 2>&1 | tail -50
+

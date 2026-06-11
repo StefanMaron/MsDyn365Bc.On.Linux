@@ -40,6 +40,9 @@ Just to start BC and run AL tests:
 - ~4 GB RAM (2 GB SQL + 1-2 GB BC)
 - ~3 GB disk for artifacts (downloaded once, cached in Docker volumes)
 
+Running on an Apple Silicon Mac (podman + Rosetta)? See [MacOS.md](MacOS.md)
+for the extra setup steps and the `docker-compose.macos.yml` overlay.
+
 That's it — **no .NET SDK on the host is required**. The WebSocket test
 runner used by `run-tests.sh` is bundled inside the bc-runner image and
 invoked via `docker compose exec`, so all the .NET work happens in the

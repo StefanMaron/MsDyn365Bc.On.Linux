@@ -1,5 +1,5 @@
 # Build stage: compile StartupHook + stubs + tools
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS builder
+FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:8.0 AS builder
 
 # gcc needed for compiling Win32 P/Invoke stubs (kernel32_stubs.c → libwin32_stubs.so)
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && \
@@ -27,7 +27,7 @@ RUN mkdir -p /build/output/refasm && \
     echo "Copied $(ls /build/output/refasm/*.dll | wc -l) reference assemblies"
 
 # Runtime stage: minimal image
-FROM mcr.microsoft.com/dotnet/aspnet:8.0
+FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/aspnet:8.0
 
 # Install tools for artifact download and SQL setup + en_US locale
 RUN apt-get update && apt-get install -y --no-install-recommends \

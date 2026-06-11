@@ -30,6 +30,9 @@
 
 set -uo pipefail
 
+# CDPATH makes cd print the resolved directory, which corrupts $(cd ... && pwd)
+unset CDPATH
+
 # === Configuration & CLI Parsing ===
 BASE_URL="http://localhost:7048/BC"
 DEV_URL="http://localhost:7049/BC/dev"
@@ -130,14 +133,14 @@ if [ -z "$COMPANIES_JSON" ]; then
     exit 1
 fi
 
-COMPANY_AUTO=$(echo "$COMPANIES_JSON" | py3 -c "import sys,json; c=json.load(sys.stdin)['value'][0]; print(c.get('name',c.get('Name','')))" 2>/dev/null || true)
-COMPANY_ID=$(echo "$COMPANIES_JSON" | py3 -c "import sys,json; c=json.load(sys.stdin)['value'][0]; print(c.get('id',c.get('SystemId','')))" 2>/dev/null || true)
+COMPANY_AUTO=$(echo "$COMPANIES_JSON" | py3 -c "import sys,json; c=json.load(sys.stdin)['value'][0]; m={k.lower():v for k,v in c.items()}; print(m.get('name',''))" 2>/dev/null || true)
+COMPANY_ID=$(echo "$COMPANIES_JSON" | py3 -c "import sys,json; c=json.load(sys.stdin)['value'][0]; m={k.lower():v for k,v in c.items()}; print(m.get('id',m.get('systemid','')))" 2>/dev/null || true)
 [ -z "$COMPANY" ] && COMPANY="${COMPANY_AUTO:-CRONUS International Ltd.}"
 
 if [ -z "$COMPANY_ID" ]; then
     for url in "${BASE_URL}/api/v2.0/companies" "${_API_FALLBACK}/api/v2.0/companies"; do
         COMPANY_ID=$(curl -sf --max-time 10 -u "$AUTH" "$url" 2>/dev/null \
-            | py3 -c "import sys,json; [print(c.get('id',c.get('SystemId',''))) for c in json.load(sys.stdin)['value'] if c.get('name',c.get('Name',''))==sys.argv[1]]" "$COMPANY" 2>/dev/null || true)
+            | py3 -c "import sys,json; ms=[{k.lower():v for k,v in c.items()} for c in json.load(sys.stdin)['value']]; [print(m.get('id',m.get('systemid',''))) for m in ms if m.get('name','')==sys.argv[1]]" "$COMPANY" 2>/dev/null || true)
         [ -n "$COMPANY_ID" ] && break
     done
 fi

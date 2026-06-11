@@ -24,6 +24,7 @@ services:
 
   bc:
     image: ${BC_RUNNER_IMAGE:-bc-runner:local}
+    platform: linux/amd64
     build:
       context: .
       dockerfile: src/Dockerfile
