@@ -78,13 +78,27 @@ jobs:
     # for PR runs where build-image.yml does NOT fire and the PR's image
     # would otherwise be missing.
     runs-on: ubuntu-latest
+    outputs:
+      runner_image: ${{ steps.select-image.outputs.runner_image }}
+      can_push: ${{ steps.mode.outputs.can_push }}
     steps:
     - uses: actions/checkout@v4
 
     - name: Set lowercase image name
       run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/bc-runner" >> $GITHUB_ENV
 
+    - id: mode
+      name: Determine push mode
+      run: |
+        # PRs from forks get a read-only token and cannot push to GHCR.
+        if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ]; then
+          echo "can_push=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "can_push=true" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Log in to GHCR
+      if: ${{ steps.mode.outputs.can_push == 'true' }}
       uses: docker/login-action@v3
       with:
         registry: ghcr.io
@@ -95,6 +109,7 @@ jobs:
       uses: docker/setup-buildx-action@v3
 
     - name: Build and push BC runner image
+      if: ${{ steps.mode.outputs.can_push == 'true' }}
       uses: docker/build-push-action@v6
       with:
         context: .
@@ -106,6 +121,24 @@ jobs:
         # Shares cache with build-image.yml via the same :cache tag.
         cache-from: type=registry,ref=${{ env.IMAGE }}:cache
         cache-to: type=registry,ref=${{ env.IMAGE }}:cache,mode=max
+
+    - name: Build BC runner image (no push)
+      if: ${{ steps.mode.outputs.can_push != 'true' }}
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: src/Dockerfile
+        push: false
+
+    - id: select-image
+      name: Select runner image reference
+      run: |
+        if [ "${{ steps.mode.outputs.can_push }}" = "true" ]; then
+          echo "runner_image=${{ env.IMAGE }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        else
+          # Fallback to an existing repository tag for fork PRs where package push is blocked.
+          echo "runner_image=${{ env.IMAGE }}:latest" >> "$GITHUB_OUTPUT"
+        fi
 
   # ─── Matrix test: each BC version runs through the canonical reusable
   #     workflow with the smoke test extension. The reusable workflow
@@ -132,7 +165,7 @@ jobs:
       # above and the reusable workflow's pull step look up the image by
       # this exact tag — guarantees the matrix tests against the same
       # image we just built, even if :latest changes underneath us.
-      runner_image: ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner:${{ github.sha }}
+      runner_image: ${{ needs.build-image.outputs.runner_image }}
       # Pin the bc-linux scripts checkout to this commit too, so a test
       # at SHA X uses entrypoint.sh / run-tests.sh / publish-app.sh /
       # wait-for-bc-healthy.sh from SHA X. Without this we'd test the
@@ -193,7 +226,7 @@ jobs:
       # download artifacts itself. This validates the container download feature.
       env:
         BC_VERSION: "28.1"
-        BC_RUNNER_IMAGE: ${{ env.IMAGE }}:${{ github.sha }}
+        BC_RUNNER_IMAGE: ${{ needs.build-image.outputs.runner_image }}
       run: |
         STEP_START=$(date +%s)
         docker compose up -d 2>&1 | tail -10
