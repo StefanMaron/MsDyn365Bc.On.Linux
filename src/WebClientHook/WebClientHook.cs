@@ -87,16 +87,179 @@ internal class StartupHook
             case "Microsoft.Extensions.Logging.EventLog":
                 PatchEventLogProvider(asm);
                 break;
-            case "Microsoft.Dynamics.Framework.UI.WebBase":
-                PatchFilePersistenceManager(asm);
-                break;
             case "Microsoft.Dynamics.Nav.Types":
                 PatchNavTypesEventLog(asm);
                 break;
             case "Microsoft.Dynamics.Framework.UI.Web":
                 PatchFileHelper(asm);
                 break;
+            case "Microsoft.Dynamics.Nav.Client.Builder":
+                PatchTimeZoneProvider(asm);
+                break;
+            case "Microsoft.Dynamics.Framework.UI.WebBase":
+                PatchFilePersistenceManager(asm);
+                PatchTimeZoneDetection(asm);
+                break;
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Patch #W6b: TimeZoneHelper.DetectTimeZone — round-trip-safe zones
+    // The browser reports its time zone as raw offsets (base offset, DST
+    // offset, DST period) and DetectTimeZone maps them to a system (ICU)
+    // TimeZoneInfo. That zone is serialized into the NST OpenConnection
+    // request with ToSerializedString — which FromSerializedString cannot
+    // parse back on Linux for most ICU zones (dotnet/runtime quirk), so
+    // login dies with InvalidTimeZoneException in NSService.OpenConnection.
+    // Fix: do the same base-offset matching, but return a custom
+    // TimeZoneInfo (system zone's id/names, current UTC offset) — custom
+    // zones round-trip reliably. Wall-clock times are correct; the only
+    // drift is across a DST transition mid-session.
+    // DetectTimeZone is large (LINQ + lambdas) so the JMP hook cannot be
+    // bypassed by JIT inlining.
+    // ------------------------------------------------------------------
+    private static void PatchTimeZoneDetection(Assembly asm)
+    {
+        var helper = asm.GetType("Microsoft.Dynamics.Framework.UI.WebBase.TimeZoneHelper");
+        var original = helper?.GetMethod("DetectTimeZone", BindingFlags.Public | BindingFlags.Instance);
+        var replacement = typeof(StartupHook).GetMethod(nameof(DetectTimeZoneReplacement), BindingFlags.NonPublic | BindingFlags.Static);
+        if (original == null || replacement == null)
+        {
+            Console.Error.WriteLine("[WebClientHook] TimeZoneHelper.DetectTimeZone hook setup failed");
+            return;
+        }
+        ApplyJmpHook(original, replacement!, "TimeZoneHelper.DetectTimeZone");
+    }
+
+    // Mirrors: TimeZoneInfo DetectTimeZone(int clientTimeZoneOffset, int dstOffset,
+    //          DateTime dstPeriodStart, DateTime dstPeriodEnd, UISession uiSession)
+    private static object? DetectTimeZoneReplacement(object self, int clientTimeZoneOffset, int dstOffset,
+        DateTime dstPeriodStart, DateTime dstPeriodEnd, object uiSession)
+    {
+        try
+        {
+            // Browser reports the base offset and (separately) DST info. Compute
+            // the offset in effect right now, then map it to a round-trip-safe
+            // zone whose id stays safe after the NST persists and re-resolves it.
+            var baseOffset = TimeSpan.FromMinutes(clientTimeZoneOffset);
+            bool dstActive = dstOffset != 0 && dstPeriodStart != DateTime.MinValue && dstPeriodEnd != DateTime.MinValue &&
+                IsWithinDstPeriod(DateTime.UtcNow + baseOffset, dstPeriodStart, dstPeriodEnd);
+            var effectiveOffset = baseOffset + (dstActive ? TimeSpan.FromMinutes(dstOffset) : TimeSpan.Zero);
+
+            var safe = ZoneForOffset(effectiveOffset);
+            Console.Error.WriteLine($"[WebClientHook] Browser time zone (base {clientTimeZoneOffset}min, dst {dstOffset}min) → '{safe.Id}' (offset {effectiveOffset})");
+            return safe;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WebClientHook] DetectTimeZone replacement failed ({ex.GetType().Name}: {ex.Message}) — using UTC");
+            return TimeZoneInfo.Utc;
+        }
+    }
+
+    private static bool IsWithinDstPeriod(DateTime local, DateTime start, DateTime end)
+    {
+        // Northern hemisphere: start < end. Southern: start > end (DST wraps year end).
+        return start <= end ? local >= start && local < end : local >= start || local < end;
+    }
+
+    // ------------------------------------------------------------------
+    // Patch #W6: ConfigurationTimeZoneProvider.get_TimeZone — round-trip-safe zones
+    // The web client resolves the BROWSER's IANA time zone via
+    // FindSystemTimeZoneById and the session layer serializes it with
+    // TimeZoneInfo.ToSerializedString into the NST OpenConnection request.
+    // On Linux, FromSerializedString(ToSerializedString(tz)) throws
+    // SerializationException for most ICU zones (dotnet/runtime quirk), so
+    // any user whose browser is not in UTC cannot log in
+    // (InvalidTimeZoneException in NSService.OpenConnection).
+    // Fix: return a custom TimeZoneInfo with the same id/names and the
+    // CURRENT utc offset — custom zones round-trip reliably. Wall-clock
+    // times are correct for the session; the only drift is across a DST
+    // transition mid-session, which is acceptable for a dev tool.
+    // This getter is called through the ITimeZoneProvider interface, so the
+    // JMP hook cannot be bypassed by JIT inlining (unlike the UserSettings
+    // property setter, which small-method inlining would skip).
+    // ------------------------------------------------------------------
+    private static FieldInfo? _tzConfigSettingsField;
+    private static MethodInfo? _tzGetStringSetting;
+
+    private static void PatchTimeZoneProvider(Assembly asm)
+    {
+        var provider = asm.GetType("Microsoft.Dynamics.Nav.Client.FormBuilder.ConfigurationTimeZoneProvider");
+        var getter = provider?.GetProperty("TimeZone")?.GetMethod;
+        var replacement = typeof(StartupHook).GetMethod(nameof(GetTimeZoneReplacement), BindingFlags.NonPublic | BindingFlags.Static);
+        if (provider == null || getter == null || replacement == null)
+        {
+            Console.Error.WriteLine("[WebClientHook] ConfigurationTimeZoneProvider hook setup failed");
+            return;
+        }
+        _tzConfigSettingsField = provider.GetField("configSettings", BindingFlags.NonPublic | BindingFlags.Instance);
+        ApplyJmpHook(getter, replacement!, "ConfigurationTimeZoneProvider.get_TimeZone");
+    }
+
+    private static object? GetTimeZoneReplacement(object self)
+    {
+        try
+        {
+            var configSettings = _tzConfigSettingsField?.GetValue(self);
+            if (configSettings == null) return null;
+            _tzGetStringSetting ??= configSettings.GetType().GetMethod("GetStringSetting", new[] { typeof(string) });
+            var id = (string?)_tzGetStringSetting?.Invoke(configSettings, new object[] { "TimeZone" });
+            if (string.IsNullOrEmpty(id)) return null;
+            var tz = TimeZoneInfo.FindSystemTimeZoneById(id);
+            return MakeSerializationSafe(tz);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WebClientHook] get_TimeZone replacement failed ({ex.GetType().Name}: {ex.Message}) — using UTC");
+            return TimeZoneInfo.Utc;
+        }
+    }
+
+    private static TimeZoneInfo MakeSerializationSafe(TimeZoneInfo tz)
+    {
+        try
+        {
+            TimeZoneInfo.FromSerializedString(tz.ToSerializedString());
+            return tz; // already safe (UTC, Etc/GMT±N, synthetic custom zones)
+        }
+        catch
+        {
+            var safe = ZoneForOffset(tz.GetUtcOffset(DateTime.UtcNow));
+            Console.Error.WriteLine($"[WebClientHook] TimeZone '{tz.Id}' does not survive .NET serialization on Linux — using '{safe.Id}'");
+            return safe;
+        }
+    }
+
+    /// <summary>
+    /// Map a UTC offset to a zone that (a) survives ToSerializedString →
+    /// FromSerializedString on Linux and (b) stays safe after the NST persists
+    /// its id and re-resolves it on the next login. Whole-hour offsets use the
+    /// real "Etc/GMT±N" IANA zones; sub-hour offsets use a synthetic
+    /// "UTC±HH:MM" id that won't re-resolve to a DST-bearing ICU zone.
+    /// Mirrors StartupHook.ZoneForOffset on the NST side — keep them in sync.
+    /// </summary>
+    private static TimeZoneInfo ZoneForOffset(TimeSpan offset)
+    {
+        if (offset == TimeSpan.Zero)
+            return TimeZoneInfo.Utc;
+
+        if (offset.Minutes == 0 && offset.Seconds == 0)
+        {
+            int hours = offset.Hours; // signed; Etc/GMT sign is inverted
+            string etcId = $"Etc/GMT{(hours > 0 ? "-" : "+")}{Math.Abs(hours)}";
+            try
+            {
+                var etc = TimeZoneInfo.FindSystemTimeZoneById(etcId);
+                TimeZoneInfo.FromSerializedString(etc.ToSerializedString());
+                return etc;
+            }
+            catch { /* fall through */ }
+        }
+
+        string sign = offset < TimeSpan.Zero ? "-" : "+";
+        string syntheticId = $"UTC{sign}{offset.Duration():hh\\:mm}";
+        return TimeZoneInfo.CreateCustomTimeZone(syntheticId, offset, syntheticId, syntheticId);
     }
 
     // ------------------------------------------------------------------

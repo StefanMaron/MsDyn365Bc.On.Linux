@@ -64,6 +64,15 @@ using System.Threading.Tasks;
 ///   in place (renders as a broken image) but report generation completes and the session
 ///   survives. The test code never inspects rendered image content.
 ///
+/// Patch #24: TimeZoneInfoResolver.ResolveFromId (Nav.Types.dll)
+///   TimeZoneInfo.FromSerializedString(ToSerializedString(tz)) throws on Linux for most
+///   ICU time zones, and BC round-trips session time zones through exactly that pair
+///   (UserSettings.TimeZoneInfo). The CRONUS demo DB ships [User Personalization]
+///   .[Time Zone] = 'Europe/Amsterdam' for the default user SID, which crashed every
+///   web client login (InvalidTimeZoneException in NSService.OpenConnection).
+///   Fix: hook the canonical id→zone resolver to substitute custom fixed-offset zones
+///   (same id/names, current UTC offset) for zones that don't survive the round-trip.
+///
 /// JMP hooks work ONLY on BC methods (JIT-compiled). BCL methods are ReadyToRun pre-compiled
 /// and cannot be patched this way.
 /// </summary>
@@ -98,6 +107,10 @@ internal class StartupHook
     private static Assembly? _navNclAssembly;
     private static IntPtr _kernel32StubHandle;
     private static object? _noopEncryptionProvider;
+    // Patch #24 state
+    private static Type? _navTimeZoneExceptionType;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, TimeZoneInfo> _safeTimeZoneCache =
+        new System.Collections.Concurrent.ConcurrentDictionary<string, TimeZoneInfo>(StringComparer.OrdinalIgnoreCase);
     private static bool _encryptionBypassed;
     private static bool _encryptionApplying;
     private static object? _originalTopology;
@@ -336,6 +349,12 @@ internal class StartupHook
         if (name == "Microsoft.Dynamics.Nav.OpenXml")
         {
             PatchOfficeWordDocumentPictureMerger(args.LoadedAssembly);
+        }
+
+        // Patch #24: FindClientTimeZone serialization safety (see method).
+        if (name == "Microsoft.Dynamics.Nav.Service")
+        {
+            PatchFindClientTimeZone(args.LoadedAssembly);
         }
 
     }
@@ -1074,6 +1093,163 @@ internal class StartupHook
         return Array.Empty<string>();
     }
 
+    /// <summary>
+    /// Patch #24: hook NSServiceBase.FindClientTimeZone so the session's client
+    /// time zone is always serialization-safe on Linux.
+    ///
+    /// The web/desktop client sends its time zone id (e.g. "Europe/Berlin") in
+    /// the ConnectionRequest. The NST resolves it with FindSystemTimeZoneById
+    /// (→ a full ICU zone with DST rules) and later serializes it with
+    /// TimeZoneInfo.ToSerializedString into the UserSettings it returns. On
+    /// Linux, FromSerializedString cannot parse those ICU zones back
+    /// (InvalidTimeZoneException in ValidateTimeZoneInfo), so OpenConnection
+    /// throws and the session is killed before the client ever loads — i.e.
+    /// nobody whose browser is in a DST zone can sign in.
+    ///
+    /// FindClientTimeZone is a private static method with a try/catch, so the
+    /// JIT will not inline it and the JMP hook holds. The replacement does the
+    /// same id→zone resolution, then substitutes a custom fixed-offset zone
+    /// (same id/names, current UTC offset) for any zone that doesn't survive
+    /// the round-trip. Trade-off: server-side date math for that session uses a
+    /// fixed offset rather than DST rules (off by an hour across a transition) —
+    /// acceptable for a dev/CI container versus being unable to sign in at all.
+    /// </summary>
+    private static void PatchFindClientTimeZone(Assembly navService)
+    {
+        try
+        {
+            var baseType = navService.GetType("Microsoft.Dynamics.Nav.Service.NSServiceBase");
+            var method = baseType?.GetMethod("FindClientTimeZone",
+                BindingFlags.NonPublic | BindingFlags.Static, null, new[] { typeof(string) }, null);
+            if (method == null)
+            {
+                Console.Error.WriteLine("[StartupHook] Patch #24: NSServiceBase.FindClientTimeZone not found");
+                return;
+            }
+            _navTimeZoneExceptionType = navService.GetType("Microsoft.Dynamics.Nav.Types.Exceptions.NavTimeZoneException")
+                ?? FindTypeAcrossAssemblies("Microsoft.Dynamics.Nav.Types.Exceptions.NavTimeZoneException");
+            var replacement = typeof(StartupHook).GetMethod(nameof(FindClientTimeZoneSafe),
+                BindingFlags.Static | BindingFlags.NonPublic);
+            ApplyJmpHook(method, replacement!, "NSServiceBase.FindClientTimeZone (Patch #24)");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[StartupHook] Patch #24 failed: {ex.Message}");
+        }
+    }
+
+    private static Type? FindTypeAcrossAssemblies(string fullName)
+    {
+        foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            var t = a.GetType(fullName);
+            if (t != null) return t;
+        }
+        return null;
+    }
+
+    // Mirrors: static TimeZoneInfo FindClientTimeZone(string requestedClientTimeZoneId)
+    private static TimeZoneInfo FindClientTimeZoneSafe(string requestedClientTimeZoneId)
+    {
+        if (string.IsNullOrEmpty(requestedClientTimeZoneId))
+            throw new ArgumentNullException(nameof(requestedClientTimeZoneId));
+
+        if (_safeTimeZoneCache.TryGetValue(requestedClientTimeZoneId, out var cached))
+            return cached;
+
+        // The web client emits round-trip-safe ids (Etc/GMT±N for whole hours,
+        // synthetic "UTC±HH:MM" for sub-hour). Whole-hour Etc/* ids resolve via
+        // FindSystemTimeZoneById; synthetic ids don't, so parse the offset out.
+        TimeZoneInfo? resolved = null;
+        try { resolved = TimeZoneInfo.FindSystemTimeZoneById(requestedClientTimeZoneId); }
+        catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException or NullReferenceException)
+        {
+            if (TryParseSyntheticOffsetId(requestedClientTimeZoneId, out var off))
+                resolved = ZoneForOffset(off);
+        }
+
+        if (resolved == null)
+        {
+            var message = $"The time zone '{requestedClientTimeZoneId}' was not recognized as a valid time zone on this server.";
+            if (_navTimeZoneExceptionType != null)
+            {
+                try { throw (Exception)Activator.CreateInstance(_navTimeZoneExceptionType, message)!; }
+                catch (MissingMethodException) { }
+            }
+            throw new TimeZoneNotFoundException(message);
+        }
+
+        var safe = MakeTimeZoneSerializationSafe(resolved);
+        _safeTimeZoneCache[requestedClientTimeZoneId] = safe;
+        return safe;
+    }
+
+    /// <summary>
+    /// Return a TimeZoneInfo equivalent to <paramref name="tz"/> that is
+    /// guaranteed to survive ToSerializedString → FromSerializedString on Linux
+    /// AND whose Id, once persisted and re-resolved on the next login, still
+    /// yields a safe zone. Whole-hour offsets map to the real "Etc/GMT±N" IANA
+    /// zones (no DST, re-resolvable); sub-hour offsets map to a synthetic
+    /// "UTC±HH:MM" id that TryFindSystemTimeZoneById skips (leaving the zone
+    /// unset = safe) but that round-trips as a custom zone for the live session.
+    /// </summary>
+    internal static TimeZoneInfo MakeTimeZoneSerializationSafe(TimeZoneInfo tz)
+    {
+        try
+        {
+            TimeZoneInfo.FromSerializedString(tz.ToSerializedString());
+            return tz; // already safe (UTC, Etc/GMT±N, synthetic custom zones)
+        }
+        catch
+        {
+            var safe = ZoneForOffset(tz.GetUtcOffset(DateTime.UtcNow));
+            Console.Error.WriteLine($"[StartupHook] Patch #24: time zone '{tz.Id}' does not survive .NET serialization on Linux — substituting '{safe.Id}'");
+            return safe;
+        }
+    }
+
+    internal static TimeZoneInfo ZoneForOffset(TimeSpan offset)
+    {
+        if (offset == TimeSpan.Zero)
+            return TimeZoneInfo.Utc;
+
+        // Whole-hour offset → real Etc/GMT zone (POSIX sign is inverted).
+        if (offset.Minutes == 0 && offset.Seconds == 0)
+        {
+            int hours = offset.Hours; // signed
+            string etcId = $"Etc/GMT{(hours > 0 ? "-" : "+")}{Math.Abs(hours)}";
+            try
+            {
+                var etc = TimeZoneInfo.FindSystemTimeZoneById(etcId);
+                TimeZoneInfo.FromSerializedString(etc.ToSerializedString()); // verify
+                return etc;
+            }
+            catch { /* fall through to synthetic */ }
+        }
+
+        // Sub-hour (or Etc lookup failed): synthetic non-resolvable id.
+        string sign = offset < TimeSpan.Zero ? "-" : "+";
+        string syntheticId = $"UTC{sign}{offset.Duration():hh\\:mm}";
+        return TimeZoneInfo.CreateCustomTimeZone(syntheticId, offset, syntheticId, syntheticId);
+    }
+
+    private static bool TryParseSyntheticOffsetId(string id, out TimeSpan offset)
+    {
+        offset = TimeSpan.Zero;
+        if (string.IsNullOrEmpty(id) || !id.StartsWith("UTC", StringComparison.OrdinalIgnoreCase))
+            return false;
+        var rest = id.Substring(3);
+        if (rest.Length == 0) return true; // "UTC" → zero
+        int sign = rest[0] == '-' ? -1 : 1;
+        if (rest[0] is '+' or '-') rest = rest.Substring(1);
+        if (TimeSpan.TryParse(rest, System.Globalization.CultureInfo.InvariantCulture, out var ts))
+        {
+            offset = sign < 0 ? -ts : ts;
+            return true;
+        }
+        return false;
+    }
+
     // ========================================================================
     // Patch #19: CustomReportingServiceClient — no-op factory for report rendering.
     // NavEnvironment.Instance.CustomReportingServiceClient is a built-in hook that
@@ -1634,11 +1810,62 @@ internal class StartupHook
                 }
             }
 
+            // --- Patch #24: UserSettings.TimeZoneInfo serialization safety ---
+            // BC round-trips session/user time zones through
+            // TimeZoneInfo.ToSerializedString (setter) → FromSerializedString
+            // (getter). On Linux, FromSerializedString throws for most ICU zones
+            // (InvalidTimeZoneException), so any session whose time zone is a
+            // real-world DST zone — the browser's zone, or the CRONUS demo DB's
+            // 'Europe/Amsterdam' personalization row — dies in
+            // NSService.OpenConnection before the client loads. Nobody outside
+            // UTC can sign in to the web client.
+            // The setter is the single choke point: every serialized string is
+            // produced here. Hook it to substitute a custom fixed-offset zone
+            // (same id/names, current UTC offset) for any zone that doesn't
+            // survive the round-trip, so the stored string always deserializes.
+            // Trade-off: a fixed offset instead of DST rules for affected zones
+            // (off by an hour across a transition) — acceptable for a dev/CI
+            // container versus being unable to sign in.
+            var userSettingsType = navTypes.GetType("Microsoft.Dynamics.Nav.Types.UserSettings");
+            var tzSetter = userSettingsType?.GetProperty("TimeZoneInfo")?.SetMethod;
+            var tzField = userSettingsType?.GetField("serializedTimeZoneInfo",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            if (tzSetter != null && tzField != null)
+            {
+                _userSettingsSerializedTzField = tzField;
+                var tzReplacement = typeof(StartupHook).GetMethod(nameof(SetTimeZoneInfoSafe),
+                    BindingFlags.Static | BindingFlags.NonPublic);
+                ApplyJmpHook(tzSetter, tzReplacement!, "UserSettings.set_TimeZoneInfo (Patch #24)");
+            }
+            else
+            {
+                Console.WriteLine("[StartupHook] Patch #24: UserSettings.set_TimeZoneInfo or serializedTimeZoneInfo field not found");
+            }
+
             _patchedTypes = true;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[StartupHook] Patch #4/5/7 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static FieldInfo? _userSettingsSerializedTzField;
+
+    // Mirrors UserSettings.set_TimeZoneInfo(TimeZoneInfo value): 'this' is arg0.
+    // Stores a serialization-safe form so the getter's FromSerializedString
+    // (which the JIT may inline anywhere) can never throw on Linux.
+    private static void SetTimeZoneInfoSafe(object self, TimeZoneInfo? value)
+    {
+        try
+        {
+            string? serialized = value == null ? null : MakeTimeZoneSerializationSafe(value).ToSerializedString();
+            _userSettingsSerializedTzField!.SetValue(self, serialized);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[StartupHook] Patch #24 set_TimeZoneInfo failed ({ex.GetType().Name}: {ex.Message}) — storing UTC");
+            try { _userSettingsSerializedTzField!.SetValue(self, TimeZoneInfo.Utc.ToSerializedString()); } catch { }
         }
     }
 

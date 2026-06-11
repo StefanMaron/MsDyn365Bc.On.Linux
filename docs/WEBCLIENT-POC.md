@@ -84,6 +84,45 @@ browser ──HTTP/WS (/csh, JSON-RPC)──▶ Prod.Client.WebCoreApp (Kestrel,
 | W3 | `Microsoft.Dynamics.Nav.Types.EventLogWriter` | The embedded Nav client runtime's background event queue calls `System.Diagnostics.EventLog` and aborts the process | Replace static writer instance with a `DispatchProxy` no-op (same as NST Patch #4; JMP unreliable here due to inlining) |
 | W4 | `Microsoft.Dynamics.Framework.UI.Web.FileHelper.GetSymbolicLinkTarget` | P/Invokes kernel32 `CreateFile`/`GetFinalPathNameByHandle` just to resolve symlinks for a `FileSystemWatcher` | Managed reimplementation via `FileInfo.ResolveLinkTarget` |
 | W5 | (all assemblies) | Any other Win32 P/Invoke | `ResolvingUnmanagedDll` → `libwin32_stubs.so`, mirroring NST Patch #3 |
+| W6 / W6b | `ConfigurationTimeZoneProvider.get_TimeZone`, `TimeZoneHelper.DetectTimeZone` | The browser's time zone is sent to the NST and serialized with `TimeZoneInfo.ToSerializedString`, which fails to deserialize on Linux for DST zones (see Time zone bug below) | Emit a round-trip-safe zone (`Etc/GMT±N` for whole-hour offsets, synthetic `UTC±HH:MM` for sub-hour) instead of an ICU zone |
+
+### The time zone bug (most important fix for real users)
+
+`TimeZoneInfo.FromSerializedString(TimeZoneInfo.X.ToSerializedString())` throws
+`InvalidTimeZoneException` on Linux for most ICU zones that carry DST rules — a
+.NET-on-Linux quirk. BC round-trips session/user time zones through exactly that
+pair, so **any user whose browser is in a DST time zone (Europe, most of the US,
+Australia, …) could not sign in** — `OpenConnection` died server-side before the
+client loaded. The CRONUS demo DB also ships
+`[User Personalization].[Time Zone] = 'Europe/Amsterdam'`, which broke even a
+UTC browser on the very first login.
+
+It took three coordinated changes because the zone flows through both processes
+and gets **persisted and re-resolved** on each login:
+
+1. **Web client (W6b)** maps the browser's reported offset to a round-trip-safe
+   id (`Etc/GMT±N` / synthetic `UTC±HH:MM`) before it's sent to the NST.
+2. **NST StartupHook Patch #24** (`NSServiceBase.FindClientTimeZone`,
+   `UserSettings.set_TimeZoneInfo`) substitutes a safe zone for any ICU zone that
+   doesn't survive the round-trip, so the server can't crash on a zone the client
+   sends or one already stored in personalization.
+3. **Entrypoint** normalizes the demo DB's `[User Personalization].[Time Zone]`
+   to `UTC` *before* NST starts (so its data cache is clean from boot — a SQL
+   `UPDATE` after NST is running is masked by the cache).
+
+Why those specific ids: `Etc/GMT±N` are real IANA zones with no DST, so they
+both serialize cleanly *and* re-resolve to a safe zone when BC writes the id back
+to personalization and reads it next login. Sub-hour offsets (India +5:30, Tehran
++3:30) have no Etc equivalent, so they use a synthetic `UTC±HH:MM` id that
+`TryFindSystemTimeZoneById` skips (leaving the zone unset = safe) while still
+round-tripping as a custom zone for the live session. Trade-off: server-side date
+math uses a fixed offset rather than DST rules for affected zones (off by an hour
+only across a DST transition) — acceptable for a dev/CI container.
+
+Verified by logging in with the browser forced to Europe/Berlin, America/New_York,
+Australia/Sydney (DST), Asia/Kolkata (+5:30), Asia/Tehran (+3:30) and UTC — each
+twice, to exercise the persist-then-re-resolve cycle — with zero
+`InvalidTimeZoneException` server-side.
 
 Debug aid: `WEBCLIENT_DEBUG_FIRSTCHANCE=1` prints every thrown exception with
 full inner chain to stderr — the web client ships no console logging

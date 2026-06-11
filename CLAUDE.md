@@ -358,6 +358,20 @@ recompilation silently undoes JMP hooks), and `hosting.json` overrides
 `ASPNETCORE_URLS`. Full details, patch list, and known gaps:
 `docs/WEBCLIENT-POC.md`.
 
+One non-obvious cross-cutting fix lives partly in the NST: **time zones.**
+`TimeZoneInfo.FromSerializedString(ToSerializedString(tz))` throws on Linux
+for most DST-bearing ICU zones, and BC round-trips session/user time zones
+through that pair — so anyone whose browser is in a DST zone couldn't sign
+in, and the CRONUS demo DB's `Europe/Amsterdam` personalization row broke
+even UTC browsers. The fix spans three places that must stay in sync:
+StartupHook **Patch #24** (`NSServiceBase.FindClientTimeZone` +
+`UserSettings.set_TimeZoneInfo`) and WebClientHook **W6/W6b** both route
+zones through a `ZoneForOffset` helper that emits `Etc/GMT±N` (whole-hour,
+re-resolvable) or synthetic `UTC±HH:MM` (sub-hour) ids; the entrypoint
+normalizes `[User Personalization].[Time Zone]` to `UTC` before NST starts.
+If you touch one `ZoneForOffset`, update the other — they're duplicated
+across the two hook assemblies on purpose (no shared assembly).
+
 ## Relationship to `PipelinePerformanceComparison`
 
 The sibling repo `../PipelinePerformanceComparison` is the **primary consumer** of this project and the reason most of the recent patches exist. It is *not* a dependency of bc-linux — the relationship goes the other way:

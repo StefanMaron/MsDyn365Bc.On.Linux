@@ -384,6 +384,14 @@ fi
 # Sandbox tenant type
 $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1;" 2>/dev/null
 
+# Normalize demo-DB user time zones to UTC. The CRONUS backup ships
+# [User Personalization].[Time Zone] = 'Europe/Amsterdam' for the default
+# user SID; on Linux, BC's TimeZoneInfo serialize→deserialize round-trip
+# throws for such ICU zones and kills every client login at OpenConnection.
+# Patch #24 in the StartupHook also guards this at runtime — this is the
+# data-side half so the shipped demo data is clean to begin with.
+$SQLCMD_DB -Q "UPDATE [User Personalization] SET [Time Zone] = N'UTC' WHERE [Time Zone] <> N'UTC';" 2>/dev/null
+
 # SQL performance tuning for CI/CD — disable safety overhead not needed for test runs
 # ALTER DATABASE must run from master context, not from within the target database
 $SQLCMD -Q "
