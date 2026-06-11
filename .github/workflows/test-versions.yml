@@ -89,6 +89,9 @@ jobs:
         context: .
         file: src/Dockerfile
         push: false
+        # Keep build acceleration without requiring registry push rights.
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
 
     - id: select-image
       name: Select runner image reference
