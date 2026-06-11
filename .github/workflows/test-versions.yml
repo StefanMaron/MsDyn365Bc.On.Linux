@@ -96,8 +96,9 @@ jobs:
 
     - id: select-image
       name: Select runner image reference
-      # This workflow only verifies that the current commit still builds.
-      # Runtime tests intentionally consume the latest published runner image.
+      # The build job verifies the current commit still builds successfully.
+      # The matrix/container test jobs intentionally run against the latest
+      # published runner image because this workflow does not push.
       run: echo "runner_image=${{ env.IMAGE }}:latest" >> "$GITHUB_OUTPUT"
 
   # ─── Matrix test: each BC version runs through the canonical reusable
