@@ -160,11 +160,11 @@ fs.writeFileSync("extension.js",s.replace(o,p));console.log("patched OK");'
 ```
 
 Reload the VS Code window afterwards. After the patch, attach completes in
-~1 s and the call stack appears ~3 s after a breakpoint hit. The proper fix
-belongs upstream (microsoft/AL: the adapter should never default its package
-cache to the process CWD, and/or the extension should pass the cache path /
-cwd to the adapter); until then this patch or an equivalent is required on
-Linux.
+~1 s and the call stack appears ~3 s after a breakpoint hit. Reported
+upstream as [microsoft/AL#8276](https://github.com/microsoft/AL/issues/8276)
+(the adapter should never default its package cache to the process CWD,
+and/or the extension should pass the cache path / cwd to the adapter); until
+that's fixed this patch or an equivalent is required on Linux.
 
 ## Capturing VS Code ↔ adapter DAP traffic
 
