@@ -60,9 +60,11 @@ RUN set -eu; \
     if [ "$OPT_GO_SQLCMD" = "1" ]; then \
         echo "[build] SQL client = go-sqlcmd ($GO_SQLCMD_URL)"; \
         mkdir -p /opt/sqlcmd; \
+        apt-get update; apt-get install -y --no-install-recommends bzip2; \
         curl -fsSL "$GO_SQLCMD_URL" -o /tmp/sqlcmd.tar.bz2; \
         tar -xjf /tmp/sqlcmd.tar.bz2 -C /opt/sqlcmd sqlcmd; \
         rm -f /tmp/sqlcmd.tar.bz2; \
+        apt-get purge -y bzip2; apt-get autoremove -y; \
         ln -sf /opt/sqlcmd/sqlcmd /usr/local/bin/sqlcmd; \
         echo go > /etc/bc-sqlcmd-flavor; \
     else \
