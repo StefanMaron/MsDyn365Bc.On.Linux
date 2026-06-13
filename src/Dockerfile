@@ -31,12 +31,15 @@ RUN mkdir -p /build/output/refasm && \
 # Runtime stage: minimal image
 FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/aspnet:8.0
 
-# Install tools for artifact download and SQL setup + en_US locale
+# Install tools for artifact download and SQL setup + en_US locale.
+# No gnupg: apt on bookworm reads ASCII-armored (.asc) keyrings directly via
+# signed-by=, so we skip `gpg --dearmor` and don't ship gnupg + its deps in the
+# runtime image (build-only tool, ~tens of MB reclaimed).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl unzip python3 gnupg locales && \
+        curl unzip python3 locales && \
     sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen && \
-    curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
-    echo "deb [signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql.list && \
+    curl -sSL https://packages.microsoft.com/keys/microsoft.asc -o /usr/share/keyrings/microsoft.asc && \
+    echo "deb [signed-by=/usr/share/keyrings/microsoft.asc] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql.list && \
     ACCEPT_EULA=Y apt-get update && ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
