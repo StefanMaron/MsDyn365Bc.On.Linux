@@ -776,10 +776,15 @@ log_step "Starting BC service tier..."
 mkfifo /tmp/bc-stdin 2>/dev/null || true
 
 # .NET runtime tuning for BC service tier performance:
-# - Server GC: better throughput for multi-threaded workloads (extension compilation)
+# - Server GC: better throughput for multi-threaded workloads (extension compilation).
+#   Server GC allocates one heap + one background GC thread PER CORE, so on a
+#   many-core host the NST resident set is substantially larger than Workstation
+#   GC. Now overridable so the memory/throughput trade-off can be A/B benchmarked:
+#   `DOTNET_gcServer=0 docker compose up` runs Workstation GC (lower RAM). Default
+#   stays Server GC (=1) to preserve current behavior.
 # - Tiered compilation: DISABLED to prevent JMP hooks from being overwritten by Tier 1 recompilation.
 #   The Watson crash handler patch relies on JMP hooks staying in place.
-export DOTNET_gcServer=1
+export DOTNET_gcServer="${DOTNET_gcServer:-1}"
 export DOTNET_TieredCompilation=0
 
 # Diagnostic-only: when BC_PROFILE_NST=1, suspend NST at process startup until

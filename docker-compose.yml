@@ -71,6 +71,9 @@ services:
       # .NET runtime tuning. Defaults are inherited from the entrypoint
       # (gcServer=1, TieredCompilation=0). These pass-throughs let us A/B
       # test additional knobs without rebuilding the image.
+      # Server GC (=1) is the entrypoint default. Set DOTNET_gcServer=0 to run
+      # Workstation GC — lower NST resident memory at a possible throughput cost.
+      DOTNET_gcServer: ${DOTNET_gcServer:-}
       DOTNET_TieredCompilation: ${DOTNET_TieredCompilation:-}
       DOTNET_TC_QuickJitForLoops: ${DOTNET_TC_QuickJitForLoops:-}
       DOTNET_ReadyToRun: ${DOTNET_ReadyToRun:-}
