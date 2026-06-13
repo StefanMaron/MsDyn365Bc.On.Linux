@@ -28,6 +28,11 @@ services:
     build:
       context: .
       dockerfile: src/Dockerfile
+      # Toggleable image-size optimizations (default 0 = current behavior).
+      # See OPTIMIZATION-FLAGS.md. e.g. OPT_GO_SQLCMD=1 docker compose build bc
+      args:
+        OPT_GO_SQLCMD: ${OPT_GO_SQLCMD:-0}
+        OPT_DROP_GNUPG: ${OPT_DROP_GNUPG:-0}
     stdin_open: true
     depends_on:
       sql:
@@ -45,7 +50,17 @@ services:
       BC_COUNTRY: ${BC_COUNTRY:-w1}
       BC_TYPE: ${BC_TYPE:-sandbox}
       SA_PASSWORD: ${SA_PASSWORD:-Passw0rd123!}
+      # ...=system-only is a benchmark mode: boot NST with only the System app,
+      # then republish the rest from R2R artifacts. See OPTIMIZATION-FLAGS.md.
       BC_CLEAR_ALL_APPS: ${BC_CLEAR_ALL_APPS:-false}
+      # Widen the system-only keep set if NST won't boot with System alone
+      # (comma-separated lowercase app GUIDs). Empty = just the System app.
+      BC_SYSTEM_ONLY_KEEP_IDS: ${BC_SYSTEM_ONLY_KEEP_IDS:-}
+      # Volume-size optimization: drop ModernDev + Test Assemblies from the
+      # platform artifact extraction (requires a fresh artifact volume to measure).
+      BC_MINIMAL_PLATFORM: ${BC_MINIMAL_PLATFORM:-0}
+      # Override SQL client TLS flags (advanced — mainly for the go-sqlcmd image).
+      SQLCMD_TLS: ${SQLCMD_TLS:-}
       BC_SKIP_APP_PUBLISH: ${BC_SKIP_APP_PUBLISH:-false}
       BC_KEEP_APP_IDS: ${BC_KEEP_APP_IDS:-}
       # Custom license override: when set, the entrypoint imports the file
@@ -71,6 +86,9 @@ services:
       # .NET runtime tuning. Defaults are inherited from the entrypoint
       # (gcServer=1, TieredCompilation=0). These pass-throughs let us A/B
       # test additional knobs without rebuilding the image.
+      # Server GC (=1) is the entrypoint default. Set DOTNET_gcServer=0 for
+      # Workstation GC — lower NST resident memory at a possible throughput cost.
+      DOTNET_gcServer: ${DOTNET_gcServer:-}
       DOTNET_TieredCompilation: ${DOTNET_TieredCompilation:-}
       DOTNET_TC_QuickJitForLoops: ${DOTNET_TC_QuickJitForLoops:-}
       DOTNET_ReadyToRun: ${DOTNET_ReadyToRun:-}

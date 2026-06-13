@@ -31,14 +31,55 @@ RUN mkdir -p /build/output/refasm && \
 # Runtime stage: minimal image
 FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/aspnet:8.0
 
-# Install tools for artifact download and SQL setup + en_US locale
+# --- Toggleable image-size optimizations (default 0 = current behavior) -------
+# See OPTIMIZATION-FLAGS.md. Toggle with e.g.:
+#   OPT_GO_SQLCMD=1 docker compose build bc
+# OPT_GO_SQLCMD=1 : install the standalone go-sqlcmd binary instead of the
+#   mssql-tools18 apt package (no MS apt repo, no gnupg, no unixODBC/msodbcsql18).
+#   Biggest single image shrink. EXPERIMENTAL — flag compatibility could not be
+#   boot-validated here; smoke-test SQL setup before relying on it. If a server
+#   needs different TLS flags, override SQLCMD_TLS at runtime (see entrypoint).
+# OPT_DROP_GNUPG=1: (only relevant when OPT_GO_SQLCMD=0) read the Microsoft apt
+#   key as an ASCII-armored (.asc) keyring via signed-by= instead of dearmoring
+#   it with gpg, so gnupg and its deps don't ship in the runtime image.
+ARG OPT_GO_SQLCMD=0
+ARG OPT_DROP_GNUPG=0
+ARG GO_SQLCMD_URL=https://github.com/microsoft/go-sqlcmd/releases/download/v1.8.2/sqlcmd-linux-amd64.tar.bz2
+
+# Base tools + en_US locale (always needed)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl unzip python3 gnupg locales && \
+        curl unzip python3 locales && \
     sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen && \
-    curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
-    echo "deb [signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql.list && \
-    ACCEPT_EULA=Y apt-get update && ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# SQL client: go-sqlcmd binary (smaller) or mssql-tools18 (current default).
+# Either way a `sqlcmd` shim lands on PATH at /usr/local/bin and the chosen
+# flavor is recorded in /etc/bc-sqlcmd-flavor so the entrypoint can pick the
+# right TLS flags.
+RUN set -eu; \
+    if [ "$OPT_GO_SQLCMD" = "1" ]; then \
+        echo "[build] SQL client = go-sqlcmd ($GO_SQLCMD_URL)"; \
+        mkdir -p /opt/sqlcmd; \
+        curl -fsSL "$GO_SQLCMD_URL" -o /tmp/sqlcmd.tar.bz2; \
+        tar -xjf /tmp/sqlcmd.tar.bz2 -C /opt/sqlcmd sqlcmd; \
+        rm -f /tmp/sqlcmd.tar.bz2; \
+        ln -sf /opt/sqlcmd/sqlcmd /usr/local/bin/sqlcmd; \
+        echo go > /etc/bc-sqlcmd-flavor; \
+    else \
+        echo "[build] SQL client = mssql-tools18 (drop-gnupg=$OPT_DROP_GNUPG)"; \
+        if [ "$OPT_DROP_GNUPG" = "1" ]; then \
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc -o /usr/share/keyrings/microsoft.asc; \
+            echo "deb [signed-by=/usr/share/keyrings/microsoft.asc] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql.list; \
+        else \
+            apt-get update; apt-get install -y --no-install-recommends gnupg; \
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg; \
+            echo "deb [signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql.list; \
+        fi; \
+        ACCEPT_EULA=Y apt-get update; ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18; \
+        ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd; \
+        echo odbc > /etc/bc-sqlcmd-flavor; \
+    fi; \
+    apt-get clean; rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /bc/hook /bc/patched /bc/refasm /bc/addins-overlay /bc/testrunner /bc/service /bc/artifacts /bc/scripts /bc/tools
 

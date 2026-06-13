@@ -288,14 +288,27 @@ fi
 # =============================================================================
 export PATH="$PATH:/opt/mssql-tools18/bin"
 
+# SQL client TLS flags depend on which client the image was built with
+# (mssql-tools18 ODBC vs standalone go-sqlcmd — see OPTIMIZATION-FLAGS.md and
+# the OPT_GO_SQLCMD build arg). go-sqlcmd doesn't accept the ODBC '-No' token,
+# so the encryption flags are selected from the flavor marker written at build.
+# SQLCMD_TLS can be overridden at runtime if a server needs explicit -N values.
+SQLCMD_FLAVOR=$(cat /etc/bc-sqlcmd-flavor 2>/dev/null || echo odbc)
+if [ "$SQLCMD_FLAVOR" = "go" ]; then
+    SQLCMD_TLS="${SQLCMD_TLS:--C}"
+else
+    SQLCMD_TLS="${SQLCMD_TLS:--C -No}"
+fi
+log_step "SQL client flavor: $SQLCMD_FLAVOR (TLS flags: $SQLCMD_TLS)"
+
 log_step "Waiting for SQL Server..."
-until sqlcmd -S "$SQL_SERVER" -U sa -P "$SA_PASSWORD" -C -No -Q "SELECT 1" &>/dev/null; do
+until sqlcmd -S "$SQL_SERVER" -U sa -P "$SA_PASSWORD" $SQLCMD_TLS -Q "SELECT 1" &>/dev/null; do
     sleep 2
 done
 log_step "SQL Server ready."
 STEP3_START=$(date +%s)
 
-SQLCMD="sqlcmd -S $SQL_SERVER -U sa -P $SA_PASSWORD -C -No"
+SQLCMD="sqlcmd -S $SQL_SERVER -U sa -P $SA_PASSWORD $SQLCMD_TLS"
 
 # Create login
 $SQLCMD -Q "
@@ -332,7 +345,7 @@ else
     log_step "CRONUS already exists."
 fi
 
-SQLCMD_DB="sqlcmd -S $SQL_SERVER -U $BC_DB_USER -P $BC_DB_PASSWORD -d CRONUS -C -No"
+SQLCMD_DB="sqlcmd -S $SQL_SERVER -U $BC_DB_USER -P $BC_DB_PASSWORD -d CRONUS $SQLCMD_TLS"
 
 # Encryption key
 $SQLCMD_DB -Q "
@@ -578,6 +591,71 @@ elif [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] || [ "${BC_CLEAR_ALL_APPS:-false
     DELETE FROM [Inplace Installed Application];
     " 2>/dev/null
     log_step "Cleared ALL pre-installed apps (BC_CLEAR_ALL_APPS=true)"
+elif [ "${BC_CLEAR_ALL_APPS:-false}" = "system-only" ]; then
+    # Boot-speed experiment (see OPTIMIZATION-FLAGS.md): bring NST up with ONLY
+    # the System app installed, then republish every other app AFTER NST starts
+    # from the artifact's ready-to-run (.app) packages. Hypothesis: the binaries
+    # already ship inside the R2R packages (and are pre-seeded into the assembly
+    # cache below), so a fresh publish is cheaper than booting NST with the full
+    # app set installed and letting it re-emit/validate them. The post-NST
+    # republish reuses the same dependency-ordered loop as BC_CLEAR_ALL_APPS=true.
+    # Keep set defaults to just the System app. If NST refuses to boot with
+    # System alone (it may need System Application / Base Application installed),
+    # widen via BC_SYSTEM_ONLY_KEEP_IDS (comma-separated lowercase app GUIDs)
+    # without re-editing this script — handy for bisecting the minimal boot set.
+    SYSTEM_APP_ID='8874ed3a-0643-4247-9ced-7a7002f7135d'
+    KEEP_IDS_RAW="${BC_SYSTEM_ONLY_KEEP_IDS:-$SYSTEM_APP_ID}"
+    KEEP_SQL=$(echo "$KEEP_IDS_RAW" | tr ',' '\n' | tr 'A-Z' 'a-z' \
+        | sed "s/^[[:space:]]*//;s/[[:space:]]*$//;/^$/d;s/^.*$/'\0'/" | paste -sd,)
+    log_step "BC_CLEAR_ALL_APPS=system-only: keep set = $KEEP_IDS_RAW; snapshotting the rest, then clearing..."
+    APPS_SNAPSHOT="/tmp/bc-apps-to-republish.tsv"
+    DEPS_SNAPSHOT="/tmp/bc-app-deps.tsv"
+
+    # Snapshot everything NOT in the keep set (kept apps stay installed, so they
+    # must not be in the republish list).
+    $SQLCMD_DB -h -1 -s $'\t' -W -Q "
+    SET NOCOUNT ON;
+    SELECT
+        CONVERT(VARCHAR(36), [Package ID]) AS PackageID,
+        [Name],
+        [Publisher],
+        CAST([Version Major] AS VARCHAR) + '.' +
+        CAST([Version Minor] AS VARCHAR) + '.' +
+        CAST([Version Build] AS VARCHAR) + '.' +
+        CAST([Version Revision] AS VARCHAR) AS Version
+    FROM [Published Application]
+    WHERE LOWER(CONVERT(VARCHAR(36), [ID])) NOT IN ($KEEP_SQL)
+    ORDER BY [Name];
+    " 2>/dev/null > "$APPS_SNAPSHOT" || true
+    APP_COUNT=$(grep -c $'\t' "$APPS_SNAPSHOT" 2>/dev/null || echo 0)
+    log_step "Snapshotted $APP_COUNT extensions for republish"
+
+    $SQLCMD_DB -h -1 -s $'\t' -W -Q "
+    SET NOCOUNT ON;
+    SELECT
+        CONVERT(VARCHAR(36), [Package ID]) AS PackageID,
+        CONVERT(VARCHAR(36), [Dependency Package ID]) AS DependsOnPackageID
+    FROM [NAV App Dependencies];
+    " 2>/dev/null > "$DEPS_SNAPSHOT" || true
+
+    # Delete every app row whose Package ID is not in the keep set.
+    SYSONLY_SQL="/tmp/system-only-clear.sql"
+    cat > "$SYSONLY_SQL" << SQLEOF
+SET NOCOUNT ON;
+SELECT [Package ID] INTO #keep FROM [Published Application]
+WHERE LOWER(CONVERT(VARCHAR(36), [ID])) IN ($KEEP_SQL);
+DELETE FROM [NAV App Installed App] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [NAV App Tenant App] WHERE [App Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [NAV App Dependencies] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [NAV App Published App] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [Installed Application] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [Inplace Installed Application] WHERE [Runtime Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DELETE FROM [Published Application] WHERE [Package ID] NOT IN (SELECT [Package ID] FROM #keep);
+DROP TABLE #keep;
+SQLEOF
+    $SQLCMD_DB -h -1 -W -i "$SYSONLY_SQL" 2>&1 | sed 's/^/[entrypoint]   /' || true
+    rm -f "$SYSONLY_SQL"
+    log_step "system-only: cleared all apps except keep set; $APP_COUNT queued for post-NST R2R republish"
 else
     $SQLCMD_DB -Q "
     DELETE FROM [Installed Application] WHERE [Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any'));
@@ -649,12 +727,12 @@ log_step "Database ready (BCRUNNER / Admin123!). Step 3 (DB setup): $(($(date +%
 cd "$SERVICE_DIR"
 # Verify SQL is still accessible before starting BC
 log_step "Verifying SQL connection..."
-if sqlcmd -S "$SQL_SERVER" -U "$BC_DB_USER" -P "$BC_DB_PASSWORD" -d CRONUS -C -No -Q "SELECT 1" &>/dev/null; then
+if sqlcmd -S "$SQL_SERVER" -U "$BC_DB_USER" -P "$BC_DB_PASSWORD" -d CRONUS $SQLCMD_TLS -Q "SELECT 1" &>/dev/null; then
     log_step "SQL connection verified."
 else
     log_step "ERROR: SQL connection failed! Retrying..."
     sleep 5
-    sqlcmd -S "$SQL_SERVER" -U "$BC_DB_USER" -P "$BC_DB_PASSWORD" -d CRONUS -C -No -Q "SELECT 1" || {
+    sqlcmd -S "$SQL_SERVER" -U "$BC_DB_USER" -P "$BC_DB_PASSWORD" -d CRONUS $SQLCMD_TLS -Q "SELECT 1" || {
         log_step "FATAL: Cannot connect to SQL"
         exit 1
     }
@@ -776,10 +854,15 @@ log_step "Starting BC service tier..."
 mkfifo /tmp/bc-stdin 2>/dev/null || true
 
 # .NET runtime tuning for BC service tier performance:
-# - Server GC: better throughput for multi-threaded workloads (extension compilation)
+# - Server GC: better throughput for multi-threaded workloads (extension compilation).
+#   Server GC allocates one heap + one background GC thread PER CORE, so on a
+#   many-core host the NST resident set is substantially larger than Workstation
+#   GC. Now overridable so the memory/throughput trade-off can be benchmarked
+#   (DOTNET_gcServer=0 -> Workstation GC, lower RAM). Default stays Server GC.
+#   See OPTIMIZATION-FLAGS.md.
 # - Tiered compilation: DISABLED to prevent JMP hooks from being overwritten by Tier 1 recompilation.
 #   The Watson crash handler patch relies on JMP hooks staying in place.
-export DOTNET_gcServer=1
+export DOTNET_gcServer="${DOTNET_gcServer:-1}"
 export DOTNET_TieredCompilation=0
 
 # Diagnostic-only: when BC_PROFILE_NST=1, suspend NST at process startup until
@@ -863,10 +946,10 @@ exec 3>/tmp/bc-stdin
         elif [ "${BC_CLEAR_ALL_APPS:-false}" = "deps-only" ]; then
             TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
             echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS=deps-only: skipping full republish (caller will publish dependency chain)"
-        elif [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] && [ -f "/tmp/bc-apps-to-republish.tsv" ]; then
+        elif { [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] || [ "${BC_CLEAR_ALL_APPS:-false}" = "system-only" ]; } && [ -f "/tmp/bc-apps-to-republish.tsv" ]; then
             REPUBLISH_START=$(date +%s)
             TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
-            echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS: republishing extensions in dependency order..."
+            echo "[entrypoint] [${TOTAL_ELAPSED}s] BC_CLEAR_ALL_APPS=${BC_CLEAR_ALL_APPS}: republishing extensions in dependency order from R2R artifacts..."
 
             # Build a name→app-file map by scanning all .app files in artifacts.
             APP_INDEX="/tmp/bc-app-index.tsv"

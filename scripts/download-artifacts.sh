@@ -134,10 +134,26 @@ unzip -qo "$TMPDIR_DL/app.zip" -d "$DEST/app"
 PLATFORM_VERSION=$(python3 -c "import json; print(json.load(open('$DEST/app/manifest.json'))['platform'])" 2>/dev/null)
 echo "[artifacts] Platform version: $PLATFORM_VERSION"
 
-echo "[artifacts] Extracting platform (ServiceTier, ModernDev, WebClient, applications, Test Assemblies)..."
-# Selective extraction keeps only what the service tier needs (~50% of the zip)
-# WebClient is needed for TestPage client DLLs (page testability in tests)
-unzip -qo "$TMPDIR_DL/platform.zip" 'ServiceTier/*' 'ModernDev/*' 'WebClient/*' 'applications/*' 'Test Assemblies/*' -d "$DEST/platform" 2>/dev/null || \
+# Selective extraction keeps only what the service tier needs (~50% of the zip).
+# WebClient is needed for TestPage client DLLs (page testability in tests).
+#
+# BC_MINIMAL_PLATFORM=1 (see OPTIMIZATION-FLAGS.md) drops two trees that are only
+# needed for specific workloads, shrinking the artifact-cache volume:
+#   - ModernDev/      : the bundled AL compiler/dev tools. Server-side AL
+#                       compilation uses CodeAnalysis.dll inside ServiceTier, so a
+#                       run-only container does not need ModernDev. Do NOT use if
+#                       you compile AL with the platform's bundled compiler.
+#   - Test Assemblies/: only needed when running Microsoft's stock test suites.
+# WebClient/ is kept (TestPage DLLs are copied from it at runtime, and the web
+# client PoC needs the full tree).
+if [ "${BC_MINIMAL_PLATFORM:-0}" = "1" ]; then
+    echo "[artifacts] Extracting platform (MINIMAL: ServiceTier, WebClient, applications)..."
+    EXTRACT_SET=( 'ServiceTier/*' 'WebClient/*' 'applications/*' )
+else
+    echo "[artifacts] Extracting platform (ServiceTier, ModernDev, WebClient, applications, Test Assemblies)..."
+    EXTRACT_SET=( 'ServiceTier/*' 'ModernDev/*' 'WebClient/*' 'applications/*' 'Test Assemblies/*' )
+fi
+unzip -qo "$TMPDIR_DL/platform.zip" "${EXTRACT_SET[@]}" -d "$DEST/platform" 2>/dev/null || \
     unzip -qo "$TMPDIR_DL/platform.zip" -d "$DEST/platform"
 
 T_DONE=$(_ms)
