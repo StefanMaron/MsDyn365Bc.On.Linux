@@ -104,12 +104,10 @@ services:
       # The NavUserPassword login the entrypoint creates for OData/SOAP/dev-endpoint/
       # web-client sign-in (SUPER access). Defaults preserve the long-documented
       # BCRUNNER/Admin123! pair; override both to change the account name, e.g. when
-      # a consumer's own tooling expects a specific username. Note the *password*
-      # here is cosmetic, not enforced: NavUser.TryAuthenticate's hash check doesn't
-      # verify on Linux (StartupHook Patch #16b bypasses it and always succeeds), so
-      # ANY password authenticates as this user — see scripts/entrypoint.sh. This is
-      # a local dev/CI sandbox account, not a security boundary; don't expose these
-      # ports to an untrusted network.
+      # a consumer's own tooling expects a specific username. The entrypoint derives
+      # Microsoft's V3 representation from this password and Business Central's
+      # original NavUser.TryAuthenticate implementation enforces it. This is still a
+      # local dev/CI sandbox account; don't expose these ports to an untrusted network.
       BC_SERVER_USERNAME: ${BC_SERVER_USERNAME:-BCRUNNER}
       BC_SERVER_PASSWORD: ${BC_SERVER_PASSWORD:-Admin123!}
       BC_CLEAR_ALL_APPS: ${BC_CLEAR_ALL_APPS:-false}

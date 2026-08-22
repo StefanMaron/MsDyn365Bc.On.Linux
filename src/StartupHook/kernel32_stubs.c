@@ -4,6 +4,7 @@
 // dhcpcsvc, Netapi32, ntdsapi, rpcrt4, advapi32.
 
 #include <stdint.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -113,6 +114,11 @@ int GetComputerNameExW(int format, uint16_t* buffer, int* size) {
     int len = 8; // strlen("bcserver")
     if (buffer == 0 || *size < len + 1) {
         *size = len + 1;
+        // DnsHelper calls this once with a null buffer and requires Windows'
+        // ERROR_MORE_DATA before it allocates the StringBuilder. DllImport's
+        // SetLastError reads libc errno on Unix; an exported GetLastError()
+        // function does not populate that captured value.
+        errno = 234;
         return 0; // ERROR_MORE_DATA triggers retry with correct buffer size
     }
     for (int i = 0; i < len; i++) buffer[i] = (uint16_t)name[i];

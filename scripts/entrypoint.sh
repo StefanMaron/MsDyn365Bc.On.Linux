@@ -859,22 +859,24 @@ fi
 # Username defaults to BCRUNNER (not ADMIN) so tests can freely create/delete/disable
 # an "ADMIN" user; override via BC_SERVER_USERNAME/BC_SERVER_PASSWORD (docker-compose.yml
 # passes these through — see the comment there). GUID 00000000-0000-0000-0000-000000000001.
-#
-# The stored password hash is a fixed placeholder, NOT a hash of BC_SERVER_PASSWORD —
-# NavUser.TryAuthenticate's hash check doesn't verify on Linux (the Windows hash format
-# doesn't port; StartupHook Patch #16b bypasses verification and always returns true),
-# so whatever the DB row holds is never compared against what the client sends. Any
-# password authenticates as this user once it exists with SUPER access; the [Password]
-# column only needs to be non-empty for the platform to treat the account as
-# NavUserPassword-eligible. That means BC_SERVER_PASSWORD is honored end-to-end (that
-# value really does work at every login surface) without needing to reproduce BC's
-# hash algorithm, which isn't documented anywhere outside the platform binaries.
+# The helper reads the password from stdin and creates Microsoft's V3 representation;
+# plaintext is never passed on argv, written to SQL, or logged.
 USER_GUID='00000000-0000-0000-0000-000000000001'
 BC_SERVER_USERNAME="${BC_SERVER_USERNAME:-BCRUNNER}"
 BC_SERVER_PASSWORD="${BC_SERVER_PASSWORD:-Admin123!}"
-PASSWORD_HASH='aXD91GRctWiXaqXeWbXhxQ==-V3'
-$SQLCMD_DB -Q "
-IF NOT EXISTS (SELECT 1 FROM [User] WHERE [User Name] = N'$BC_SERVER_USERNAME')
+if [ -z "$BC_SERVER_PASSWORD" ]; then
+    log_step "ERROR: BC_SERVER_PASSWORD must not be empty"
+    exit 1
+fi
+PASSWORD_HASH=$(printf '%s' "$BC_SERVER_PASSWORD" | \
+    env DOTNET_STARTUP_HOOKS= /bc/tools/NavUserPasswordInspector/NavUserPasswordInspector generate \
+        --user-security-id "$USER_GUID")
+if [[ ! "$PASSWORD_HASH" =~ ^[A-Za-z0-9+/]{22}==-V3$ ]]; then
+    log_step "ERROR: password generator returned an invalid V3 representation"
+    exit 1
+fi
+$SQLCMD_DB -b -Q "
+IF NOT EXISTS (SELECT 1 FROM [User] WHERE [User Security ID] = '$USER_GUID')
 BEGIN
     INSERT INTO [User] ([User Security ID], [User Name], [Full Name], [State], [Expiry Date],
         [Windows Security ID], [Change Password], [License Type], [Authentication Email],
@@ -883,18 +885,43 @@ BEGIN
     VALUES ('$USER_GUID', N'$BC_SERVER_USERNAME', N'BC Runner', 0, '2099-12-31', N'S-1-5-21-2074085148-119339936-2019613796-1001', 0, 0, N'', N'', N'',
         '00000000-0000-0000-0000-000000000000',
         NEWID(), GETUTCDATE(), '$USER_GUID', GETUTCDATE(), '$USER_GUID');
+END
+ELSE
+BEGIN
+    UPDATE [User]
+    SET [User Name] = N'$BC_SERVER_USERNAME', [\$systemModifiedAt] = GETUTCDATE(),
+        [\$systemModifiedBy] = '$USER_GUID'
+    WHERE [User Security ID] = '$USER_GUID';
+END;
+
+IF NOT EXISTS (SELECT 1 FROM [User Property] WHERE [User Security ID] = '$USER_GUID')
+BEGIN
     INSERT INTO [User Property] ([User Security ID], [Password], [Name Identifier],
         [Authentication Key], [WebServices Key], [WebServices Key Expiry Date],
         [Authentication Object ID], [Directory Role ID], [Telemetry User ID],
         [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
     VALUES ('$USER_GUID', N'$PASSWORD_HASH', N'', N'', N'', '1753-01-01', N'', N'', '$USER_GUID',
         NEWID(), GETUTCDATE(), '$USER_GUID', GETUTCDATE(), '$USER_GUID');
+END
+ELSE
+BEGIN
+    UPDATE [User Property]
+    SET [Password] = N'$PASSWORD_HASH', [\$systemModifiedAt] = GETUTCDATE(),
+        [\$systemModifiedBy] = '$USER_GUID'
+    WHERE [User Security ID] = '$USER_GUID';
+END;
+
+IF NOT EXISTS (SELECT 1 FROM [Access Control]
+               WHERE [User Security ID] = '$USER_GUID' AND [Role ID] = N'SUPER'
+                 AND [Company Name] = N'' AND [Scope] = 0
+                 AND [App ID] = '00000000-0000-0000-0000-000000000000')
+BEGIN
     INSERT INTO [Access Control] ([User Security ID], [Role ID], [Company Name], [Scope], [App ID],
         [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
     VALUES ('$USER_GUID', N'SUPER', N'', 0, '00000000-0000-0000-0000-000000000000',
         NEWID(), GETUTCDATE(), '$USER_GUID', GETUTCDATE(), '$USER_GUID');
 END
-" 2>/dev/null
+"
 
 # Background SUPER user — safety net so tests can freely disable/delete users
 # without violating the "at least one enabled SUPER user" platform constraint.
@@ -923,7 +950,7 @@ BEGIN
         NEWID(), GETUTCDATE(), '$SVC_GUID', GETUTCDATE(), '$SVC_GUID');
 END
 " 2>/dev/null
-log_step "Database ready ($BC_SERVER_USERNAME / $BC_SERVER_PASSWORD). Step 3 (DB setup): $(($(date +%s) - STEP3_START))s"
+log_step "Database ready ($BC_SERVER_USERNAME). Step 3 (DB setup): $(($(date +%s) - STEP3_START))s"
 
 # =============================================================================
 # Step 4: Start BC server in background, publish test runner, then wait

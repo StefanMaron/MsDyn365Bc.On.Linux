@@ -1158,6 +1158,14 @@ jobs:
           ./scripts/wait-for-bc-healthy.sh ${{ inputs.health_timeout_minutes }}
           bash scripts/workflow-summary.sh end BC_BOOT
 
+      # Run on every supported/preview version so client-services wire-format
+      # changes fail here instead of silently weakening authentication. This
+      # must run before the positive-only publish/smoke path: the former
+      # Patch #16b made every later step green even with a wrong password.
+      - name: Verify NavUserPassword authentication
+        working-directory: bc-linux
+        run: ./scripts/test-authentication.sh
+
       # ─── Phase 7: publish compiled apps to the now-running BC ────────
       - name: Publish AL apps to BC
         env:
