@@ -122,13 +122,11 @@ curl -sf -u MYUSER:MyP@ss1! http://localhost:7048/BC/ODataV4/Company
 The scripts in `scripts/` (`run-tests.sh`, `run-tests-altool.py`,
 `run-tests-hybrid.py`, `publish-app.sh`, etc.) pick the same two env vars up
 automatically, so no `--auth` flag is needed once the container was booted
-with them. Password verification is not actually enforced on Linux —
-`NavUser.TryAuthenticate`'s hash check doesn't port from Windows, so
-StartupHook Patch #16b bypasses it and any password authenticates as an
-existing, enabled user. `BC_SERVER_PASSWORD` still works end-to-end (that
-exact value is what you type/pass), it just isn't a real access control —
-this is a local dev/CI sandbox account, not something to expose to an
-untrusted network.
+with them. The entrypoint derives Microsoft's V3 password representation from
+`BC_SERVER_PASSWORD`, and the unmodified Business Central verifier enforces it:
+wrong passwords and disabled, expired, or nonexistent users are rejected.
+These remain local dev/CI credentials; do not expose the container's ports to
+an untrusted network.
 
 ### Web client (browser UI)
 
@@ -343,6 +341,8 @@ BC_DEV_PORT=17049 docker compose up -d
 | `BC_API_PORT`     | `7052`           | API v2.0 port                                                                |
 | `BC_MGMT_PORT`    | `7045`           | Management endpoint port                                                     |
 | `BC_CLIENT_PORT`  | `7085`           | WebSocket client services port (used by `run-tests.sh`)                      |
+| `BC_SERVER_USERNAME` | `BCRUNNER`    | NavUserPassword service user created with SUPER access                       |
+| `BC_SERVER_PASSWORD` | `Admin123!`   | Enforced password used to generate the service user's Microsoft V3 value     |
 | `BC_LICENSE_HOST_PATH` | unset       | Optional host path to a `.bclicense` file. Mounted into bc + sql containers and imported INSTEAD of the default Cronus license. See "Custom license" below. |
 | `BC_LICENSE_FILE` | unset            | Path INSIDE the container of the license file to import. Set to `/bc/custom-license.bclicense` together with `BC_LICENSE_HOST_PATH`. |
 | `BC_SQL_IMAGE`    | GHCR mirror      | SQL Server image. See "SQL Server image" below.                              |

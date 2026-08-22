@@ -357,12 +357,6 @@ internal class StartupHook
             PatchReportingServiceClient(args.LoadedAssembly);
         }
 
-        // Patch #16b: NavUser.TryAuthenticate bypass (password hash doesn't verify on Linux)
-        if (name == "Microsoft.Dynamics.Nav.Ncl")
-        {
-            PatchNavUserTryAuthenticate(args.LoadedAssembly);
-        }
-
         // Patch #22: AzureADGraphQuery constructor bypass.
         //   AL DotNet variable creation of Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery
         //   fails on Linux with NavConfigurationException: "LazyEx factory threw an exception".
@@ -495,10 +489,6 @@ internal class StartupHook
         {
             PatchNavFileExpandFileName(args.LoadedAssembly);
         }
-
-        // Patch #16 is now only 16b (NavUser.TryAuthenticate bypass in Nav.Ncl).
-        // The full ValidateAsync chain runs normally to populate the auth cache,
-        // but password hash verification is bypassed via TryAuthenticate.
 
         // Patch #21: NavOpenTaskPageAction.ShowForm crashes on Linux when a test opens a
         // task page — the headless client has no UI renderer and a null reference occurs,
@@ -2566,96 +2556,6 @@ internal class StartupHook
             }
         }
         return null;
-    }
-
-    // ========================================================================
-    // Patch #16: Client Services Credential Bypass
-    // ========================================================================
-
-    private static void PatchClientCredentialValidation(Assembly navServiceAssembly)
-    {
-        try
-        {
-            // Patch the validator to not check the password but still populate the auth cache
-            var validatorType = navServiceAssembly.GetType(
-                "Microsoft.Dynamics.Nav.Service.ClientServicesUserNamePasswordValidator");
-            if (validatorType == null)
-            {
-                Console.WriteLine("[StartupHook] Patch #16: Validator type not found, skipping");
-                return;
-            }
-
-            var validateMethod = validatorType.GetMethod("ValidateAsync",
-                BindingFlags.Instance | BindingFlags.Public);
-            if (validateMethod == null)
-            {
-                Console.WriteLine("[StartupHook] Patch #16: ValidateAsync not found, skipping");
-                return;
-            }
-
-            var replacement = typeof(StartupHook).GetMethod(
-                nameof(Replacement_ValidateCredentials),
-                BindingFlags.Static | BindingFlags.NonPublic);
-            ApplyJmpHook(validateMethod, replacement!, "ClientServicesUserNamePasswordValidator.ValidateAsync");
-            Console.WriteLine("[StartupHook] Patch #16: Client credential validation bypassed");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[StartupHook] Patch #16 failed: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Replacement for ClientServicesUserNamePasswordValidator.ValidateAsync.
-    /// Always succeeds — credentials are trusted in pipeline/CI scenarios.
-    /// Signature: instance method, ValueTask ValidateAsync(ConnectionCredentials)
-    /// </summary>
-    private static ValueTask Replacement_ValidateCredentials(object? self, object? credentials)
-    {
-        Console.WriteLine("[StartupHook] Credential validation bypassed (Patch #16)");
-        return ValueTask.CompletedTask;
-    }
-
-    /// <summary>
-    /// Patch NavUser.TryAuthenticate to always return true.
-    /// Called from Nav.Ncl.dll when it's loaded.
-    /// The password hash format from Windows doesn't verify correctly on Linux.
-    /// </summary>
-    internal static void PatchNavUserTryAuthenticate(Assembly nclAssembly)
-    {
-        try
-        {
-            var navUserType = nclAssembly.GetType("Microsoft.Dynamics.Nav.Runtime.NavUser");
-            if (navUserType == null) return;
-
-            // There are multiple TryAuthenticate overloads. Patch the one that takes
-            // (NavUser, UserNameSecurityToken, NavTenant) — the NavUserPassword path.
-            foreach (var m in navUserType.GetMethods(BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public))
-            {
-                if (m.Name != "TryAuthenticate") continue;
-                var ps = m.GetParameters();
-                if (ps.Length == 3 && ps[1].ParameterType.Name.Contains("UserNameSecurityToken"))
-                {
-                    var replacement = typeof(StartupHook).GetMethod(
-                        nameof(Replacement_TryAuthenticate),
-                        BindingFlags.Static | BindingFlags.NonPublic);
-                    ApplyJmpHook(m, replacement!, "NavUser.TryAuthenticate(NavUser,UserNameSecurityToken,NavTenant)");
-                    Console.WriteLine("[StartupHook] Patch #16b: NavUser.TryAuthenticate bypassed");
-                    return;
-                }
-            }
-            Console.WriteLine("[StartupHook] Patch #16b: TryAuthenticate overload not found");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[StartupHook] Patch #16b failed: {ex.Message}");
-        }
-    }
-
-    private static bool Replacement_TryAuthenticate(object? user, object? token, object? tenant)
-    {
-        Console.WriteLine("[StartupHook] NavUser.TryAuthenticate bypassed — returning true (Patch #16b)");
-        return true;
     }
 
     // ========================================================================
