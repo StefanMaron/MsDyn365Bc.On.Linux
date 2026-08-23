@@ -174,8 +174,8 @@ log_step "Disk: $(df -h /bc/artifacts | tail -1 | awk '{print $4 " free"}')"
 log_step "Reading manifest..."
 MANIFEST="$ARTIFACTS/app/manifest.json"
 ls -la "$MANIFEST" || { log_step "FATAL: manifest.json not found at $MANIFEST"; exit 1; }
-DB_FILE=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('database',''))")
-LICENSE_FILE=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('licenseFile',''))")
+DB_FILE=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("database", "").replace("\\", "/"))' "$MANIFEST")
+LICENSE_FILE=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("licenseFile", "").replace("\\", "/"))' "$MANIFEST")
 PLATFORM_VERSION=$(python3 -c "import json; print(json.load(open('$MANIFEST'))['platform'])")
 MAJOR_VERSION=$(echo "$PLATFORM_VERSION" | cut -d. -f1)
 NAV_DIR="${MAJOR_VERSION}0"

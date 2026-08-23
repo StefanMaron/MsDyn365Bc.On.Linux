@@ -89,7 +89,7 @@ RUN mkdir -p /build/output/refasm /build/output/refasm-net10 && \
     echo "Copied $(ls /build/output/refasm/*.dll | wc -l) net8.0 + $(ls /build/output/refasm-net10/*.dll | wc -l) net10.0 reference assemblies"
 
 # Runtime stage: minimal image
-FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/aspnet:8.0
+FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/aspnet:8.0-noble-amd64
 
 # Install tools for artifact download and SQL setup + en_US locale.
 # harfbuzz/freetype/fontconfig/fonts: BC's report renderer text-shapes via native
