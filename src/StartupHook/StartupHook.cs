@@ -51,6 +51,20 @@ using System.Threading.Tasks;
 ///   session on Linux. Fix: no-op the ctor — fields stay default; tests don't need real
 ///   Azure AD calls, only that the GraphQuery DotNet object can be constructed.
 ///
+/// Patch #22b: GraphQuery.GetTenantDetail (Microsoft.Dynamics.Nav.AzureADGraphClient.dll,
+///   Add-ins/GraphClient/ — a separate, lazily-loaded assembly from Nav.Ncl.dll)
+///   Even with Patch #22 applied, calling GraphQuery.GetTenantDetail() (reached from AL's
+///   IsPlanAssignedToUser, used by several ISV install codeunits e.g. Continia OPplus) still
+///   throws NullReferenceException: GraphQuery's own parameterless ctor always builds its
+///   inner AzureADGraphQuery with a null NavSession regardless of what session is actually
+///   current, and GetTenantDetailAsync unconditionally dereferences that null session before
+///   reaching its own "no AAD tenant, use an empty TenantInfo" fallback. BC reports the NRE via
+///   a generic, misleading "You must assign at least one user the SUPER permission set..."
+///   error — the fallback message for ANY failed install-transaction commit, not actually
+///   about SUPER/NavUserPassword. Fix: hook the synchronous GetTenantDetail() wrapper (NOT the
+///   async GetTenantDetailAsync — see Patch #20's own comment on why hooking an async method
+///   mid-flight risks AccessViolationException) to return an empty TenantInfo directly.
+///
 /// Patch #23: OfficeWordDocumentPictureMerger.ReplaceMissingImageWithTransparentImage
 ///   (Microsoft.Dynamics.Nav.OpenXml.dll)
 ///   Microsoft's Word report image merger has a recursion bug: when a Word document
@@ -373,6 +387,15 @@ internal class StartupHook
         if (name == "Microsoft.Dynamics.Nav.Ncl")
         {
             PatchAzureADGraphQuery(args.LoadedAssembly);
+        }
+
+        // Patch #22b: GraphQuery.GetTenantDetail — see PatchGraphQueryGetTenantDetail's header
+        // comment for the full story. Microsoft.Dynamics.Nav.AzureADGraphClient.dll (Add-ins/
+        // GraphClient/) is a SEPARATE, lazily-loaded assembly from Nav.Ncl.dll, so it needs its
+        // own AssemblyLoad hook rather than piggybacking on Patch #22's Nav.Ncl-triggered one.
+        if (name == "Microsoft.Dynamics.Nav.AzureADGraphClient")
+        {
+            ApplyGraphQueryGetTenantDetailPatch(args.LoadedAssembly);
         }
 
         // Patch #26: TenantEncryptionProviderFactory.GetTenantEncryptionProvider bypass.
@@ -2721,6 +2744,11 @@ internal class StartupHook
     // Patch #22: AzureADGraphQuery constructor bypass
     // ========================================================================
 
+    // AzureADGraphQuery.currentSession (private readonly field) — set via reflection
+    // by the replacement ctor below so post-construction calls that don't go through
+    // GetTenantDetail (see below) don't NRE on it either.
+    private static FieldInfo? _aadgqCurrentSessionField;
+
     private static void PatchAzureADGraphQuery(Assembly navNcl)
     {
         try
@@ -2750,6 +2778,19 @@ internal class StartupHook
                 return;
             }
 
+            _aadgqCurrentSessionField = queryType.GetField("currentSession",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            if (_aadgqCurrentSessionField == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #22: AzureADGraphQuery.currentSession field not found — skipping ctor fix (GetTenantDetail fix below is independent)");
+            }
+
+            // NavCurrentThread.Session accessor is shared with Patch #27/#28; resolve if
+            // neither ran first (load order between patches is not guaranteed).
+            _navCurrentThreadSessionProp ??= navNcl
+                .GetType("Microsoft.Dynamics.Nav.Runtime.NavCurrentThread")
+                ?.GetProperty("Session", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
             var replacement = typeof(StartupHook).GetMethod(
                 nameof(Replacement_AzureADGraphQueryCtor),
                 BindingFlags.Static | BindingFlags.NonPublic)!;
@@ -2760,20 +2801,178 @@ internal class StartupHook
         {
             Console.WriteLine($"[StartupHook] Patch #22 failed: {ex.GetType().Name}: {ex.Message}");
         }
+
+        PatchGraphQueryGetTenantDetail(navNcl);
     }
 
     /// <summary>
     /// No-op replacement for AzureADGraphQuery..ctor(NavSession session).
     /// Skips LazyEx factory setup that requires Azure.Identity / MSAL Windows credential APIs.
-    /// The object is heap-allocated before this ctor runs, so all fields remain default (null/0).
-    /// Tests that reach this path don't need real Azure AD calls — they just need the
-    /// GraphQuery DotNet object to be created without crashing the session.
+    /// The object is heap-allocated before this ctor runs, so all fields remain default (null/0)
+    /// EXCEPT currentSession, which this replacement sets explicitly via reflection so any
+    /// OTHER GraphQuery method than GetTenantDetail (see PatchGraphQueryGetTenantDetail below)
+    /// doesn't immediately NRE on a null currentSession.Diagnostics dereference.
+    ///
+    /// This alone is NOT sufficient to fix GetTenantDetail: the actual runtime call path for
+    /// AL's "GraphQuery" DotNet variable is Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery
+    /// (a separate wrapper class in Add-ins/GraphClient/*.dll, not this AzureADGraphQuery),
+    /// whose own parameterless constructor ALWAYS builds
+    /// `azureADGraphQuery = new AzureADGraphQuery((NavSession)null)` regardless of what session
+    /// is actually current — so the session this ctor patch resolves is immediately discarded by
+    /// that caller anyway. See PatchGraphQueryGetTenantDetail for the fix that actually matters.
+    ///
+    /// Session is resolved the same way Patch #27 already resolves it (NavCurrentThread.Session).
     /// Signature: instance ctor → JMP hook passes (this, NavSession) as (object, object).
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void Replacement_AzureADGraphQueryCtor(object self, object? session)
     {
+        try
+        {
+            var resolvedSession = session ?? _navCurrentThreadSessionProp?.GetValue(null);
+            _aadgqCurrentSessionField?.SetValue(self, resolvedSession);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #22: failed to set currentSession: {ex.GetType().Name}: {ex.Message}");
+        }
         Console.WriteLine("[StartupHook] Patch #22: AzureADGraphQuery..ctor skipped (no Azure AD on Linux)");
+    }
+
+    // ========================================================================
+    // Patch #22b: GraphQuery.GetTenantDetail — return an empty TenantInfo directly.
+    //
+    // The AL DotNet variable "GraphQuery" (Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery,
+    // NOT the AzureADGraphQuery patched above) always constructs its inner AzureADGraphQuery
+    // with a null NavSession (decompiled: `azureADGraphQuery = new AzureADGraphQuery((NavSession)null)`
+    // in GraphQuery's own parameterless ctor) — so Patch #22's ctor fix, which sets currentSession
+    // on THAT inner object, never even runs for this call path (the ctor overload it hooks takes
+    // an explicit NavSession argument; the null-literal call site is a different overload/path).
+    //
+    // GetTenantDetailAsync (the method actually reached) unconditionally dereferences
+    // currentSession.Diagnostics at its very first line for a timing scope, before any of its own
+    // "no AAD tenant configured, use an empty TenantInfo" fallback logic runs. With currentSession
+    // null, that first dereference throws a NullReferenceException. BC's extension-install pipeline
+    // then reports this as the generic, misleading "You must assign at least one user the SUPER
+    // permission set and configure that user to log in with authentication type 'NavUserPassword'"
+    // error — that message is BC's fallback for ANY failed install-transaction commit, not actually
+    // about SUPER/NavUserPassword. Reproduced live: Continia OPplus's own install codeunit calls
+    // Microsoft's IsPlanAssignedToUser, which reaches exactly this NRE via
+    // GraphQuery.GetTenantDetail → AzureADGraphQuery.GetTenantDetailAsync.
+    //
+    // Fix: hook GraphQuery.GetTenantDetail() itself — NOT GetTenantDetailAsync, which is `async`
+    // and reached from a compiler-generated state machine; JMP-hooking an async method mid-flight
+    // is exactly the "AccessViolationException" hazard Patch #20's own comment on EnsureAlive
+    // warns about. GetTenantDetail() is the plain synchronous public wrapper
+    // (`return GetTenantDetailAsync().AsTask().GetAwaiter().GetResult();`) that AL's DotNet
+    // variable calls into, so hooking it is as safe as the ordinary instance-method hooks used
+    // throughout this file. Tests/installs that reach this path don't need a real Azure AD
+    // tenant — they only need SOME non-throwing TenantInfo, which is what Microsoft's own
+    // fallback (AzureADGraphQuery.CreateEmptyTenantInfo, confirmed via decompilation) already
+    // returns for a tenant with no AAD tenant id configured. This patch produces the equivalent
+    // object directly, without depending on that internal fallback ever being reached.
+    // ========================================================================
+
+    private static Type? _tenantInfoType;
+
+    private static void PatchGraphQueryGetTenantDetail(Assembly navNcl)
+    {
+        if (IsPatchDisabled("22b")) return;
+        try
+        {
+            // GraphQuery lives in Add-ins/GraphClient/Microsoft.Dynamics.Nav.AzureADGraphClient.dll,
+            // a SEPARATE assembly from Nav.Ncl.dll (the navNcl parameter here) — it is loaded lazily,
+            // on first AL DotNet variable creation of "GraphQuery", not at NST startup. Resolve it via
+            // AppDomain.CurrentDomain.GetAssemblies() at patch time (called from the same
+            // AssemblyLoad callback as Patch #22, so may run before or after that assembly is loaded);
+            // if not yet loaded, register interest and patch it when it does load instead.
+            var graphClientAssembly = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == "Microsoft.Dynamics.Nav.AzureADGraphClient");
+
+            if (graphClientAssembly == null)
+            {
+                // Not loaded yet — the AssemblyLoad handler in Initialize() re-invokes this same
+                // patch by name once it does load (see the dedicated hook registered there).
+                Console.WriteLine("[StartupHook] Patch #22b: Microsoft.Dynamics.Nav.AzureADGraphClient not yet loaded — will retry when it loads");
+                return;
+            }
+
+            ApplyGraphQueryGetTenantDetailPatch(graphClientAssembly);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #22b failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static bool _graphQueryPatchApplied;
+
+    private static void ApplyGraphQueryGetTenantDetailPatch(Assembly graphClientAssembly)
+    {
+        if (_graphQueryPatchApplied) return;
+        try
+        {
+            var graphQueryType = graphClientAssembly.GetType("Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery");
+            if (graphQueryType == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #22b: GraphQuery type not found — skipping");
+                return;
+            }
+
+            var getTenantDetail = graphQueryType.GetMethod("GetTenantDetail",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null, types: Type.EmptyTypes, modifiers: null);
+            if (getTenantDetail == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #22b: GraphQuery.GetTenantDetail() not found — skipping");
+                return;
+            }
+
+            _tenantInfoType = getTenantDetail.ReturnType;
+
+            var replacement = typeof(StartupHook).GetMethod(
+                nameof(Replacement_GraphQueryGetTenantDetail),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            ApplyJmpHook(getTenantDetail, replacement, "GraphQuery.GetTenantDetail");
+            _graphQueryPatchApplied = true;
+            Console.WriteLine("[StartupHook] Patch #22b: GraphQuery.GetTenantDetail hooked — returns an empty TenantInfo without touching Azure AD");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #22b failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Replacement for GraphQuery.GetTenantDetail() — instance method, synchronous,
+    /// returns TenantInfo (Microsoft.Dynamics.Nav.LicensingService.Model.TenantInfo).
+    /// Builds an empty TenantInfo directly via reflection (all string properties set to
+    /// string.Empty), matching AzureADGraphQuery.CreateEmptyTenantInfo's own shape for a
+    /// tenant with no AAD tenant id configured — but without depending on that internal
+    /// fallback path (which requires currentSession to be non-null first; see Patch #22's
+    /// header comment for why it never was, for this specific call path).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static object? Replacement_GraphQueryGetTenantDetail(object self)
+    {
+        try
+        {
+            if (_tenantInfoType == null) return null;
+            var tenantInfo = Activator.CreateInstance(_tenantInfoType);
+            foreach (var prop in _tenantInfoType.GetProperties(BindingFlags.Instance | BindingFlags.Public))
+            {
+                if (prop.PropertyType == typeof(string) && prop.CanWrite)
+                {
+                    prop.SetValue(tenantInfo, string.Empty);
+                }
+            }
+            return tenantInfo;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #22b: failed to build empty TenantInfo: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
     }
 
     // ========================================================================
