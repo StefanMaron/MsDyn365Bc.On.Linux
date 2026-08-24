@@ -192,3 +192,53 @@ pass-through fake structurally cannot satisfy:
 blob content hash, etc.) pass. Real encryption semantics (actual AES/RSA,
 genuine key provisioning, toggle support) would need Patch #7's original
 "real work" scope — flagged as infra work, not attempted here.
+
+## ~~ISV extension installs fail with "You must assign at least one user the SUPER permission set..."~~ (FIXED — entrypoint.sh + Patch #22b)
+
+**Symptom**: publishing/installing a third-party extension whose install
+codeunit performs any transaction-committing operation (e.g. Continia
+OPplus's install codeunit, which calls Microsoft's `IsPlanAssignedToUser`)
+fails on BC Linux with:
+
+```
+You must assign at least one user the SUPER permission set and configure
+that user to log in with authentication type 'NavUserPassword', which is
+supported by the current server instance.
+```
+
+...even when a NavUserPassword SUPER user obviously exists and is
+reachable via OData/dev-endpoint with the same credentials. This message
+is BC's own generic fallback for ANY failed install-transaction commit,
+not specifically about a missing/misconfigured SUPER user — so it hid
+**two independent, unrelated bugs** that both happened to surface through
+it. Neither showed a real exception in BC's normal logs: install-time
+exceptions are reported via `NavCSideException` with the message text
+redacted ("Message not shown because the NavBaseException constructor
+was used without privacy classification"); both needed
+`BC_DEBUG_FIRSTCHANCE=1` plus decompiling `Microsoft.Dynamics.Nav.Ncl.dll`
+to actually find.
+
+**Bug 1 (entrypoint.sh)**: the bootstrap `BC_SERVER_USERNAME` and
+`YOURBC-SERVICEUSER` accounts had `[User].[Expiry Date]` set to
+`2099-12-31`, on the assumption that "a date far enough in the future"
+means "never expires". BC's own
+`SystemTableTriggers.CheckForExistenceOfSuperUserIfNecessaryAsync` query
+(decompiled from `Nav.Ncl.dll`) filters candidate SUPER users to
+`expiryDateField.Equal(NavDateTime.Undefined)` — the platform's actual
+"never expires" sentinel, `1753-01-01` — so both bootstrap users were
+silently excluded from every SUPER-user check. Fixed by using
+`1753-01-01` for both, matching the convention BC itself already used two
+lines below for `[User Property].[WebServices Key Expiry Date]`.
+
+**Bug 2 (StartupHook.cs, Patch #22b)**: even with Bug 1 fixed, AL's
+`GraphQuery` DotNet variable's `GetTenantDetail()` call (reached via
+`IsPlanAssignedToUser`) threw a `NullReferenceException` on a null
+`currentSession`, unrelated to SUPER/user config at all — see the
+Patch #22b header comment in `StartupHook.cs` for the full root cause
+(GraphQuery's own ctor always passes a null session to its inner
+`AzureADGraphQuery`, regardless of what's actually current).
+
+**Verified live end-to-end** with both fixes applied: Continia OPplus
+(and its dependencies — Continia System Application, Continia Core,
+Continia Connector App — plus its own Trial Balance VAT DACH add-on)
+all install successfully against a freshly created container.
