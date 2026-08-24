@@ -860,6 +860,20 @@ fi
 # an "ADMIN" user; override via BC_SERVER_USERNAME/BC_SERVER_PASSWORD (docker-compose.yml
 # passes these through — see the comment there). GUID 00000000-0000-0000-0000-000000000001.
 #
+# [User].[Expiry Date] MUST be '1753-01-01' (BC's "never expires" sentinel/NavDateTime.Undefined),
+# NOT a real future date like '2099-12-31' -- confirmed by decompiling
+# SystemTableTriggers.CheckForExistenceOfSuperUserIfNecessaryAsync (Nav.Ncl.dll): its
+# GenerateSuperUserAuthenticationMethodQuery join filters candidate SUPER users to
+# expiryDateField.Equal(NavDateTime.Undefined), so a real Expiry Date -- even one far in the
+# future and clearly intended to mean "does not expire" -- silently excludes the user from
+# that query, making CheckSuperUserAuthenticationMethodQueryAsync see zero qualifying rows and
+# throw "You must assign at least one user the SUPER permission set...". This fires on ANY
+# operation that commits a transaction while requiring a live SUPER user check -- reproduced
+# via extension installs (e.g. publishing Continia OPplus), not something specific to that app.
+# 2099-12-31 was previously used here on the mistaken assumption that BC just wants "a date far
+# enough in the future"; the platform's own convention (see [User Property].[WebServices Key
+# Expiry Date] two lines below, which already correctly used 1753-01-01) says otherwise.
+#
 # The stored password hash is a fixed placeholder, NOT a hash of BC_SERVER_PASSWORD —
 # NavUser.TryAuthenticate's hash check doesn't verify on Linux (the Windows hash format
 # doesn't port; StartupHook Patch #16b bypasses verification and always returns true),
@@ -880,7 +894,7 @@ BEGIN
         [Windows Security ID], [Change Password], [License Type], [Authentication Email],
         [Contact Email], [Exchange Identifier], [Application ID],
         [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
-    VALUES ('$USER_GUID', N'$BC_SERVER_USERNAME', N'BC Runner', 0, '2099-12-31', N'S-1-5-21-2074085148-119339936-2019613796-1001', 0, 0, N'', N'', N'',
+    VALUES ('$USER_GUID', N'$BC_SERVER_USERNAME', N'BC Runner', 0, '1753-01-01', N'S-1-5-21-2074085148-119339936-2019613796-1001', 0, 0, N'', N'', N'',
         '00000000-0000-0000-0000-000000000000',
         NEWID(), GETUTCDATE(), '$USER_GUID', GETUTCDATE(), '$USER_GUID');
     INSERT INTO [User Property] ([User Security ID], [Password], [Name Identifier],
@@ -908,7 +922,7 @@ BEGIN
         [Windows Security ID], [Change Password], [License Type], [Authentication Email],
         [Contact Email], [Exchange Identifier], [Application ID],
         [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
-    VALUES ('$SVC_GUID', N'YOURBC-SERVICEUSER', N'BC Service', 0, '2099-12-31', N'S-1-5-21-572246948-1269080603-559786204-1001', 0, 0, N'', N'', N'',
+    VALUES ('$SVC_GUID', N'YOURBC-SERVICEUSER', N'BC Service', 0, '1753-01-01', N'S-1-5-21-572246948-1269080603-559786204-1001', 0, 0, N'', N'', N'',
         '00000000-0000-0000-0000-000000000000',
         NEWID(), GETUTCDATE(), '$SVC_GUID', GETUTCDATE(), '$SVC_GUID');
     INSERT INTO [User Property] ([User Security ID], [Password], [Name Identifier],
