@@ -393,7 +393,11 @@ internal class StartupHook
         // comment for the full story. Microsoft.Dynamics.Nav.AzureADGraphClient.dll (Add-ins/
         // GraphClient/) is a SEPARATE, lazily-loaded assembly from Nav.Ncl.dll, so it needs its
         // own AssemblyLoad hook rather than piggybacking on Patch #22's Nav.Ncl-triggered one.
-        if (name == "Microsoft.Dynamics.Nav.AzureADGraphClient")
+        // This is the realistic trigger path (AzureADGraphClient loads later/lazily than
+        // Nav.Ncl), so the IsPatchDisabled("22b") gate must be checked here too, not just in
+        // PatchGraphQueryGetTenantDetail — that one only guards the Nav.Ncl-triggered call,
+        // which usually loses the race to this one.
+        if (name == "Microsoft.Dynamics.Nav.AzureADGraphClient" && !IsPatchDisabled("22b"))
         {
             ApplyGraphQueryGetTenantDetailPatch(args.LoadedAssembly);
         }
@@ -2751,6 +2755,12 @@ internal class StartupHook
 
     private static void PatchAzureADGraphQuery(Assembly navNcl)
     {
+        // Patch #22b is independent of Patch #22's own success (it fixes a completely
+        // separate call path — see PatchGraphQueryGetTenantDetail's header comment) and
+        // MUST run even if any of the early returns below fire (e.g. a future BC version
+        // renaming/moving AzureADGraphQuery). Use try/finally rather than relying on
+        // "falls through to the bottom" — every `return` inside the try used to skip the
+        // call entirely, silently reintroducing the misleading SUPER-user error.
         try
         {
             var queryType = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.AzureADGraphQuery");
@@ -2801,8 +2811,10 @@ internal class StartupHook
         {
             Console.WriteLine($"[StartupHook] Patch #22 failed: {ex.GetType().Name}: {ex.Message}");
         }
-
-        PatchGraphQueryGetTenantDetail(navNcl);
+        finally
+        {
+            PatchGraphQueryGetTenantDetail(navNcl);
+        }
     }
 
     /// <summary>
