@@ -317,6 +317,11 @@ jobs:
       # constraint as the junit artifact name above) — bc_version already
       # varies per leg, so reuse it.
       artifact_name_suffix: "${{ matrix.bc_version }}-required"
+      # verify_authentication defaults to false for consumers (see the
+      # reusable workflow's input doc) — but bc-linux's own matrix is
+      # exactly the regression gate that check exists for, so opt in here
+      # on every supported version.
+      verify_authentication: true
 
   # ─── Preview matrix: NON-BLOCKING insider legs ──────────────────────────
   #     The next BC major and the next minor, discovered from Microsoft's
@@ -374,6 +379,10 @@ jobs:
       ruleset_file: "extensions/smoke-test/cops.rulset.json"
       enable_external_rulesets: true
       preprocessor_symbols: "SMOKE"
+      # Same reasoning as the required matrix: preview legs are the
+      # earliest place a wire-format regression on a new BC version would
+      # show up.
+      verify_authentication: true
 
   # Puts the "this was expected" framing in the run summary, so a red-ish
   # preview leg in the job list doesn't read as a regression to whoever

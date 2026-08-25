@@ -419,6 +419,21 @@ on:
         type: string
         default: ""
 
+      verify_authentication:
+        description: >-
+          Opt-in. When true, runs scripts/test-authentication.sh against
+          the running BC container right after it becomes healthy — a
+          positive/negative NavUserPassword auth check pair that catches
+          a client-services wire-format regression before the
+          publish/smoke steps below run (those would otherwise pass even
+          with a broken or bypassed password check). False (default):
+          the step is skipped — not every consumer of this workflow
+          needs to test authentication on every run, so it doesn't run
+          unless asked for.
+        required: false
+        type: boolean
+        default: false
+
     secrets:
       bc_license:
         description: >-
@@ -1077,11 +1092,11 @@ jobs:
           ./scripts/wait-for-bc-healthy.sh ${{ inputs.health_timeout_minutes }}
           bash scripts/workflow-summary.sh end BC_BOOT
 
-      # Run on every supported/preview version so client-services wire-format
-      # changes fail here instead of silently weakening authentication. This
+      # Opt-in (see verify_authentication input below). When enabled, this
       # must run before the positive-only publish/smoke path: the former
       # Patch #16b made every later step green even with a wrong password.
       - name: Verify NavUserPassword authentication
+        if: ${{ inputs.verify_authentication }}
         working-directory: bc-linux
         run: ./scripts/test-authentication.sh
 
