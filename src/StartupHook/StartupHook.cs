@@ -142,6 +142,19 @@ using System.Threading.Tasks;
 ///   Linux topology proxy forces false).
 ///   Fix: return null, which is what the gated-off path produced. Applied on all versions.
 ///
+/// Patch #30: Dev Services 401 missing WWW-Authenticate header (Microsoft.Dynamics.Nav.Service.Dev.dll)
+///   The Dev Services endpoint (/BC/dev/*) never sends a WWW-Authenticate header on a 401,
+///   unlike /BC/ODataV4/* (which correctly returns "WWW-Authenticate: Basic realm=..."). This
+///   breaks any client doing proper HTTP challenge-response Basic auth (send unauthenticated,
+///   read WWW-Authenticate, resend with credentials) instead of sending credentials proactively
+///   — including .NET's HttpClientHandler and, per the decompiled ms-dynamics-smb.al VS Code
+///   extension, the AL Language Server's own publish flow. curl with `-u` is unaffected (sends
+///   Basic auth proactively, no negotiation), which is why publish-workspace.sh never hit this.
+///   Fix: hook DevTenantAuthorizationMiddleware.InvokeAsync (runs unconditionally on every Dev
+///   request before routing/auth-decision finalization) to register an HttpResponse.OnStarting
+///   callback that adds the header when the response ends up 401. See PatchNavAuthenticationChallenge
+///   for the full root-cause writeup and why several other approaches were rejected.
+///
 /// JMP hooks work ONLY on BC methods (JIT-compiled). BCL methods are ReadyToRun pre-compiled
 /// and cannot be patched this way.
 ///
@@ -311,6 +324,32 @@ internal class StartupHook
         AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;
         AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad;
         TryEagerPatch();
+
+        // Patch #30: Microsoft.Dynamics.Nav.Service.Dev.dll never fires the AssemblyLoad
+        // event we just subscribed to above — confirmed empirically (its types show up in
+        // exception stack traces during boot, but OnAssemblyLoad's "name == ..." branch for
+        // it never runs, and it's also not yet resident in
+        // AppDomain.CurrentDomain.GetAssemblies() this early). It's a direct static
+        // reference of the entry assembly, loaded by the runtime as part of building the
+        // Dev/OData/Client host pipelines — well after StartupHook.Initialize() runs, but
+        // apparently without ever raising the standard AssemblyLoad notification (unlike
+        // Nav.Ncl, Nav.Types, etc., which the AssemblyLoad-event pattern elsewhere in this
+        // file works for). Poll for it on a background timer instead: cheap, self-cancelling
+        // once found, and immune to whatever undocumented load path BC uses.
+        {
+            var pollTimer = new System.Timers.Timer(TimeSpan.FromSeconds(2));
+            pollTimer.Elapsed += (_, _) =>
+            {
+                var asm = AppDomain.CurrentDomain.GetAssemblies()
+                    .FirstOrDefault(a => a.GetName().Name == "Microsoft.Dynamics.Nav.Service.Dev");
+                if (asm == null) return;
+                pollTimer.Stop();
+                pollTimer.Dispose();
+                PatchNavAuthenticationChallenge(asm);
+            };
+            pollTimer.AutoReset = true;
+            pollTimer.Start();
+        }
 
         // Patch #18: No-op SetupSideServices — must be patched before Main() calls it.
         try
@@ -537,6 +576,14 @@ internal class StartupHook
         if (name == "Microsoft.Dynamics.Nav.Service")
         {
             PatchFindClientTimeZone(args.LoadedAssembly);
+        }
+
+        // Patch #30: fallback in case a future BC version does raise this notification
+        // for Microsoft.Dynamics.Nav.Service.Dev — see the poll-timer registration in
+        // Initialize() for why this isn't the primary trigger.
+        if (name == "Microsoft.Dynamics.Nav.Service.Dev")
+        {
+            PatchNavAuthenticationChallenge(args.LoadedAssembly);
         }
 
     }
@@ -3712,6 +3759,206 @@ internal class StartupHook
         {
             Console.WriteLine($"[StartupHook] Patch #29 failed: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Patch #30: the Dev Services (/BC/dev/*) endpoint never sends a WWW-Authenticate
+    /// header on a 401, unlike /BC/ODataV4/* (confirmed empirically — OData correctly
+    /// returns "Www-Authenticate: Basic realm=..."; Dev returns a bare 401 with zero
+    /// headers). Root cause: NavAuthenticationHandler.HandleAuthenticateAsync
+    /// (Microsoft.Dynamics.Nav.Service.AspNetCore.dll) sets Response.StatusCode = 401
+    /// directly inside its own catch blocks on a failed/missing Authorization header,
+    /// short-circuiting BEFORE the standard ASP.NET Core Challenge flow
+    /// (AuthenticationHandler&lt;T&gt;.HandleChallengeAsync, where a header would
+    /// normally get added) ever runs. Confirmed: a JMP-hook on HandleChallengeAsync with
+    /// a debug log line never printed even once across repeated failed requests — that
+    /// method genuinely never executes for this failure path.
+    ///
+    /// This breaks any client doing proper HTTP challenge-response Basic auth
+    /// negotiation (send unauthenticated -> read WWW-Authenticate -> resend with
+    /// credentials) instead of sending credentials proactively. .NET's own
+    /// HttpClientHandler.Credentials is exactly such a client, and so — per the
+    /// decompiled ms-dynamics-smb.al extension.js (UserPasswordAuth/
+    /// ServerProxy.onErrorAsync) — is VS Code's/al.nvim's actual publish flow: it
+    /// authenticates reactively off a 401, but with no challenge header the .NET HTTP
+    /// stack can never determine which scheme to use, so it never attaches Basic auth
+    /// and the request stays unauthenticated no matter how many times valid credentials
+    /// are supplied. curl works fine because `-u` sends Basic auth proactively, with no
+    /// negotiation — which is why publish-workspace.sh (curl-based) was never affected.
+    ///
+    /// Rejected fix: patching HandleAuthenticateAsync itself would require faithfully
+    /// re-invoking Microsoft.Dynamics.Nav.Service.AspNetCore.Middlewares.
+    /// AuthenticationHelper.AuthenticateForServiceCallAsync (an internal class with
+    /// several overloads, delegate params, tenant/token/impersonation logic, ALSO used
+    /// by SignalR and Windows auth on the same endpoint) via pure reflection — high risk
+    /// of subtly breaking other auth paths on this handler for a fix this narrow.
+    ///
+    /// Actual fix: DevTenantAuthorizationMiddleware (Microsoft.Dynamics.Nav.Service.Dev.dll)
+    /// is registered AFTER UseAuthentication() but BEFORE UseRouting()/UseAuthorization()
+    /// in DevHostStartup.Configure — i.e. it runs unconditionally on every Dev request
+    /// regardless of auth outcome, wrapping a genuine `next` RequestDelegate we CAN call
+    /// (unlike the auth handler, which has no such passthrough). Hook its InvokeAsync to
+    /// register an HttpResponse.OnStarting callback (the header must be added there, NOT
+    /// after next() returns — by then the downstream response has already been flushed;
+    /// confirmed empirically with a standalone repro that a post-next() header-set is
+    /// silently dropped) that adds the header if status ends up 401, then call the real
+    /// `next` (skipping only that middleware's own SaaS-tenant
+    /// EnableMembershipEntitlement checks, which are inert here — this container's
+    /// ExtensionAllowedTargetLevel is OnPrem, not a real SaaS tenant).
+    /// </summary>
+    private static void PatchNavAuthenticationChallenge(Assembly navServiceDevAsm)
+    {
+        if (IsPatchDisabled("30")) return;
+        try
+        {
+            var middlewareType = navServiceDevAsm.GetType("Microsoft.Dynamics.Nav.Service.Dev.Web.DevTenantAuthorizationMiddleware");
+            if (middlewareType == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #30: DevTenantAuthorizationMiddleware not found, skipping");
+                return;
+            }
+
+            var invokeMethod = middlewareType.GetMethod("InvokeAsync",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (invokeMethod == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #30: InvokeAsync not found, skipping");
+                return;
+            }
+
+            var replacement = typeof(StartupHook).GetMethod(
+                nameof(Replacement_DevTenantAuthorizationInvokeAsync),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            ApplyJmpHook(invokeMethod, replacement, "DevTenantAuthorizationMiddleware.InvokeAsync (Patch #30)");
+            Console.WriteLine("[StartupHook] Patch #30: Dev Services 401 responses now include WWW-Authenticate: Basic");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #30 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Replacement for DevTenantAuthorizationMiddleware.InvokeAsync(HttpContext context).
+    /// Instance method, one reference-type parameter -- JMP hooks pass 'this' as the first
+    /// explicit parameter (see Replacement_ShowForm's header comment for the general
+    /// pattern), so the real signature here is (self, context).
+    ///
+    /// Deliberately skips the original method's own body (the SaaS
+    /// EnableMembershipEntitlement / tenant-environment-type checks) and goes straight to
+    /// registering an OnStarting callback, then `next(context)` — see the header comment
+    /// on PatchNavAuthenticationChallenge for why both of those choices are safe/required.
+    ///
+    /// Deliberately NOT an `async` method, and does NOT await/ContinueWith on next's Task.
+    /// Every other JMP-hooked replacement in this file is fully synchronous; an earlier
+    /// version of this patch used an `async` local function and every request hung until
+    /// timeout (504) with no exception logged, even though the replacement was confirmed
+    /// entered via a debug log. Given DOTNET_TieredCompilation=0 is set file-wide
+    /// specifically because JMP hooks are sensitive to how the JIT compiles the hooked
+    /// method (see the top-level header comment), an async state machine's fundamentally
+    /// different codegen next to a raw-pointer JMP replacement is the leading suspect —
+    /// not confirmed at the IL level, but avoiding async entirely here matches the same
+    /// caution this file already applies everywhere else, and it fixed the hang.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static object Replacement_DevTenantAuthorizationInvokeAsync(object self, object context)
+    {
+        try
+        {
+            var nextField = self.GetType().GetField("next", BindingFlags.Instance | BindingFlags.NonPublic);
+            var next = nextField?.GetValue(self);
+            if (next == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #30: RequestDelegate 'next' field not found — request dropped");
+                return Task.CompletedTask;
+            }
+
+            // Register the header-fixup via HttpContext.Response.OnStarting — the
+            // documented mechanism for adding/modifying a header right before the
+            // response actually starts, regardless of which downstream component
+            // decided the status code. Registering AFTER next() returns is too late —
+            // by then the response is already flushed and header mutations are silently
+            // dropped (confirmed with a standalone minimal-repro ASP.NET Core app before
+            // touching this file again, after that exact failure mode wedged the whole
+            // Dev host on a live container).
+            var responseProp = context.GetType().GetProperty("Response");
+            var response = responseProp?.GetValue(context);
+            if (response != null)
+            {
+                var onStartingMethod = response.GetType().GetMethod("OnStarting", new[] { typeof(Func<Task>) });
+                Func<Task> callback = () =>
+                {
+                    try
+                    {
+                        AddChallengeHeaderIfNeeded(context);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[StartupHook] Patch #30: OnStarting header fixup failed: {ex.GetType().Name}: {ex.Message}");
+                    }
+                    return Task.CompletedTask;
+                };
+                onStartingMethod?.Invoke(response, new object[] { callback });
+            }
+
+            // next is a RequestDelegate (Func<HttpContext, Task>) — invoke it directly as
+            // a delegate (Delegate.DynamicInvoke), NOT via MethodInfo.Invoke on its
+            // "Invoke" method; DynamicInvoke is the documented reflection-safe way to
+            // call an arbitrary delegate instance without needing its exact static type.
+            var nextDelegate = (Delegate)next;
+            return (Task)nextDelegate.DynamicInvoke(context)!;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #30: InvokeAsync replacement failed: {ex.GetType().Name}: {ex.Message}");
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>
+    /// If the response context ends up as a 401 with no WWW-Authenticate header yet, add
+    /// one. Pure reflection over HttpContext/HttpResponse/IHeaderDictionary — see
+    /// PatchNavAuthenticationChallenge's header comment for why the header is missing in
+    /// the first place.
+    ///
+    /// The header-dictionary indexer lookup MUST go through the IHeaderDictionary
+    /// INTERFACE type, not the concrete runtime type. Kestrel's concrete implementation
+    /// (Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http.HttpResponseHeaders)
+    /// implements the string indexer as an EXPLICIT interface implementation of
+    /// IHeaderDictionary.this[string] — GetType().GetProperty("Item", ...) on the
+    /// concrete type returns null and any attempt to use it silently no-ops. Confirmed
+    /// with a standalone repro: the status-code reflection set worked immediately, but
+    /// the header value came back empty every time until the indexer was looked up via
+    /// concreteType.GetInterfaces().First(i => i.Name == "IHeaderDictionary") instead.
+    /// </summary>
+    private static void AddChallengeHeaderIfNeeded(object context)
+    {
+        var responseProp = context.GetType().GetProperty("Response");
+        var response = responseProp?.GetValue(context);
+        if (response == null) return;
+
+        var statusCodeProp = response.GetType().GetProperty("StatusCode");
+        var statusCode = (int?)statusCodeProp?.GetValue(response);
+        if (statusCode != 401) return;
+
+        var headersProp = response.GetType().GetProperty("Headers");
+        var headers = headersProp?.GetValue(response);
+        if (headers == null) return;
+
+        var iHeaderDictionaryType = headers.GetType().GetInterfaces()
+            .FirstOrDefault(i => i.Name == "IHeaderDictionary");
+        if (iHeaderDictionaryType == null) return;
+
+        var containsKeyMethod = iHeaderDictionaryType.GetMethod("ContainsKey");
+        var alreadyHasChallenge = (bool?)containsKeyMethod?.Invoke(headers, new object[] { "WWW-Authenticate" }) ?? false;
+        if (alreadyHasChallenge) return;
+
+        var indexer = iHeaderDictionaryType.GetProperty("Item", new[] { typeof(string) });
+        if (indexer == null) return;
+        var stringValuesType = indexer.PropertyType; // Microsoft.Extensions.Primitives.StringValues
+        var stringValues = Activator.CreateInstance(stringValuesType, "Basic realm=\"\"");
+        indexer.SetValue(headers, stringValues, new object[] { "WWW-Authenticate" });
+        Console.WriteLine("[StartupHook] Patch #30: added WWW-Authenticate to a Dev Services 401 response");
     }
 
 
