@@ -562,6 +562,15 @@ steps:
 
   - bash: |
       set -e
+      cd "$(Agent.BuildDirectory)/bc-linux"
+      # Run before the positive-only publish/smoke path below, same as the
+      # reusable workflow: this is what catches a client-services wire-format
+      # regression instead of every later step passing with a wrong password.
+      ./scripts/test-authentication.sh
+    displayName: 'Verify NavUserPassword authentication'
+
+  - bash: |
+      set -e
       bash "$(Agent.BuildDirectory)/bc-linux/scripts/workflow-summary.sh" begin PUBLISH "Publish AL apps"
       AUTH="BCRUNNER:Admin123!"
       DEV="http://localhost:7049/BC/dev"

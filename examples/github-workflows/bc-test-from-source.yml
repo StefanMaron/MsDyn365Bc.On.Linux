@@ -558,6 +558,13 @@ jobs:
           ./scripts/wait-for-bc-healthy.sh 30
           bash scripts/workflow-summary.sh end BC_BOOT
 
+      # Run before the positive-only publish/smoke path below, same as the
+      # reusable workflow: this is what catches a client-services wire-format
+      # regression instead of every later step passing with a wrong password.
+      - name: Verify NavUserPassword authentication
+        working-directory: bc-linux
+        run: ./scripts/test-authentication.sh
+
       # ─── Phase 7: publish compiled apps to the now-running BC ────────
       - name: Publish AL apps to BC
         env:
