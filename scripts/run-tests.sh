@@ -630,13 +630,14 @@ if [ "$USE_DOCKER_EXEC" = "true" ]; then
     if [ -n "$JUNIT_OUTPUT" ]; then
         JUNIT_FLAGS+=(--junit-output /tmp/junit-result.xml)
     fi
-    ( cd "$REPO_DIR" && docker compose exec -T bc dotnet /bc/tools/TestRunner/TestRunner.dll \
+    ( cd "$REPO_DIR" && printf '%s' "$AUTH_PASS" | docker compose exec -T bc \
+        env DOTNET_STARTUP_HOOKS= dotnet /bc/tools/TestRunner/TestRunner.dll \
         --verbose \
         --host "localhost:7085" \
         --odata-host "localhost:7052" \
         --company "$COMPANY" \
         --user "$AUTH_USER" \
-        --password "$AUTH_PASS" \
+        --password-stdin \
         --suite "DEFAULT" \
         --num-codeunits "$NUM_CODEUNITS" \
         --timeout "$TIMEOUT_MIN" \
@@ -660,13 +661,13 @@ elif [ -n "$HOST_PREBUILT" ]; then
     if [ -n "$JUNIT_OUTPUT" ]; then
         JUNIT_FLAGS+=(--junit-output "$JUNIT_OUTPUT")
     fi
-    dotnet "$HOST_PREBUILT" \
+    printf '%s' "$AUTH_PASS" | dotnet "$HOST_PREBUILT" \
         --verbose \
         --host "$WS_HOST" \
         --odata-host "$ODATA_HOST" \
         --company "$COMPANY" \
         --user "$AUTH_USER" \
-        --password "$AUTH_PASS" \
+        --password-stdin \
         --suite "DEFAULT" \
         --num-codeunits "$NUM_CODEUNITS" \
         --timeout "$TIMEOUT_MIN" \
@@ -679,13 +680,13 @@ elif command -v dotnet >/dev/null 2>&1; then
     if [ -n "$JUNIT_OUTPUT" ]; then
         JUNIT_FLAGS+=(--junit-output "$JUNIT_OUTPUT")
     fi
-    dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
+    printf '%s' "$AUTH_PASS" | dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
         --verbose \
         --host "$WS_HOST" \
         --odata-host "$ODATA_HOST" \
         --company "$COMPANY" \
         --user "$AUTH_USER" \
-        --password "$AUTH_PASS" \
+        --password-stdin \
         --suite "DEFAULT" \
         --num-codeunits "$NUM_CODEUNITS" \
         --timeout "$TIMEOUT_MIN" \

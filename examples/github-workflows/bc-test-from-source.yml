@@ -289,92 +289,18 @@ jobs:
       - name: Install AL compiler (Linux)
         run: |
           bash bc-linux/scripts/workflow-summary.sh begin AL_INSTALL "Install AL compiler"
-          TOOL="$AL_TOOL_VERSION"
-          BC_MAJOR=$(echo "$BC_VERSION" | cut -d. -f1)
-          # A policy keyword ("matching" default, "latest", "prerelease")
-          # resolves through the shared script; anything else is an exact
-          # version and is used as-is. "latest" is the answer when an app
-          # declares a runtime its own major's compiler rejects — e.g.
-          # runtime 16.1 is refused by AL 16.2 but accepted by AL 17.
-          case "$TOOL" in
-            ""|matching|latest|prerelease)
-              AL_POLICY="${TOOL:-matching}"
-              TOOL=""
-              ;;
-            *)
-              AL_POLICY=""
-              ;;
-          esac
-          if [ -z "$TOOL" ]; then
-            # Resolved from nuget.org: AL major is BC major - 11, newest
-            # stable of that major, falling back to the newest prerelease when
-            # no stable exists (a BC version still in preview has no stable
-            # compiler). Calling the shared script rather than keeping a table
-            # here means a new BC release needs no edit to this file.
-            if ! TOOL=$(python3 bc-linux/scripts/resolve-al-tool-version.py "$BC_VERSION" --policy "$AL_POLICY"); then
-              echo "Could not resolve an AL compiler version for BC $BC_VERSION" >&2
-              exit 1
-            fi
+          # Resolution, package-shape fallback (Microsoft has been known to
+          # reshuffle where the compiler binary lives inside a BC preview's
+          # AL nupkg without warning — see install-al-compiler.sh's header
+          # for the specific incident this guards against) and the AL
+          # wrapper all live in the shared script so this logic exists in
+          # exactly one place across the reusable workflow and both
+          # examples/ pipelines.
+          if ! INSTALL_OUT=$(bash bc-linux/scripts/install-al-compiler.sh "$BC_VERSION" "$AL_TOOL_VERSION"); then
+            exit 1
           fi
-          echo "Installing AL compiler $TOOL"
-          PKG="microsoft.dynamics.businesscentral.development.tools.linux"
-          AL_TOOL_DIR=""
-
-          # Try dotnet global tool first (BC 27 / v16 packages ship with
-          # DotnetToolSettings.xml and install correctly this way).
-          # BC 28+ dropped the tool manifest — the package is now a plain
-          # library nupkg and `dotnet tool install` rejects it; fall through
-          # to the nupkg-extraction path in that case. Do NOT swallow the
-          # rejection with `|| true`: without the fallback below there is no
-          # `AL` command at all and the compile step dies with exit 127.
-          if dotnet tool install -g \
-              Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-              --version "$TOOL" 2>&1 \
-          || dotnet tool update -g \
-              Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-              --version "$TOOL" 2>&1; then
-            echo "Installed as dotnet global tool"
-            echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-            # Locate alc by searching, not by assuming a TFM directory.
-            AL_TOOL_DIR=$(dirname "$(find "$HOME/.dotnet/tools/.store/$PKG" \
-              -type f -name alc 2>/dev/null | sort | tail -1)")
-          else
-            # Not a dotnet tool — download and extract the nupkg directly.
-            echo "Package is not a dotnet global tool; extracting nupkg"
-            EXTRACT_DIR="$HOME/.al-tool-cache/$TOOL"
-            mkdir -p "$EXTRACT_DIR"
-            curl -fsSL \
-              "https://api.nuget.org/v3-flatcontainer/${PKG}/${TOOL}/${PKG}.${TOOL}.nupkg" \
-              -o "$EXTRACT_DIR/pkg.zip"
-            unzip -q -o "$EXTRACT_DIR/pkg.zip" -d "$EXTRACT_DIR"
-            rm "$EXTRACT_DIR/pkg.zip"
-            # Find alc wherever the package puts it. The TFM directory is NOT
-            # stable across AL majors: v17 ships lib/net8.0/alc, v18 ships
-            # lib/net10.0/alc plus a lib/net8.0 holding only analyzer DLLs —
-            # so a directory test on net8.0 finds the wrong place and
-            # succeeds. Hardcoding it made the BC 29 leg fail with exit 127.
-            # No runtime install is needed: alc is self-contained (its
-            # runtimeconfig declares includedFrameworks), verified for v17
-            # and v18.
-            ALC_PATH=$(find "$EXTRACT_DIR" -type f -name alc 2>/dev/null | sort | tail -1)
-            if [ -z "$ALC_PATH" ]; then
-              echo "No 'alc' binary found in $PKG $TOOL" >&2
-              find "$EXTRACT_DIR" -maxdepth 3 -type d | sed 's/^/  /' >&2
-              exit 1
-            fi
-            AL_TOOL_DIR=$(dirname "$ALC_PATH")
-            echo "Found alc at $ALC_PATH"
-            chmod +x "$ALC_PATH" 2>/dev/null || true
-            # Create an AL wrapper so `AL compile ...` works in later steps.
-            # The v16 dotnet tool ships AL.dll which routes the `compile`
-            # subcommand; raw alc doesn't accept it — strip it here.
-            mkdir -p "$HOME/.al-bin"
-            printf '#!/bin/bash\n[ "$1" = compile ] && shift\nexec "%s/alc" "$@"\n' \
-              "$AL_TOOL_DIR" > "$HOME/.al-bin/AL"
-            chmod +x "$HOME/.al-bin/AL"
-            echo "$HOME/.al-bin" >> "$GITHUB_PATH"
-          fi
-
+          eval "$INSTALL_OUT"
+          echo "$AL_BIN_DIR" >> "$GITHUB_PATH"
           # Exported so the compile step can point resolve-analyzers.py at
           # the Microsoft cop DLLs — its auto-detection only knows the
           # dotnet-tool layout, not the extracted-nupkg one.
@@ -557,6 +483,13 @@ jobs:
           # leaving you staring at silence for several minutes.
           ./scripts/wait-for-bc-healthy.sh 30
           bash scripts/workflow-summary.sh end BC_BOOT
+
+      # Run before the positive-only publish/smoke path below, same as the
+      # reusable workflow: this is what catches a client-services wire-format
+      # regression instead of every later step passing with a wrong password.
+      - name: Verify NavUserPassword authentication
+        working-directory: bc-linux
+        run: ./scripts/test-authentication.sh
 
       # ─── Phase 7: publish compiled apps to the now-running BC ────────
       - name: Publish AL apps to BC

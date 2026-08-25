@@ -6,6 +6,7 @@
     <NoWarn>VSTHRD103;VSTHRD105;VSTHRD200;CS0219</NoWarn>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../NavUserPasswordInspector/V3Password.cs" Link="V3Password.cs" />
     <PackageReference Include="StreamJsonRpc" Version="2.19.*" />
     <PackageReference Include="Newtonsoft.Json" Version="13.*" />
   </ItemGroup>
