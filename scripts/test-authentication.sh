@@ -41,6 +41,30 @@ expect_rejected() {
     esac
 }
 
+# The disabled/expired-user assertions below insert or modify [User]/
+# [User Property] rows directly via SQL while NST is already running, not
+# through BC's own user-management API. BC's user cache can lag that
+# out-of-band write by a second or two, so the very next request can 401 as
+# "unknown user" even though the row is already correct in the database —
+# observed intermittently in CI (a freshly-inserted enabled user 401ing, or a
+# just-disabled user still authenticating). Retry until the class of
+# response we expect shows up, or the deadline passes and we report
+# whatever the last attempt got — a real auth bug still fails the test, a
+# stale cache just costs a few seconds.
+poll_status_class() {
+    local class=$1 url=$2 username=$3 password=$4 output=$5
+    local attempts=10 delay=1 status
+    for ((i = 1; i <= attempts; i++)); do
+        status=$(status_with_basic_auth "$url" "$username" "$password" "$output")
+        case "$class:$status" in
+            success:2??) echo "$status"; return ;;
+            rejected:401|rejected:403) echo "$status"; return ;;
+        esac
+        [ "$i" -lt "$attempts" ] && sleep "$delay"
+    done
+    echo "$status"
+}
+
 tmp_dir=$(mktemp -d)
 DISABLED_GUID='00000000-0000-0000-0000-000000000101'
 EXPIRED_GUID='00000000-0000-0000-0000-000000000102'
@@ -131,8 +155,8 @@ INSERT INTO [Access Control] ([User Security ID],[Role ID],[Company Name],[Scope
 ('$EXPIRED_GUID',N'SUPER',N'',0,'00000000-0000-0000-0000-000000000000',NEWID(),GETUTCDATE(),'$EXPIRED_GUID',GETUTCDATE(),'$EXPIRED_GUID');
 " >/dev/null
 
-disabled_before=$(status_with_basic_auth "$ODATA_URL" "$DISABLED_USER_BEFORE" "$BC_SERVER_PASSWORD" "$tmp_dir/disabled-before")
-expired_before=$(status_with_basic_auth "$ODATA_URL" "$EXPIRED_USER_BEFORE" "$BC_SERVER_PASSWORD" "$tmp_dir/expired-before")
+disabled_before=$(poll_status_class success "$ODATA_URL" "$DISABLED_USER_BEFORE" "$BC_SERVER_PASSWORD" "$tmp_dir/disabled-before")
+expired_before=$(poll_status_class success "$ODATA_URL" "$EXPIRED_USER_BEFORE" "$BC_SERVER_PASSWORD" "$tmp_dir/expired-before")
 expect_success "disabled test user before disabling" "$disabled_before"
 expect_success "expired test user before expiry" "$expired_before"
 
@@ -147,8 +171,8 @@ SET [User Name] = N'$EXPIRED_USER', [Expiry Date] = '2000-01-01',
 WHERE [User Security ID] = '$EXPIRED_GUID';
 " >/dev/null
 
-disabled=$(status_with_basic_auth "$ODATA_URL" "$DISABLED_USER" "$BC_SERVER_PASSWORD" "$tmp_dir/disabled")
-expired=$(status_with_basic_auth "$ODATA_URL" "$EXPIRED_USER" "$BC_SERVER_PASSWORD" "$tmp_dir/expired")
+disabled=$(poll_status_class rejected "$ODATA_URL" "$DISABLED_USER" "$BC_SERVER_PASSWORD" "$tmp_dir/disabled")
+expired=$(poll_status_class rejected "$ODATA_URL" "$EXPIRED_USER" "$BC_SERVER_PASSWORD" "$tmp_dir/expired")
 expect_rejected "disabled user" "$disabled"
 expect_rejected "expired user" "$expired"
 
