@@ -879,6 +879,9 @@ jobs:
               parts.append("0")
           if major_minor:
               mm = major_minor.split(".")
+              if len(mm) != 2 or not all(mm):
+                  print(f"::error::app_version_major_minor must be 'MAJOR.MINOR' (e.g. '27.0'), got: {major_minor!r}")
+                  sys.exit(1)
               parts[0], parts[1] = mm[0], mm[1]
           if build and build != "0":
               parts[2] = build
