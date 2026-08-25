@@ -262,16 +262,19 @@ jobs:
         id: publish
         run: |
           set -e
-          AL_VER=$(python3 scripts/resolve-al-tool-version.py "$BC_VERSION" --policy matching)
-          PKG=microsoft.dynamics.businesscentral.development.tools.linux
-          mkdir -p al && curl -fsSL \
-            "https://api.nuget.org/v3-flatcontainer/${PKG}/${AL_VER}/${PKG}.${AL_VER}.nupkg" -o al/pkg.zip
-          unzip -q -o al/pkg.zip -d al && rm al/pkg.zip
-          ALC=$(find al -type f -name alc | sort | tail -1); chmod +x "$ALC"
+          # See install-al-compiler.sh's header for why this can't just
+          # extract the .Linux nupkg and grep for `alc` directly anymore —
+          # Microsoft has already emptied that package of its compiler
+          # binary once for an AL 18 preview build, and the fallback there
+          # is what keeps this working if that lands in a stable release.
+          if ! INSTALL_OUT=$(bash scripts/install-al-compiler.sh "$BC_VERSION" matching); then
+            exit 1
+          fi
+          eval "$INSTALL_OUT"
           mkdir -p symbols
           python3 scripts/stage-symbols.py --app-json extensions/smoke-test/app.json \
             --artifact-dir "$BC_ARTIFACTS_DIR" --out-dir symbols
-          "$ALC" /project:"$PWD/extensions/smoke-test" /packagecachepath:"$PWD/symbols" \
+          "$AL_BIN_DIR/AL" /project:"$PWD/extensions/smoke-test" /packagecachepath:"$PWD/symbols" \
                  /out:"$PWD/smoke-test.app"
           docker compose cp smoke-test.app bc:/tmp/smoke-test.app
           docker compose exec -T bc sh -c '
