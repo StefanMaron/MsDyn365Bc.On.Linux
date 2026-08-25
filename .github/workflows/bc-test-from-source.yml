@@ -697,102 +697,18 @@ jobs:
       - name: Install AL compiler (Linux)
         run: |
           bash bc-linux/scripts/workflow-summary.sh begin AL_INSTALL "Install AL compiler"
-          AL_TOOL="${{ inputs.al_tool_version }}"
-          BC_MAJOR=$(echo "${{ inputs.bc_version }}" | cut -d. -f1)
-          # A policy keyword resolves through the shared script; anything
-          # else is an exact version and is used as-is.
-          case "$AL_TOOL" in
-            ""|matching|latest|prerelease)
-              AL_POLICY="${AL_TOOL:-matching}"
-              AL_TOOL=""
-              ;;
-            *)
-              AL_POLICY=""
-              ;;
-          esac
-          if [ -z "$AL_TOOL" ]; then
-            # Resolved from nuget.org rather than a hardcoded table. AL major
-            # is BC major - 11, and the resolver prefers the newest stable of
-            # that major, falling back to the newest prerelease when no stable
-            # exists. That fallback is what makes a preview BC version
-            # buildable at all: BC 29 needs AL 18.x, and as of 2026-08 there
-            # is no stable 18.x on nuget.org — only 18.0.39.10160-beta.
-            #
-            # The old table covered BC 27 and 28 only; anything else fell
-            # through to a ::warning:: and the BC 27 compiler, which does not
-            # fail loudly — it compiles against the wrong platform and the
-            # errors point somewhere unrelated. The resolver returns the same
-            # versions the table did for 27 and 28, so this is a
-            # generalization of the previous behavior, not a new guess.
-            if ! AL_TOOL=$(python3 bc-linux/scripts/resolve-al-tool-version.py "${{ inputs.bc_version }}" --policy "$AL_POLICY"); then
-              echo "::error::could not resolve an AL compiler version for BC ${{ inputs.bc_version }}"
-              exit 1
-            fi
+          # Resolution, package-shape fallback (Microsoft has been known to
+          # reshuffle where the compiler binary lives inside a BC preview's
+          # AL nupkg without warning — see install-al-compiler.sh's header
+          # for the specific incident this guards against) and the AL
+          # wrapper all live in the shared script so this logic exists in
+          # exactly one place across the reusable workflow and both
+          # examples/ pipelines.
+          if ! INSTALL_OUT=$(bash bc-linux/scripts/install-al-compiler.sh "${{ inputs.bc_version }}" "${{ inputs.al_tool_version }}"); then
+            exit 1
           fi
-          echo "Installing AL compiler $AL_TOOL"
-          PKG="microsoft.dynamics.businesscentral.development.tools.linux"
-          AL_TOOL_DIR=""
-
-          # Try dotnet global tool first (BC 27 / v16 packages ship with
-          # DotnetToolSettings.xml and install correctly this way).
-          # BC 28+ dropped the tool manifest — the package is now a plain
-          # library nupkg and `dotnet tool install` rejects it; fall through
-          # to the nupkg-extraction path in that case.
-          if dotnet tool install -g \
-              Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-              --version "$AL_TOOL" 2>&1 \
-          || dotnet tool update -g \
-              Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-              --version "$AL_TOOL" 2>&1; then
-            echo "Installed as dotnet global tool"
-            echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-            # Locate alc by searching for it rather than assuming a TFM
-            # directory — see the comment on the extraction path below.
-            AL_TOOL_DIR=$(dirname "$(find "$HOME/.dotnet/tools/.store/$PKG" \
-              -type f -name alc 2>/dev/null | sort | tail -1)")
-          else
-            # Not a dotnet tool — download and extract the nupkg directly.
-            echo "Package is not a dotnet global tool; extracting nupkg"
-            EXTRACT_DIR="$HOME/.al-tool-cache/$AL_TOOL"
-            mkdir -p "$EXTRACT_DIR"
-            curl -fsSL \
-              "https://api.nuget.org/v3-flatcontainer/${PKG}/${AL_TOOL}/${PKG}.${AL_TOOL}.nupkg" \
-              -o "$EXTRACT_DIR/pkg.zip"
-            unzip -q -o "$EXTRACT_DIR/pkg.zip" -d "$EXTRACT_DIR"
-            rm "$EXTRACT_DIR/pkg.zip"
-            # Find alc wherever the package puts it. The TFM directory is
-            # NOT stable across AL majors: v17 ships lib/net8.0/alc, v18
-            # ships lib/net10.0/alc (and a lib/net8.0 that holds only the
-            # analyzer DLLs, so a directory test on net8.0 finds the wrong
-            # place and succeeds). Hardcoding net8.0 is what made the BC 29
-            # leg fail with exit 127 — "lib/net8.0/alc: No such file or
-            # directory" — after the compiler version itself resolved fine.
-            #
-            # Sorting picks the highest TFM when several carry an alc.
-            # No runtime install is needed either way: alc is self-contained,
-            # its runtimeconfig.json declares includedFrameworks rather than
-            # frameworks, so it bundles the .NET it needs. Verified for both
-            # v17 (net8.0) and v18 (net10.0).
-            ALC_PATH=$(find "$EXTRACT_DIR" -type f -name alc 2>/dev/null | sort | tail -1)
-            if [ -z "$ALC_PATH" ]; then
-              echo "::error::no 'alc' binary found in $PKG $AL_TOOL."
-              echo "Package contents (directories):"
-              find "$EXTRACT_DIR" -maxdepth 3 -type d | sed 's/^/  /'
-              exit 1
-            fi
-            AL_TOOL_DIR=$(dirname "$ALC_PATH")
-            echo "Found alc at $ALC_PATH"
-            chmod +x "$ALC_PATH" 2>/dev/null || true
-            # Create an AL wrapper so `AL compile ...` works in later steps.
-            # The v16 dotnet tool ships AL.dll which routes the `compile`
-            # subcommand; raw alc doesn't accept it — strip it here.
-            mkdir -p "$HOME/.al-bin"
-            printf '#!/bin/bash\n[ "$1" = compile ] && shift\nexec "%s/alc" "$@"\n' \
-              "$AL_TOOL_DIR" > "$HOME/.al-bin/AL"
-            chmod +x "$HOME/.al-bin/AL"
-            echo "$HOME/.al-bin" >> "$GITHUB_PATH"
-          fi
-
+          eval "$INSTALL_OUT"
+          echo "$AL_BIN_DIR" >> "$GITHUB_PATH"
           echo "AL_TOOL_DIR=$AL_TOOL_DIR" >> "$GITHUB_ENV"
           echo "AL compiler ready: $AL_TOOL_DIR"
           bash bc-linux/scripts/workflow-summary.sh end AL_INSTALL
