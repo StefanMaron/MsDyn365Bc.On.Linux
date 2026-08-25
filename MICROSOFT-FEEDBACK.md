@@ -265,7 +265,14 @@ and would never be set in production Windows BC deployments.
 | #21 (NavOpenTaskPageAction.ShowForm) | No-ops `ShowForm` so headless test sessions don't crash on task page opens | `DisableUIRendering=true` (already implied by headless mode but currently not enforced) |
 | #22 (AzureADGraphQuery..ctor) | No-ops the constructor that pulls in MSAL Windows credential APIs | `DisableAzureADGraphIntegration=true` |
 | #23 (OpenXml WordDocPictureMerger) | Fixes a recursion bug in Microsoft's Word merger | (Not a flag — this is a real bug in shipped code, would just want it fixed) |
-| #16b (NavUser.TryAuthenticate) | Bypasses password hash verification for the bc-linux service user | `AllowPasswordlessSandboxAuth=true` (only valid in sandbox mode) |
+
+Patch #16b is no longer present. Inspection of BC 28.4 showed that Microsoft's
+V3 derivation and `NavUser.TryAuthenticate` implementation already run correctly
+on Linux. The repository's fixed database value only represented the default
+`Admin123!` password, while custom `BC_SERVER_PASSWORD` values did not update it;
+the unconditional hook had hidden that bootstrap bug. The entrypoint now creates
+the genuine V3 value and leaves Microsoft's verifier unchanged, so no Microsoft
+passwordless-authentication flag is requested.
 
 The Cecil-related patches (#14, #15, #15a, #15b, CheckFileName) are
 trickier — they fix Cecil bugs that Microsoft would have to fix in

@@ -7,6 +7,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using BcLinux.Authentication;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using StreamJsonRpc;
@@ -38,6 +39,8 @@ var maxIterations = 500;
 var numCodeunitsOverride = 0; // explicit codeunit count for progress display
 var verbose = false;
 var junitOutput = ""; // path to write JUnit XML — empty = don't emit
+var authProbe = false; // authenticate through OpenConnection only; never open a company or run AL tests
+const int AuthenticationRejectedExitCode = 2;
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -46,6 +49,7 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--company" && i + 1 < args.Length) company = args[++i];
     else if (args[i] == "--user" && i + 1 < args.Length) user = args[++i];
     else if (args[i] == "--password" && i + 1 < args.Length) password = args[++i];
+    else if (args[i] == "--password-stdin") password = Console.In.ReadToEnd();
     else if (args[i] == "--timeout" && i + 1 < args.Length) timeoutMin = int.Parse(args[++i]);
     else if (args[i] == "--codeunit-timeout" && i + 1 < args.Length) codeunitTimeoutMin = int.Parse(args[++i]);
     else if (args[i] == "--suite" && i + 1 < args.Length) suiteName = args[++i];
@@ -54,6 +58,7 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--num-codeunits" && i + 1 < args.Length) numCodeunitsOverride = int.Parse(args[++i]);
     else if (args[i] == "--verbose" || args[i] == "-v") verbose = true;
     else if (args[i] == "--junit-output" && i + 1 < args.Length) junitOutput = args[++i];
+    else if (args[i] == "--auth-probe") authProbe = true;
     else if (!args[i].StartsWith("--")) host = args[i];
 }
 
@@ -74,9 +79,35 @@ var recordedResults = new List<RecordedResult>();
 void Log(string msg) { if (verbose) Console.Error.WriteLine(msg); }
 
 int exitCode = 1;
-try { exitCode = await RunTests(); }
+try { exitCode = authProbe ? await RunAuthenticationProbe() : await RunTests(); }
 catch (Exception ex) { Console.Error.WriteLine($"FATAL: {ex.Message}"); }
 return exitCode;
+
+async Task<int> RunAuthenticationProbe()
+{
+    var authBytes = Encoding.UTF8.GetBytes($"{user}:{password}");
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+    var tokenCapture = new MetadataTokenCapture();
+    try
+    {
+        var (rpc, ws, sessionEndedCts) = await Connect(authBytes, tokenCapture, cts.Token);
+        using (sessionEndedCts)
+        using (rpc)
+        using (ws)
+        {
+            // OpenConnection in Connect is the authentication boundary. Do not
+            // open a country-specific company here: that would turn a valid
+            // login into a false authentication failure on non-W1 artifacts.
+            Console.WriteLine("WebSocket/client-services authentication: PASS");
+            return 0;
+        }
+    }
+    catch (RemoteInvocationException ex) when (IsAuthenticationRejection(ex))
+    {
+        Console.Error.WriteLine($"AUTH_REJECTED: {ex.Message}");
+        return AuthenticationRejectedExitCode;
+    }
+}
 
 async Task<int> RunTests()
 {
@@ -411,23 +442,55 @@ async Task<JToken?> Invoke(JsonRpc rpc, JToken? formState, string action, Cancel
 
 async Task<(JsonRpc, ClientWebSocket, CancellationTokenSource)> Connect(byte[] authBytes, MetadataTokenCapture tc, CancellationToken ct)
 {
+    var currentPassword = V3Password.GenerateInner(password);
+    try
+    {
+        return await ConnectOnce(authBytes, currentPassword, tc, ct);
+    }
+    catch (RemoteInvocationException ex) when (IsAuthenticationRejection(ex))
+    {
+        // BC 26 requires a second, legacy-password slot. Later versions accept
+        // the current V3 value directly. Negotiate from server behavior instead
+        // of relying on BC_VERSION, which is absent in host-side runner paths.
+        Log("Current V3 credential was rejected; retrying with the BC 26 legacy slot.");
+        return await ConnectOnce(authBytes, currentPassword + "|", tc, ct);
+    }
+}
+
+async Task<(JsonRpc, ClientWebSocket, CancellationTokenSource)> ConnectOnce(
+    byte[] authBytes, string clientServicesPassword, MetadataTokenCapture tc, CancellationToken ct)
+{
     Log($"Connecting to ws://{host}/ws/connect");
     var sessionEndedCts = new CancellationTokenSource();
     var ws = new ClientWebSocket();
-    ws.Options.SetRequestHeader("Authorization", $"Basic {Convert.ToBase64String(authBytes)}");
-    await ws.ConnectAsync(new Uri($"ws://{host}/ws/connect"), ct);
-    var rpc = new JsonRpc(new WebSocketMessageHandler(ws));
-    rpc.TraceSource.Switch.Level = System.Diagnostics.SourceLevels.Verbose;
-    rpc.TraceSource.Listeners.Add(tc);
-    var callbacks = new Callbacks(sessionEndedCts);
-    rpc.AddLocalRpcTarget(callbacks);
-    callbacks.Rpc = rpc;
-    rpc.StartListening();
-    await rpc.InvokeWithCancellationAsync<JToken>("OpenConnection",
-        new object[] { new { LCID = 1033, DefaultLCID = 1033, TimeZoneId = "UTC", Credentials = new { UserName = user, Password = password } } }, ct);
-    Log("Connected.");
-    return (rpc, ws, sessionEndedCts);
+    JsonRpc? rpc = null;
+    try
+    {
+        ws.Options.SetRequestHeader("Authorization", $"Basic {Convert.ToBase64String(authBytes)}");
+        await ws.ConnectAsync(new Uri($"ws://{host}/ws/connect"), ct);
+        rpc = new JsonRpc(new WebSocketMessageHandler(ws));
+        rpc.TraceSource.Switch.Level = System.Diagnostics.SourceLevels.Verbose;
+        rpc.TraceSource.Listeners.Add(tc);
+        var callbacks = new Callbacks(sessionEndedCts);
+        rpc.AddLocalRpcTarget(callbacks);
+        callbacks.Rpc = rpc;
+        rpc.StartListening();
+        await rpc.InvokeWithCancellationAsync<JToken>("OpenConnection",
+            new object[] { new { LCID = 1033, DefaultLCID = 1033, TimeZoneId = "UTC", Credentials = new { UserName = user, Password = clientServicesPassword } } }, ct);
+        Log("Connected.");
+        return (rpc, ws, sessionEndedCts);
+    }
+    catch
+    {
+        rpc?.Dispose();
+        ws.Dispose();
+        sessionEndedCts.Dispose();
+        throw;
+    }
 }
+
+static bool IsAuthenticationRejection(Exception ex) =>
+    ex.Message.Contains("rejected the client credentials", StringComparison.OrdinalIgnoreCase);
 
 async Task<JToken?> OpenTestPage(JsonRpc rpc, MetadataTokenCapture tc, string company, CancellationToken ct)
 {

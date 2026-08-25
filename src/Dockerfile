@@ -49,6 +49,8 @@ RUN cd src/tools/PatchNclTestPage && dotnet publish -c Release -o /build/output/
 # `docker compose exec` instead of `dotnet run`, removing the host-side
 # .NET 8 SDK requirement for running tests against a Linux BC container.
 RUN cd tools/TestRunner && dotnet publish -c Release -o /build/output/tools/TestRunner 2>&1 | tail -3
+RUN cd tools/NavUserPasswordInspector && dotnet publish -c Release -o /build/output/tools/NavUserPasswordInspector 2>&1 | tail -3
+RUN /build/output/tools/NavUserPasswordInspector/NavUserPasswordInspector self-test
 
 # Native libSkiaSharp.so for BC's report renderer, one per SkiaSharp line
 # Microsoft has shipped (BC 28.x = 3.119.0; 2.88.9 covers the 2.88.x line).
