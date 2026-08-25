@@ -79,6 +79,11 @@ variables:
   # Example: 'BC27PLUS,BC28PLUS' for a version-gated matrix leg.
   PREPROCESSOR_SYMBOLS: ''
 
+  # Opt-in. Runs a NavUserPassword auth check (positive + negative) right
+  # after BC becomes healthy, before apps are published. Off by default —
+  # most repos don't need to test authentication on every run.
+  VERIFY_AUTHENTICATION: 'false'
+
   # ─── Optional: analyzers + ruleset ───────────────────────────────────
   # All off by default. Set to 'true' / fill in to enable. The compile
   # step fails the pipeline if any cop DLL fails to load (AD0001,
@@ -488,11 +493,13 @@ steps:
   - bash: |
       set -e
       cd "$(Agent.BuildDirectory)/bc-linux"
-      # Run before the positive-only publish/smoke path below, same as the
-      # reusable workflow: this is what catches a client-services wire-format
-      # regression instead of every later step passing with a wrong password.
+      # Opt-in (VERIFY_AUTHENTICATION above). When enabled, this runs before
+      # the positive-only publish/smoke path below, same as the reusable
+      # workflow: catches a client-services wire-format regression instead
+      # of every later step passing with a wrong password.
       ./scripts/test-authentication.sh
     displayName: 'Verify NavUserPassword authentication'
+    condition: eq(variables['VERIFY_AUTHENTICATION'], 'true')
 
   - bash: |
       set -e
