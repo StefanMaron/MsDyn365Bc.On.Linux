@@ -203,6 +203,23 @@ internal class StartupHook
     private static bool _encryptionBypassed;
     private static bool _encryptionApplying;
     private static object? _originalTopology;
+    // Patch #30 state — the poll timer that waits for Microsoft.Dynamics.Nav.Service.Dev
+    // to load must be rooted somewhere other than its own Elapsed handler (which is not
+    // a GC root). This container runs with DOTNET_gcServer=1, and a Gen2 collection
+    // during BC's heavy startup allocation could otherwise collect the timer before the
+    // target assembly ever loads, silently disabling the whole patch. See
+    // PatchNavAuthenticationChallenge's call site for where this is assigned.
+    private static System.Timers.Timer? _devAssemblyPollTimer;
+    // Patch #30: reflection handles resolved ONCE at patch-apply time (not per request)
+    // — see PatchNavAuthenticationChallenge for where these are populated.
+    private static FieldInfo? _devTenantAuthNextField;
+    private static PropertyInfo? _httpContextResponseProperty;
+    private static PropertyInfo? _httpResponseStatusCodeProperty;
+    private static PropertyInfo? _httpResponseHeadersProperty;
+    private static MethodInfo? _httpResponseOnStartingMethod;
+    private static PropertyInfo? _headerDictionaryIndexer;
+    private static MethodInfo? _headerDictionaryContainsKeyMethod;
+    private static ConstructorInfo? _stringValuesCtor;
 
     public static void Initialize()
     {
@@ -338,6 +355,7 @@ internal class StartupHook
         // once found, and immune to whatever undocumented load path BC uses.
         {
             var pollTimer = new System.Timers.Timer(TimeSpan.FromSeconds(2));
+            _devAssemblyPollTimer = pollTimer;
             pollTimer.Elapsed += (_, _) =>
             {
                 var asm = AppDomain.CurrentDomain.GetAssemblies()
@@ -345,6 +363,7 @@ internal class StartupHook
                 if (asm == null) return;
                 pollTimer.Stop();
                 pollTimer.Dispose();
+                _devAssemblyPollTimer = null;
                 PatchNavAuthenticationChallenge(asm);
             };
             pollTimer.AutoReset = true;
@@ -3802,9 +3821,21 @@ internal class StartupHook
     /// after next() returns — by then the downstream response has already been flushed;
     /// confirmed empirically with a standalone repro that a post-next() header-set is
     /// silently dropped) that adds the header if status ends up 401, then call the real
-    /// `next` (skipping only that middleware's own SaaS-tenant
-    /// EnableMembershipEntitlement checks, which are inert here — this container's
-    /// ExtensionAllowedTargetLevel is OnPrem, not a real SaaS tenant).
+    /// `next`.
+    ///
+    /// Decompiled the actual method body (ICSharpCode.Decompiler against the shipped
+    /// Microsoft.Dynamics.Nav.Service.Dev.dll) to verify what's being skipped, rather than
+    /// assume it. The ENTIRE body — both the SaaS extension-target check and the
+    /// prod-tenant "DevEndpointCalledForProdTenantMetric" / 405 check — is gated behind
+    /// one outer `if (ServerUserSettings.Instance.EnableMembershipEntitlement.Value)`, and
+    /// falls straight through to `return next(context)` when that flag is false. On an
+    /// OnPrem container this flag is false, so replicating that fallthrough is correct —
+    /// but the replacement now re-checks the SAME flag via reflection on every request
+    /// instead of assuming it's always false. It can't safely fall back to "the original
+    /// method" if the flag is ever true (JMP hooking overwrote that method's own entry
+    /// point in place — there's no surviving original to call), so it fails CLOSED
+    /// (500, loudly logged) instead. See Replacement_DevTenantAuthorizationInvokeAsync's
+    /// header comment for the full reasoning.
     /// </summary>
     private static void PatchNavAuthenticationChallenge(Assembly navServiceDevAsm)
     {
@@ -3826,6 +3857,77 @@ internal class StartupHook
                 return;
             }
 
+            // Cache all reflection lookups now, once, rather than paying MemberInfo
+            // resolution cost on every Dev Services request inside the replacement.
+            _devTenantAuthNextField = middlewareType.GetField("next", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (_devTenantAuthNextField == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #30: 'next' field not found, skipping");
+                return;
+            }
+
+            var httpContextType = invokeMethod.GetParameters()[0].ParameterType; // Microsoft.AspNetCore.Http.HttpContext
+            _httpContextResponseProperty = httpContextType.GetProperty("Response");
+            var httpResponseType = _httpContextResponseProperty?.PropertyType; // Microsoft.AspNetCore.Http.HttpResponse
+            if (httpResponseType == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #30: HttpContext.Response property not found, skipping");
+                return;
+            }
+            _httpResponseStatusCodeProperty = httpResponseType.GetProperty("StatusCode");
+            _httpResponseHeadersProperty = httpResponseType.GetProperty("Headers");
+            _httpResponseOnStartingMethod = httpResponseType.GetMethod("OnStarting", new[] { typeof(Func<Task>) });
+            // HttpResponse.Headers is DECLARED as IHeaderDictionary itself (not some
+            // concrete type that implements it), so the interface we want IS the
+            // declared property type — Type.GetInterfaces() only returns interfaces a
+            // type EXTENDS, never itself, so calling it here would (and did) return
+            // nothing. The runtime instance returned by GetValue is Kestrel's concrete
+            // HttpResponseHeaders, but resolving members against the interface type
+            // directly (known statically, no instance needed) is equivalent and cheaper.
+            var iHeaderDictionaryType = _httpResponseHeadersProperty?.PropertyType;
+            if (iHeaderDictionaryType == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #30: HttpResponse.Headers property not found, skipping");
+                return;
+            }
+            // ContainsKey(string) is declared on IDictionary<string, StringValues>, which
+            // IHeaderDictionary extends — GetMethod on an interface type does NOT search
+            // inherited interfaces, so it must be looked up on the base interface
+            // explicitly (confirmed: iHeaderDictionaryType.GetMethod("ContainsKey")
+            // returned null on a live container even though the interface type itself
+            // was resolved correctly). This project has no compile-time reference to
+            // ASP.NET Core/Microsoft.Extensions.Primitives, so the base interface is
+            // found purely via reflection over iHeaderDictionaryType.GetInterfaces()
+            // rather than a typeof(IDictionary&lt;string, StringValues&gt;) literal.
+            var iDictionaryStringStringValues = iHeaderDictionaryType.GetInterfaces()
+                .FirstOrDefault(i => i.IsGenericType
+                    && i.GetGenericTypeDefinition() == typeof(System.Collections.Generic.IDictionary<,>)
+                    && i.GetGenericArguments()[0] == typeof(string));
+            _headerDictionaryContainsKeyMethod = iHeaderDictionaryType.GetMethod("ContainsKey")
+                ?? iDictionaryStringStringValues?.GetMethod("ContainsKey");
+            _headerDictionaryIndexer = iHeaderDictionaryType.GetProperty("Item", new[] { typeof(string) });
+            var stringValuesType = _headerDictionaryIndexer?.PropertyType; // Microsoft.Extensions.Primitives.StringValues
+            _stringValuesCtor = stringValuesType?.GetConstructor(new[] { typeof(string) });
+
+            if (_httpResponseStatusCodeProperty == null || _httpResponseHeadersProperty == null
+                || _httpResponseOnStartingMethod == null || _headerDictionaryContainsKeyMethod == null
+                || _headerDictionaryIndexer == null || _stringValuesCtor == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #30: one or more required members not found, skipping " +
+                    $"(StatusCode={_httpResponseStatusCodeProperty != null}, Headers={_httpResponseHeadersProperty != null}, " +
+                    $"OnStarting={_httpResponseOnStartingMethod != null}, ContainsKey={_headerDictionaryContainsKeyMethod != null}, " +
+                    $"Indexer={_headerDictionaryIndexer != null}, StringValuesCtor={_stringValuesCtor != null}, " +
+                    $"iHeaderDictionaryType={iHeaderDictionaryType.FullName})");
+                return;
+            }
+
+            // NOTE: we do NOT keep a reference to `invokeMethod` to "call the original
+            // later" — ApplyJmpHook overwrites this exact method's entry point (both the
+            // precode AND, where found, the compiled code) in place. A MethodInfo.Invoke
+            // against it post-hook would just re-enter our own replacement and recurse
+            // forever. See Replacement_DevTenantAuthorizationInvokeAsync's header comment
+            // for how the EnableMembershipEntitlement-true case is actually handled.
+
             var replacement = typeof(StartupHook).GetMethod(
                 nameof(Replacement_DevTenantAuthorizationInvokeAsync),
                 BindingFlags.Static | BindingFlags.NonPublic)!;
@@ -3844,10 +3946,20 @@ internal class StartupHook
     /// explicit parameter (see Replacement_ShowForm's header comment for the general
     /// pattern), so the real signature here is (self, context).
     ///
-    /// Deliberately skips the original method's own body (the SaaS
-    /// EnableMembershipEntitlement / tenant-environment-type checks) and goes straight to
-    /// registering an OnStarting callback, then `next(context)` — see the header comment
-    /// on PatchNavAuthenticationChallenge for why both of those choices are safe/required.
+    /// The original method's body is ENTIRELY gated behind
+    /// ServerUserSettings.Instance.EnableMembershipEntitlement.Value (verified by
+    /// decompiling the shipped DLL — see PatchNavAuthenticationChallenge's header
+    /// comment). We can NOT call "the original method" when that flag is true: JMP
+    /// hooking overwrites this exact method's entry point (precode AND, where found,
+    /// the already-compiled code) in place — there is no surviving trampoline to the
+    /// pre-hook body, and a reflection Invoke against the same MethodInfo would just
+    /// re-enter this replacement and recurse forever. So when the flag is false (the
+    /// expected OnPrem case) we go straight to registering the OnStarting callback and
+    /// calling `next(context)`, matching the original's own fallthrough exactly. When
+    /// the flag is unexpectedly true, we deliberately fail CLOSED — log loudly and
+    /// return 500 — rather than silently either (a) skip the SaaS/prod-tenant checks
+    /// this patch was never validated against, or (b) pretend to call code that no
+    /// longer exists at this entry point.
     ///
     /// Deliberately NOT an `async` method, and does NOT await/ContinueWith on next's Task.
     /// Every other JMP-hooked replacement in this file is fully synchronous; an earlier
@@ -3859,38 +3971,60 @@ internal class StartupHook
     /// different codegen next to a raw-pointer JMP replacement is the leading suspect —
     /// not confirmed at the IL level, but avoiding async entirely here matches the same
     /// caution this file already applies everywhere else, and it fixed the hang.
+    ///
+    /// Downstream exceptions from `next` are allowed to propagate, matching what the
+    /// original method itself does (`return next(context)`, no try/catch). An earlier
+    /// version wrapped `next`'s invocation in try/catch and returned Task.CompletedTask
+    /// on failure — `nextDelegate.DynamicInvoke` wraps any SYNCHRONOUS exception thrown
+    /// before the callee's first await in a TargetInvocationException, and that catch
+    /// swallowed it, turning what should surface as a 500 (or propagate to whatever
+    /// caller awaits this Task) into a silent 200. Only our OWN reflection setup (the
+    /// OnStarting registration, run before `next` is ever reached) is wrapped in
+    /// try/catch — a failure there must not drop the request.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static object Replacement_DevTenantAuthorizationInvokeAsync(object self, object context)
     {
+        // Re-check the same flag the original method gates its entire body on, every
+        // request — don't assume the container's entitlement configuration never
+        // changes. See this method's header comment for why the true case fails
+        // closed instead of trying to call "the original" (there is no safe way to).
+        if (IsMembershipEntitlementEnabled())
+        {
+            Console.WriteLine("[StartupHook] Patch #30: EnableMembershipEntitlement is set — " +
+                "this patch was only validated for the OnPrem (flag-false) case and the " +
+                "original SaaS/prod-tenant checks can no longer be reached through this " +
+                "hooked entry point. Failing the request closed (500) instead of silently " +
+                "skipping those checks.");
+            return FailClosed(context);
+        }
+
+        var next = _devTenantAuthNextField!.GetValue(self);
+        if (next == null)
+        {
+            Console.WriteLine("[StartupHook] Patch #30: RequestDelegate 'next' field not found — request dropped");
+            return Task.CompletedTask;
+        }
+
+        // Register the header-fixup via HttpContext.Response.OnStarting — the
+        // documented mechanism for adding/modifying a header right before the
+        // response actually starts, regardless of which downstream component
+        // decided the status code. Registering AFTER next() returns is too late —
+        // by then the response is already flushed and header mutations are silently
+        // dropped (confirmed with a standalone minimal-repro ASP.NET Core app before
+        // touching this file again, after that exact failure mode wedged the whole
+        // Dev host on a live container). Only this registration step is try/caught —
+        // see the header comment on why `next` itself must not be.
         try
         {
-            var nextField = self.GetType().GetField("next", BindingFlags.Instance | BindingFlags.NonPublic);
-            var next = nextField?.GetValue(self);
-            if (next == null)
-            {
-                Console.WriteLine("[StartupHook] Patch #30: RequestDelegate 'next' field not found — request dropped");
-                return Task.CompletedTask;
-            }
-
-            // Register the header-fixup via HttpContext.Response.OnStarting — the
-            // documented mechanism for adding/modifying a header right before the
-            // response actually starts, regardless of which downstream component
-            // decided the status code. Registering AFTER next() returns is too late —
-            // by then the response is already flushed and header mutations are silently
-            // dropped (confirmed with a standalone minimal-repro ASP.NET Core app before
-            // touching this file again, after that exact failure mode wedged the whole
-            // Dev host on a live container).
-            var responseProp = context.GetType().GetProperty("Response");
-            var response = responseProp?.GetValue(context);
+            var response = _httpContextResponseProperty!.GetValue(context);
             if (response != null)
             {
-                var onStartingMethod = response.GetType().GetMethod("OnStarting", new[] { typeof(Func<Task>) });
                 Func<Task> callback = () =>
                 {
                     try
                     {
-                        AddChallengeHeaderIfNeeded(context);
+                        AddChallengeHeaderIfNeeded(response);
                     }
                     catch (Exception ex)
                     {
@@ -3898,28 +4032,110 @@ internal class StartupHook
                     }
                     return Task.CompletedTask;
                 };
-                onStartingMethod?.Invoke(response, new object[] { callback });
+                _httpResponseOnStartingMethod!.Invoke(response, new object[] { callback });
             }
-
-            // next is a RequestDelegate (Func<HttpContext, Task>) — invoke it directly as
-            // a delegate (Delegate.DynamicInvoke), NOT via MethodInfo.Invoke on its
-            // "Invoke" method; DynamicInvoke is the documented reflection-safe way to
-            // call an arbitrary delegate instance without needing its exact static type.
-            var nextDelegate = (Delegate)next;
-            return (Task)nextDelegate.DynamicInvoke(context)!;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[StartupHook] Patch #30: InvokeAsync replacement failed: {ex.GetType().Name}: {ex.Message}");
-            return Task.CompletedTask;
+            Console.WriteLine($"[StartupHook] Patch #30: OnStarting registration failed: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        // next is a RequestDelegate (Func<HttpContext, Task>) — invoke it directly as
+        // a delegate (Delegate.DynamicInvoke), NOT via MethodInfo.Invoke on its
+        // "Invoke" method; DynamicInvoke is the documented reflection-safe way to
+        // call an arbitrary delegate instance without needing its exact static type.
+        // Deliberately NOT wrapped in try/catch — see this method's header comment.
+        var nextDelegate = (Delegate)next;
+        try
+        {
+            return (Task)nextDelegate.DynamicInvoke(context)!;
+        }
+        catch (TargetInvocationException tie) when (tie.InnerException != null)
+        {
+            // DynamicInvoke always wraps synchronous exceptions from the callee in a
+            // TargetInvocationException. Unwrap so the original exception type/stack
+            // propagates to whatever awaits this Task, matching what a direct
+            // `next(context)` call (no reflection) would have thrown.
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(tie.InnerException).Throw();
+            throw; // unreachable, satisfies the compiler
         }
     }
 
     /// <summary>
-    /// If the response context ends up as a 401 with no WWW-Authenticate header yet, add
-    /// one. Pure reflection over HttpContext/HttpResponse/IHeaderDictionary — see
-    /// PatchNavAuthenticationChallenge's header comment for why the header is missing in
-    /// the first place.
+    /// True if ServerUserSettings.Instance.EnableMembershipEntitlement.Value is set.
+    /// Resolved fully via reflection on every call rather than cached at patch-apply
+    /// time, since — unlike the structural MethodInfo/PropertyInfo lookups cached in
+    /// PatchNavAuthenticationChallenge — this is a runtime VALUE that can change while
+    /// the process is up. If reflection fails for any reason, fail CLOSED (return true,
+    /// which routes the caller to FailClosed/500) rather than silently keep behaving as
+    /// if the flag were false — we'd rather break loudly on an unexpected shape than
+    /// quietly skip checks we can no longer prove don't apply.
+    /// </summary>
+    private static bool IsMembershipEntitlementEnabled()
+    {
+        try
+        {
+            // Verified via decompile: the type is Microsoft.Dynamics.Nav.Types.ServerUserSettings
+            // (NOT .Runtime — the decompiler's own `using` list for the middleware class
+            // pulled in several ...Runtime namespaces for OTHER types, which is what led
+            // to guessing this one wrong the first time; always re-check the specific
+            // type's own namespace, not a neighboring type's usings).
+            Type? settingsType = null;
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                settingsType = asm.GetType("Microsoft.Dynamics.Nav.Types.ServerUserSettings");
+                if (settingsType != null) break;
+            }
+            var instanceProp = settingsType?.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public);
+            var instance = instanceProp?.GetValue(null);
+            var entitlementProp = instance?.GetType().GetProperty("EnableMembershipEntitlement");
+            var entitlementSetting = entitlementProp?.GetValue(instance);
+            var valueProp = entitlementSetting?.GetType().GetProperty("Value");
+            var value = valueProp?.GetValue(entitlementSetting);
+            if (value is bool b) return b;
+
+            Console.WriteLine("[StartupHook] Patch #30: could not resolve EnableMembershipEntitlement " +
+                $"(settingsType={settingsType?.FullName}, instance={instance != null}, " +
+                $"entitlementSetting={entitlementSetting != null}, value={value}) — failing closed");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #30: EnableMembershipEntitlement check failed ({ex.GetType().Name}: {ex.Message}) — failing closed");
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Fail-closed path for the EnableMembershipEntitlement-true case: set 500 and
+    /// return a completed response body via reflection, without touching `next` at
+    /// all. See Replacement_DevTenantAuthorizationInvokeAsync's header comment for why
+    /// this is the safe choice over trying to reach code this JMP hook overwrote.
+    /// </summary>
+    private static object FailClosed(object context)
+    {
+        try
+        {
+            var response = _httpContextResponseProperty!.GetValue(context);
+            if (response != null)
+            {
+                _httpResponseStatusCodeProperty!.SetValue(response, 500);
+                var writeAsyncMethod = response.GetType().GetMethod("WriteAsync", new[] { typeof(string) });
+                var task = writeAsyncMethod?.Invoke(response, new object[] { string.Empty });
+                if (task is Task t) return t;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #30: FailClosed itself failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// If the response ends up as a 401 with no WWW-Authenticate header yet, add one.
+    /// Uses the MemberInfo cached once in PatchNavAuthenticationChallenge rather than
+    /// re-resolving reflection on every request.
     ///
     /// The header-dictionary indexer lookup MUST go through the IHeaderDictionary
     /// INTERFACE type, not the concrete runtime type. Kestrel's concrete implementation
@@ -3931,33 +4147,19 @@ internal class StartupHook
     /// the header value came back empty every time until the indexer was looked up via
     /// concreteType.GetInterfaces().First(i => i.Name == "IHeaderDictionary") instead.
     /// </summary>
-    private static void AddChallengeHeaderIfNeeded(object context)
+    private static void AddChallengeHeaderIfNeeded(object response)
     {
-        var responseProp = context.GetType().GetProperty("Response");
-        var response = responseProp?.GetValue(context);
-        if (response == null) return;
-
-        var statusCodeProp = response.GetType().GetProperty("StatusCode");
-        var statusCode = (int?)statusCodeProp?.GetValue(response);
+        var statusCode = (int?)_httpResponseStatusCodeProperty!.GetValue(response);
         if (statusCode != 401) return;
 
-        var headersProp = response.GetType().GetProperty("Headers");
-        var headers = headersProp?.GetValue(response);
+        var headers = _httpResponseHeadersProperty!.GetValue(response);
         if (headers == null) return;
 
-        var iHeaderDictionaryType = headers.GetType().GetInterfaces()
-            .FirstOrDefault(i => i.Name == "IHeaderDictionary");
-        if (iHeaderDictionaryType == null) return;
-
-        var containsKeyMethod = iHeaderDictionaryType.GetMethod("ContainsKey");
-        var alreadyHasChallenge = (bool?)containsKeyMethod?.Invoke(headers, new object[] { "WWW-Authenticate" }) ?? false;
+        var alreadyHasChallenge = (bool?)_headerDictionaryContainsKeyMethod!.Invoke(headers, new object[] { "WWW-Authenticate" }) ?? false;
         if (alreadyHasChallenge) return;
 
-        var indexer = iHeaderDictionaryType.GetProperty("Item", new[] { typeof(string) });
-        if (indexer == null) return;
-        var stringValuesType = indexer.PropertyType; // Microsoft.Extensions.Primitives.StringValues
-        var stringValues = Activator.CreateInstance(stringValuesType, "Basic realm=\"\"");
-        indexer.SetValue(headers, stringValues, new object[] { "WWW-Authenticate" });
+        var stringValues = _stringValuesCtor!.Invoke(new object[] { "Basic realm=\"\"" });
+        _headerDictionaryIndexer!.SetValue(headers, stringValues, new object[] { "WWW-Authenticate" });
         Console.WriteLine("[StartupHook] Patch #30: added WWW-Authenticate to a Dev Services 401 response");
     }
 
