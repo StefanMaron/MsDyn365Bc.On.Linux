@@ -1,5 +1,5 @@
 # Build stage: compile StartupHook + stubs + tools
-FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:8.0 AS builder
+FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:8.0-noble-amd64 AS builder
 
 # gcc needed for compiling Win32 P/Invoke stubs (kernel32_stubs.c → libwin32_stubs.so);
 # unzip for extracting libSkiaSharp.so out of NuGet packages (nupkg = zip)
@@ -9,9 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev u
 # .NET 10 SDK alongside the 8.0 SDK this image ships. BC 27/28 target net8.0,
 # BC 29 targets net10.0, and the framework-impersonating stubs + Cecil reference
 # assemblies have to be produced for BOTH. Deliberately installed on top of the
-# bookworm-based sdk:8.0 image rather than switching the base to sdk:10.0
-# (trixie): libwin32_stubs.so is compiled here with gcc and has to keep running
-# against the bookworm glibc in the aspnet:8.0 runtime stage.
+# noble-based sdk:8.0 image rather than switching the base to sdk:10.0
+# libwin32_stubs.so is compiled here with gcc and has to keep running
+# against the noble glibc in the aspnet:8.0 runtime stage.
 RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh && \
     bash /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/share/dotnet && \
     rm /tmp/dotnet-install.sh && \
@@ -106,7 +106,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libharfbuzz0b libfreetype6 fontconfig fonts-liberation && \
     sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen && \
     curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
-    echo "deb [signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql.list && \
+    echo "deb [signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main" > /etc/apt/sources.list.d/mssql.list && \
     ACCEPT_EULA=Y apt-get update && ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 

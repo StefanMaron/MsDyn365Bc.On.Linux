@@ -812,11 +812,11 @@ The fix is **additive, not a migration**: the image installs both shared
 frameworks side by side and picks per BC version at boot. Nothing about the
 .NET 8 path changed.
 
-- **`src/Dockerfile`** — the builder stays on the bookworm-based `sdk:8.0`
+- **`src/Dockerfile`** — the builder stays on the noble-based `sdk:8.0-noble-amd64`
   and adds the .NET 10 SDK via `dotnet-install.sh`. Do **not** switch the
   base to `sdk:10.0`: that image is trixie, and `libwin32_stubs.so` is
-  compiled here with gcc and has to keep running against the bookworm glibc
-  in the `aspnet:8.0` runtime stage. The runtime stage adds the .NET 10
+  compiled here with gcc and has to keep running against the noble glibc
+  in the `aspnet:8.0-noble-amd64` runtime stage. The runtime stage adds the .NET 10
   ASP.NET Core runtime the same way (which brings `Microsoft.NETCore.App`
   10 with it). A net8.0 app does **not** roll forward to 10 while 8 is
   installed, so BC 27/28 keep resolving 8.0.
