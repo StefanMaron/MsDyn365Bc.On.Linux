@@ -220,10 +220,12 @@ files = [i for i in infos if not i.is_dir()]
 
 # Pre-create every directory up front: zipfile's internal makedirs is not
 # race-safe, and the workers below extract concurrently.
-for i in files:
-    safe_filename = i.filename.replace('\\', '/').lstrip('/')
-    
-    d = os.path.dirname(safe_filename)
+dirs = {
+    os.path.dirname(i.filename.replace('\\', '/').lstrip('/'))
+    for i in files
+}
+
+for d in dirs:
     if d:
         os.makedirs(os.path.join(dest, d), exist_ok=True)
 
