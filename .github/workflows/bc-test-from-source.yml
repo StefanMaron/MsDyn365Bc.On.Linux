@@ -573,15 +573,15 @@ jobs:
           # Microsoft Test Runner and the entrypoint's TestRunnerExtension
           # publish would fail with AL1024 — exactly the bug that broke
           # the bc-copilot-blueprint debugging session before this fix.
-          ARGS="--app-json bc-linux/extensions/TestRunnerExtension/app.json"
+          ARGS=(--app-json bc-linux/extensions/TestRunnerExtension/app.json)
           while IFS= read -r d; do
             [ -z "$d" ] && continue
             if [ -f "project/$d/app.json" ]; then
-              ARGS="$ARGS --app-json project/$d/app.json"
+              ARGS+=(--app-json "project/$d/app.json")
             fi
           done <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
           KEEP_IDS=$(python3 bc-linux/scripts/resolve-keep-app-ids.py \
-            $ARGS \
+            "${ARGS[@]}" \
             --artifact-dir "$BC_ARTIFACTS_DIR")
           echo "Resolved keep set: $KEEP_IDS"
           echo "BC_CLEAR_ALL_APPS=selective" >> "$GITHUB_ENV"
@@ -781,13 +781,13 @@ jobs:
           # versions — the old glob-based staging silently failed
           # whenever an expected app moved (e.g. Tests-TestLibraries
           # under platform/applications/BaseApp/Test/ in BC 27.5).
-          ARGS=""
+          ARGS=()
           while IFS= read -r d; do
             [ -z "$d" ] && continue
-            [ -f "project/$d/app.json" ] && ARGS="$ARGS --app-json project/$d/app.json"
+            [ -f "project/$d/app.json" ] && ARGS+=(--app-json "project/$d/app.json")
           done <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
           python3 bc-linux/scripts/stage-symbols.py \
-            $ARGS \
+            "${ARGS[@]}" \
             --artifact-dir "$BC_ARTIFACTS_DIR" \
             --out-dir symbols \
             || true   # warnings about unresolved deps are non-fatal; AL compile gives the precise error if any
