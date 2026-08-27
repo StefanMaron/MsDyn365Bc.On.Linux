@@ -46,8 +46,8 @@ reproducible CI runs swap it for a release tag once one exists
 | `bc_version` | no | `27.5` | BC platform version |
 | `bc_country` | no | `w1` | BC country code |
 | `bc_type` | no | `sandbox` | `sandbox` or `onprem` |
-| `app_dirs` | no | `""` | Space-separated dirs containing `app.json` for production apps |
-| `test_app_dirs` | **yes** | — | Space-separated dirs containing `app.json` for test apps |
+| `app_dirs` | no | `""` | Newline-separated dirs containing `app.json` for production apps (a dir name can itself contain a space) |
+| `test_app_dirs` | **yes** | — | Newline-separated dirs containing `app.json` for test apps (a dir name can itself contain a space) |
 | `codeunit_range` | **yes** | — | IDs of your **test** codeunits to execute. Production app codeunits are published but not run. Accepts `"50000..99999"` (single AL range), `"50000..50100\|130450..130459"` (multiple ranges, pipe-separated), `"50000,50001,50002"` (explicit ids), or any mix. |
 | `al_tool_version` | no | *(auto-derived from bc_version)* | Linux AL compiler NuGet version. Auto-derived: BC 27 → `16.2.28.57946`, BC 28 → `17.0.34.45391`. Set explicitly to pin. |
 | `preprocessor_symbols` | no | `""` | Comma-separated preprocessor symbols for `/preprocessorsymbols` (e.g. `"BC27PLUS,BC28PLUS"`). |
@@ -126,8 +126,8 @@ All flavours:
 2. **Edit the `env:` block** at the top:
    - `BC_VERSION`, `BC_COUNTRY`, `BC_TYPE` — which Microsoft BC build to test
      against. Defaults: `27.5` / `w1` / `sandbox`.
-   - **From-source**: `APP_DIRS` and `TEST_APP_DIRS` — space-separated paths
-     to directories containing `app.json`.
+   - **From-source**: `APP_DIRS` and `TEST_APP_DIRS` — newline-separated paths
+     to directories containing `app.json` (a dir name can itself contain a space).
    - **Pre-built**: `APP_FILES` and `TEST_APP_FILES` — space-separated paths
      to `.app` files in your repo.
    - `CODEUNIT_RANGE` — IDs of your test codeunits. Accepts `70000..70099`
