@@ -210,6 +210,8 @@ _extract_zip() {
 import os, sys, zipfile
 from concurrent.futures import ThreadPoolExecutor
 
+os.path.altsep = '\\'
+
 zip_path, dest = sys.argv[1], sys.argv[2]
 
 with zipfile.ZipFile(zip_path) as zf:
@@ -218,7 +220,12 @@ files = [i for i in infos if not i.is_dir()]
 
 # Pre-create every directory up front: zipfile's internal makedirs is not
 # race-safe, and the workers below extract concurrently.
-for d in {os.path.dirname(i.filename) for i in files}:
+dirs = {
+    os.path.dirname(i.filename.replace('\\', '/').lstrip('/'))
+    for i in files
+}
+
+for d in dirs:
     if d:
         os.makedirs(os.path.join(dest, d), exist_ok=True)
 
