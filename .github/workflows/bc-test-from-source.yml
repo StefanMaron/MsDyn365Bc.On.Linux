@@ -132,12 +132,12 @@ on:
         type: boolean
         default: false
       app_dirs:
-        description: "Space-separated dirs containing app.json for production apps (compile order)"
+        description: "Newline-separated dirs containing app.json for production apps (compile order). Newline, not space, because a dir name can itself contain a space."
         required: false
         type: string
         default: ""
       test_app_dirs:
-        description: "Space-separated dirs containing app.json for test apps"
+        description: "Newline-separated dirs containing app.json for test apps. Newline, not space, because a dir name can itself contain a space."
         required: true
         type: string
       extra_symbols_artifact_name:
@@ -574,12 +574,12 @@ jobs:
           # publish would fail with AL1024 — exactly the bug that broke
           # the bc-copilot-blueprint debugging session before this fix.
           ARGS="--app-json bc-linux/extensions/TestRunnerExtension/app.json"
-          for d in $APP_DIRS $TEST_APP_DIRS; do
+          while IFS= read -r d; do
             [ -z "$d" ] && continue
             if [ -f "project/$d/app.json" ]; then
               ARGS="$ARGS --app-json project/$d/app.json"
             fi
-          done
+          done <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
           KEEP_IDS=$(python3 bc-linux/scripts/resolve-keep-app-ids.py \
             $ARGS \
             --artifact-dir "$BC_ARTIFACTS_DIR")
@@ -782,10 +782,10 @@ jobs:
           # whenever an expected app moved (e.g. Tests-TestLibraries
           # under platform/applications/BaseApp/Test/ in BC 27.5).
           ARGS=""
-          for d in $APP_DIRS $TEST_APP_DIRS; do
+          while IFS= read -r d; do
             [ -z "$d" ] && continue
             [ -f "project/$d/app.json" ] && ARGS="$ARGS --app-json project/$d/app.json"
-          done
+          done <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
           python3 bc-linux/scripts/stage-symbols.py \
             $ARGS \
             --artifact-dir "$BC_ARTIFACTS_DIR" \
@@ -845,7 +845,7 @@ jobs:
             fi
           fi
           echo "Patching app.json runtime → $EFFECTIVE_RUNTIME"
-          for d in $APP_DIRS $TEST_APP_DIRS; do
+          while IFS= read -r d; do
             [ -z "$d" ] && continue
             F="project/$d/app.json"
             [ -f "$F" ] || continue
@@ -860,7 +860,7 @@ jobs:
           else:
               print(f"  {p}: runtime already {sys.argv[2]}, skip")
           PYEOF
-          done
+          done <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
 
       # Opt-in only. Mirrors AL-Go's own Update-AppJsonProperties (called
       # from Compile.ps1 before every Windows build) — a caller like AL-Go
@@ -880,7 +880,7 @@ jobs:
           REVISION_NUMBER: ${{ inputs.app_version_revision }}
         run: |
           echo "Patching app.json version: major.minor=${MAJOR_MINOR:-<unchanged>} build=${BUILD_NUMBER:-<unchanged>} revision=${REVISION_NUMBER:-<unchanged>}"
-          for d in $APP_DIRS $TEST_APP_DIRS; do
+          while IFS= read -r d; do
             [ -z "$d" ] && continue
             F="project/$d/app.json"
             [ -f "$F" ] || continue
@@ -910,7 +910,7 @@ jobs:
           else:
               print(f"  {p}: version already {new_version}, skip")
           PYEOF
-          done
+          done <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
 
       - name: Compile AL apps (no publish yet)
         env:
@@ -1024,18 +1024,18 @@ jobs:
 
           # Compile production apps first so test apps can resolve them as deps.
           # Production apps always get the analyzer flags (when configured).
-          for d in $APP_DIRS; do
+          while IFS= read -r d; do
             [ -z "$d" ] && continue
             mkdir -p "project/$d/.alpackages"
             cp build/*.app "project/$d/.alpackages/" 2>/dev/null || true
             compile_dir "project/$d" "${ANALYZER_FLAGS[@]}"
-          done
+          done <<< "$APP_DIRS"
 
           # Test apps get analyzer flags only when explicitly opted in via
           # enable_code_analyzers_on_test_apps. AL-Go's default is false
           # (analyzers don't run on test apps) and we mirror that so the
           # behavior matches what consumers see today.
-          for d in $TEST_APP_DIRS; do
+          while IFS= read -r d; do
             [ -z "$d" ] && continue
             mkdir -p "project/$d/.alpackages"
             cp build/*.app "project/$d/.alpackages/" 2>/dev/null || true
@@ -1044,7 +1044,7 @@ jobs:
             else
               compile_dir "project/$d"
             fi
-          done
+          done <<< "$TEST_APP_DIRS"
 
           bash bc-linux/scripts/workflow-summary.sh end COMPILE
 
@@ -1064,16 +1064,16 @@ jobs:
         run: |
           set -e
           mkdir -p artifact-staging/Apps artifact-staging/TestApps
-          for d in $APP_DIRS; do
+          while IFS= read -r d; do
             [ -z "$d" ] && continue
             f="build/$(basename "$d").app"
             [ -f "$f" ] && cp "$f" artifact-staging/Apps/
-          done
-          for d in $TEST_APP_DIRS; do
+          done <<< "$APP_DIRS"
+          while IFS= read -r d; do
             [ -z "$d" ] && continue
             f="build/$(basename "$d").app"
             [ -f "$f" ] && cp "$f" artifact-staging/TestApps/
-          done
+          done <<< "$TEST_APP_DIRS"
           echo "Staged files:"
           find artifact-staging -type f
 
@@ -1142,14 +1142,14 @@ jobs:
               PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
             done
           fi
-          for d in $APP_DIRS $TEST_APP_DIRS; do
+          while IFS= read -r d; do
             [ -z "$d" ] && continue
             app="build/$(basename "$d").app"
             [ -f "$app" ] || { echo "missing: $app"; exit 1; }
             echo ">>> Publishing $app"
             bc_publish_app "$app" "$DEV" "$AUTH" || exit 1
             PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
-          done
+          done <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
           bash bc-linux/scripts/workflow-summary.sh count apps_published "$PUBLISHED_COUNT"
           # Track compile count too — same loop iteration shape, runs after compile.
           COMPILED_COUNT=$(ls build/*.app 2>/dev/null | wc -l)
@@ -1215,7 +1215,7 @@ jobs:
           # the bc-linux working dir (= ./build/junit-* relative to the
           # consumer's repo root after the workflow finishes).
           mkdir -p ../build
-          for d in $TEST_APP_DIRS; do
+          while IFS= read -r d; do
             [ -z "$d" ] && continue
             app="../build/$(basename "$d").app"
             [ -f "$app" ] || { echo "skip: $app (not built)"; continue; }
@@ -1300,7 +1300,7 @@ jobs:
               CODEUNITS_TOTAL=$((CODEUNITS_TOTAL + n))
             fi
             rm -f "$tmplog"
-          done
+          done <<< "$TEST_APP_DIRS"
           bash scripts/workflow-summary.sh count tests_total    "$TESTS_TOTAL"
           bash scripts/workflow-summary.sh count tests_passed   "$TESTS_PASSED"
           bash scripts/workflow-summary.sh count tests_failed   "$TESTS_FAILED"
