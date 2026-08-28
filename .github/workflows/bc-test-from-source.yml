@@ -1318,10 +1318,16 @@ jobs:
             exit 1
           fi
           if [ "$TESTS_TOTAL" -eq 0 ]; then
-            echo "ERROR: no tests ran (TESTS_TOTAL=0). Either the test app"
-            echo "       failed to install or the test framework didn't see"
-            echo "       any [Test] procedures."
-            exit 1
+            if [ -z "$TEST_APP_DIRS" ]; then
+              # No test apps were ever configured for this project - there was
+              # nothing to run, so zero is the correct result, not a failure.
+              echo "No test apps configured (test_app_dirs is empty) - nothing to test, skipping."
+            else
+              echo "ERROR: no tests ran (TESTS_TOTAL=0). Either the test app"
+              echo "       failed to install or the test framework didn't see"
+              echo "       any [Test] procedures."
+              exit 1
+            fi
           fi
 
       # Upload per-app JUnit XML as a workflow artifact even on test failure
