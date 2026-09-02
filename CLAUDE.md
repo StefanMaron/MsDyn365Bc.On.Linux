@@ -98,6 +98,8 @@ docker compose build bc && docker compose up -d --wait
 - ~29+ failures from `NSClientCallback.CreateDotNetHandle` NullRef on tests that need a UI session (Camera, Barcode, etc.).
 - Bucket 4 sequential test run previously crashed the container after Tests-Misc due to infinite recursion in Microsoft's `OfficeWordDocumentPictureMerger.ReplaceMissingImageWithTransparentImage` (stack overflow in `Nav.OpenXml`, triggered by `TestSendToEMailAndPDFVendor`). **Fixed by Patch #23** — `ReplaceMissingImageWithTransparentImage` is no-op'd via JMP hook so missing images are left in place and the session survives.
 
+- Platform-table captions (All Profile, User, Company, …) came back in Traditional Chinese inside English error messages (issue #52). Not a session-language problem: on Linux/ICU `CultureInfo.GetCultures` never yields plain `zh-TW`, so BC's `LanguageHelper` had no "CHT" entry and the CaptionML parser filed the Chinese text under the English LCID, first in line. **Fixed by Patch #31** (rebuilds the abbreviation table with the ICU-hidden cultures); `extensions/smoke-test` carries a regression guard. Details in `KNOWN-LIMITATIONS.md`.
+
 When adding a new patch, append it to the numbered list in the `StartupHook.cs` header comment AND `KNOWN-LIMITATIONS.md` if it closes a known failure mode.
 
 ## Extension publish/install architecture (consumer-driven, no hand-curated lists)

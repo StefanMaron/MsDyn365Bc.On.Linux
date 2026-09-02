@@ -242,3 +242,33 @@ Patch #22b header comment in `StartupHook.cs` for the full root cause
 (and its dependencies — Continia System Application, Continia Core,
 Continia Connector App — plus its own Trial Balance VAT DACH add-on)
 all install successfully against a freshly created container.
+
+## ~~Platform-table captions come back in Traditional Chinese inside English error messages~~ (FIXED — Patch #31, issue #52)
+
+Symptom: `標題 must have a value in 所有設定檔: 範圍=租用戶, 應用程式識別碼=…, 設定檔識別碼=…. It cannot be zero or empty.`
+The message template is English — the session really is running with
+`GlobalLanguage()=1033` — but every caption belonging to a **platform/virtual
+table** (All Profile, User, Company, their fields and option values) is
+rendered in zh-TW. Base Application tables are unaffected, and forcing
+`GLOBALLANGUAGE(1033)` changes nothing, which is why this looked like a
+session leak and wasn't one.
+
+Root cause, verified against a live 27.0 container by calling Microsoft's own
+code: platform table metadata (embedded System package in
+`Microsoft.BusinessCentral.SystemApp.dll`) carries alphabetically ordered
+CaptionML strings keyed by Windows three-letter names
+(`…;CHT=所有設定檔;…;ENU=All Profile;…`). `LanguageHelper` maps those
+abbreviations to LCIDs from `CultureInfo.GetCultures(AllCultures)`, and on
+Linux (.NET on ICU) Chinese is only enumerated as `zh-Hant-TW`/`zh-Hans-CN`
+with LCID 4096, which BC filters out — plain `zh-TW` (1028, `CHT`) is never
+seen. Unknown abbreviations fall back to 1033, so the Chinese text is stored
+under the English LCID, first in the list, and every first-match lookup for
+1033 returns it. `GetLanguageIdByAbbreviatedName("CHT")` really returned 1033
+and `MultiLanguage.Parse("…CHT=x;…ENU=y").GetText(1033)` really returned `x`.
+
+Patch #31 hooks the `LanguageHelper` constructor and rebuilds its table from
+`WindowsLanguageHelper.AllCultures` plus the cultures ICU hides
+(`zh-TW`, `zh-HK`, `zh-MO`, `zh-SG`, …). All 49 abbreviations used by the
+platform's CaptionML resolve to their Windows LCIDs afterwards; on Windows the
+augmentation is a no-op. Session language selection is untouched, so a test
+that deliberately switches to zh-TW still gets Chinese captions.
