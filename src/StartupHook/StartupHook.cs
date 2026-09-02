@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -154,6 +155,24 @@ using System.Threading.Tasks;
 ///   request before routing/auth-decision finalization) to register an HttpResponse.OnStarting
 ///   callback that adds the header when the response ends up 401. See PatchNavAuthenticationChallenge
 ///   for the full root-cause writeup and why several other approaches were rejected.
+///
+/// Patch #31: LanguageHelper..ctor (Nav.Types.dll) — issue #52, Chinese captions in English sessions
+///   Platform (system/virtual) table captions ship as CaptionML strings keyed by Windows
+///   three-letter language names ("BGR=…;CHS=…;CHT=所有設定檔;…;ENU=All Profile;…").
+///   MultiLanguage.Parse maps each abbreviation to an LCID through LanguageHelper, whose table
+///   is built from CultureInfo.GetCultures(AllCultures) filtered to cultures with a real LCID.
+///   On Linux (.NET/ICU) Chinese is enumerated only as script-qualified names (zh-Hant-TW,
+///   zh-Hans-CN, …) whose LCID is 4096 (LOCALE_CUSTOM_UNSPECIFIED), so they are filtered out
+///   and "CHT" never enters the table. Unknown abbreviations fall back to DefaultLanguageId
+///   (1033), so the Chinese text is stored under the English LCID — and because CaptionML is
+///   alphabetical and every lookup is first-match, "CHT" shadows "ENU" for EVERY caption
+///   lookup on those tables, regardless of session language (GlobalLanguage was verified 1033).
+///   AL apps are unaffected: their xlf lines resolve LCIDs via CultureInfo.GetCultureInfo(name).
+///   Fix: rebuild the two LanguageHelper dictionaries from WindowsLanguageHelper.AllCultures
+///   plus the script-stripped cultures ICU refuses to enumerate (zh-TW/1028/CHT,
+///   zh-HK/3076/ZHH, …), ordered by LCID exactly like the original iteration. On Windows the
+///   augmentation finds nothing, so the result is identical to the stock table. The session
+///   language is NOT touched: a test that calls GLOBALLANGUAGE(1028) still gets Chinese.
 ///
 /// JMP hooks work ONLY on BC methods (JIT-compiled). BCL methods are ReadyToRun pre-compiled
 /// and cannot be patched this way.
@@ -531,6 +550,14 @@ internal class StartupHook
         {
             Console.WriteLine("[StartupHook] Nav.Types.dll loaded — patching");
             PatchNavTypes(args.LoadedAssembly);
+        }
+
+        // Patch #31: complete LanguageHelper's three-letter language table on ICU (issue #52).
+        // Must be hooked before the lazily-created LanguageHelper singleton is first used;
+        // assembly load is the earliest point, and no code from the assembly has run yet.
+        if (name == "Microsoft.Dynamics.Nav.Types")
+        {
+            PatchLanguageHelperCultureTable(args.LoadedAssembly);
         }
 
         // Patch #15: Remove .NET runtime directory from server-side compiler's assembly probing.
@@ -3779,6 +3806,219 @@ internal class StartupHook
             Console.WriteLine($"[StartupHook] Patch #29 failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
+
+    // ========================================================================
+    // Patch #31: LanguageHelper..ctor — complete the three-letter language table
+    // on ICU (GitHub issue #52: Chinese captions inside English error messages)
+    // ------------------------------------------------------------------------
+    // Symptom: "標題 must have a value in 所有設定檔: 範圍=租用戶, …" — the message
+    // template is English (session language really is 1033) but every caption
+    // of a PLATFORM table (All Profile, User, Company, their fields and option
+    // values) comes back in Traditional Chinese. Base Application tables are
+    // fine.
+    //
+    // Mechanism (all verified against a live 27.0 container):
+    //   * Platform table metadata lives in the System package embedded in
+    //     Microsoft.BusinessCentral.SystemApp.dll. Its captions are CaptionML
+    //     strings keyed by Windows three-letter language names, alphabetically
+    //     ordered: "BGR=…;CHS=…;CHT=所有設定檔;CSY=…;…;ENU=All Profile;…".
+    //   * MultiLanguage.Parse turns each abbreviation into an LCID with
+    //     LanguageHelper.GetLanguageIdByAbbreviatedName, which returns
+    //     NavResourceManager.DefaultLanguageId (1033) for anything it doesn't
+    //     know.
+    //   * LanguageHelper's table comes from WindowsLanguageHelper.AllCultures =
+    //     CultureInfo.GetCultures(AllCultures) filtered by ValidLanguageId
+    //     (1024 ≤ LCID ≤ 61439, LCID % 1024 ≠ 0). On Linux .NET runs on ICU,
+    //     which enumerates Chinese only as script-qualified cultures
+    //     (zh-Hant-TW, zh-Hans-CN, zh-Hant-HK, …) with LCID 4096 — filtered
+    //     out — while plain zh-TW (1028, "CHT") is never enumerated at all.
+    //     Microsoft already special-cases 2052 (zh-CN) and 1034 in
+    //     SpecialCultures; 1028 has no such entry.
+    //   * So "CHT" → 1033, the parsed MultiLanguage holds TWO 1033 entries,
+    //     the Chinese one first, and both MultiLanguage.GetText and
+    //     NCLLookupArray.TryGetValue are first-match. English never wins.
+    //
+    // Fix: hook the private LanguageHelper constructor and fill its two
+    // dictionaries ourselves from AllCultures PLUS the cultures ICU hides
+    // (found by stripping the script subtag from every LCID-less
+    // lang-Script-REGION culture and re-resolving it), iterated in LCID order
+    // exactly like the original. Net effect on 27.0/W1: CHT → 1028 and
+    // ZHH → 3076 (zh-HK, which Windows also picks over zh-Hant/31748); every
+    // other abbreviation in the platform's CaptionML resolves as before. On
+    // Windows the augmentation finds nothing and the table is byte-identical.
+    //
+    // Deliberately NOT done: forcing English. The fix corrects the data, not
+    // the language selection, so GLOBALLANGUAGE(1028) in a test still yields
+    // Chinese captions — which is now the correct answer instead of an
+    // accident.
+    //
+    // Hook target choice: the ctor has a loop and ~120 bytes of IL, so the
+    // JIT will not inline it (Patch #22 already relies on ctor hooks).
+    // LanguageHelper.GetLanguageIdByAbbreviatedName and
+    // WindowsLanguageHelper.GetDistinctCultures are both tiny and would be
+    // inlined into their same-assembly callers, defeating a JMP hook.
+    // ========================================================================
+    private static bool _patchedLanguageHelper;
+    private static Type? _languageHelperType;
+    private static Type? _windowsLanguageHelperType;
+
+    private static void PatchLanguageHelperCultureTable(Assembly navTypes)
+    {
+        if (_patchedLanguageHelper || IsPatchDisabled("31")) return;
+        try
+        {
+            _languageHelperType = navTypes.GetType("Microsoft.Dynamics.Nav.Types.LanguageHelper");
+            _windowsLanguageHelperType = navTypes.GetType("Microsoft.Dynamics.Nav.Types.WindowsLanguageHelper");
+            if (_languageHelperType == null || _windowsLanguageHelperType == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #31: LanguageHelper/WindowsLanguageHelper not found — skipped");
+                return;
+            }
+
+            var ctor = _languageHelperType.GetConstructor(
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, null, Type.EmptyTypes, null);
+            var namesField = _languageHelperType.GetField("languageThreeLetterNames", BindingFlags.Instance | BindingFlags.NonPublic);
+            var idsField = _languageHelperType.GetField("languageIdsByAbbreviatedNames", BindingFlags.Instance | BindingFlags.NonPublic);
+            var allCulturesField = _windowsLanguageHelperType.GetField("AllCultures", BindingFlags.Static | BindingFlags.Public);
+            if (ctor == null || namesField == null || idsField == null || allCulturesField == null
+                || namesField.FieldType != typeof(Dictionary<int, string>)
+                || idsField.FieldType != typeof(Dictionary<string, int>)
+                || allCulturesField.FieldType != typeof(CultureInfo[]))
+            {
+                // The shape we replicate has changed — better to leave the stock ctor alone
+                // than to construct a LanguageHelper we don't understand.
+                Console.WriteLine("[StartupHook] Patch #31: LanguageHelper shape not recognised — skipped");
+                return;
+            }
+
+            var replacement = typeof(StartupHook).GetMethod(nameof(Replacement_LanguageHelperCtor),
+                BindingFlags.Public | BindingFlags.Static)!;
+            ApplyJmpHook(ctor, replacement, "LanguageHelper..ctor (Patch #31)");
+            _patchedLanguageHelper = true;
+            Console.WriteLine("[StartupHook] Patch #31: LanguageHelper..ctor hooked (ICU-complete language table)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #31 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Replaces the private LanguageHelper() constructor. Same algorithm as the
+    /// original (iterate cultures in LCID order, first abbreviation wins), over
+    /// WindowsLanguageHelper.AllCultures plus the cultures ICU does not enumerate.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void Replacement_LanguageHelperCtor(object self)
+    {
+        var helperType = _languageHelperType ?? self.GetType();
+        var namesField = helperType.GetField("languageThreeLetterNames", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var idsField = helperType.GetField("languageIdsByAbbreviatedNames", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        // Reading the static field runs WindowsLanguageHelper's cctor if needed — exactly
+        // what the original ctor's first line (AllCultures.Length) does.
+        var allCultures = (CultureInfo[])_windowsLanguageHelperType!
+            .GetField("AllCultures", BindingFlags.Static | BindingFlags.Public)!.GetValue(null)!;
+
+        List<CultureInfo> extras;
+        try
+        {
+            extras = FindCulturesHiddenByIcu(allCultures, ReadPseudoLanguageIds());
+        }
+        catch (Exception ex)
+        {
+            // Never let the augmentation take LanguageHelper down with it; fall back to the
+            // stock table (i.e. the pre-patch behaviour).
+            Console.WriteLine($"[StartupHook] Patch #31: culture augmentation failed, using stock table: {ex.GetType().Name}: {ex.Message}");
+            extras = new List<CultureInfo>();
+        }
+
+        // AllCultures is sorted by LCID (CultureInfoComparer); keep that order after merging so
+        // the "first abbreviation wins" rule picks the same culture Windows would.
+        var merged = allCultures.Concat(extras).OrderBy(c => c.LCID).ToList();
+        var names = new Dictionary<int, string>(merged.Count);
+        var ids = new Dictionary<string, int>(merged.Count);
+        foreach (var culture in merged)
+        {
+            int lcid = culture.LCID;
+            string abbrev = culture.ThreeLetterWindowsLanguageName;
+            // Original: skip when the abbreviation is taken. The LCID guard is extra: the
+            // original's Dictionary.Add would throw on a duplicate LCID, and a throwing
+            // ctor would leave BC without any language table at all.
+            if (ids.ContainsKey(abbrev) || names.ContainsKey(lcid)) continue;
+            names.Add(lcid, abbrev);
+            ids.Add(abbrev, lcid);
+        }
+
+        namesField.SetValue(self, names);
+        idsField.SetValue(self, ids);
+
+        Console.WriteLine(extras.Count == 0
+            ? $"[StartupHook] Patch #31: language table built from {allCultures.Length} cultures (nothing to add on this runtime)"
+            : $"[StartupHook] Patch #31: language table built from {allCultures.Length} cultures + {extras.Count} ICU-hidden: "
+              + string.Join(", ", extras.Select(c => $"{c.Name}/{c.LCID}/{c.ThreeLetterWindowsLanguageName}")));
+    }
+
+    private static int[] ReadPseudoLanguageIds()
+    {
+        try
+        {
+            return _windowsLanguageHelperType?
+                .GetField("PseudoLanguages", BindingFlags.Static | BindingFlags.NonPublic)?
+                .GetValue(null) as int[] ?? Array.Empty<int>();
+        }
+        catch
+        {
+            return Array.Empty<int>();
+        }
+    }
+
+    /// <summary>
+    /// Cultures that Windows NLS enumerates but ICU only exposes under a
+    /// script-qualified name with no LCID: for every lang-Script-REGION culture
+    /// whose LCID is 4096, try lang-REGION. Returns only cultures that carry a
+    /// real Windows LCID and three-letter name and are not already known.
+    /// Empty on Windows, where GetCultures already yields zh-TW, zh-HK, ….
+    /// </summary>
+    internal static List<CultureInfo> FindCulturesHiddenByIcu(IReadOnlyCollection<CultureInfo> known, int[] pseudoLanguageIds)
+    {
+        const int LocaleCustomUnspecified = 4096;
+        var knownNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var knownLcids = new HashSet<int>();
+        foreach (var c in known)
+        {
+            knownNames.Add(c.Name);
+            knownLcids.Add(c.LCID);
+        }
+
+        var result = new List<CultureInfo>();
+        foreach (var culture in CultureInfo.GetCultures(CultureTypes.AllCultures))
+        {
+            if (culture.LCID != LocaleCustomUnspecified) continue;
+            var parts = culture.Name.Split('-');
+            if (parts.Length != 3 || parts[1].Length != 4) continue; // lang-Script-REGION only
+            var stripped = parts[0] + "-" + parts[2];
+            if (knownNames.Contains(stripped)) continue;
+
+            CultureInfo candidate;
+            try { candidate = CultureInfo.GetCultureInfo(stripped); }
+            catch (CultureNotFoundException) { continue; }
+
+            int lcid = candidate.LCID;
+            // Mirrors WindowsLanguageHelper.ValidLanguageId.
+            if (lcid < 1024 || lcid > 61439 || lcid % 1024 == 0) continue;
+            if (Array.IndexOf(pseudoLanguageIds, lcid) >= 0) continue;
+            if (knownLcids.Contains(lcid)) continue;
+            var abbrev = candidate.ThreeLetterWindowsLanguageName;
+            if (string.IsNullOrEmpty(abbrev) || abbrev == "ZZZ") continue; // no Windows name known
+
+            knownNames.Add(stripped);
+            knownLcids.Add(lcid);
+            result.Add(candidate);
+        }
+        return result;
+    }
+
 
     /// <summary>
     /// Patch #30: the Dev Services (/BC/dev/*) endpoint never sends a WWW-Authenticate
