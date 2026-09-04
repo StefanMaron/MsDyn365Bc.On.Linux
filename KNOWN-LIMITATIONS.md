@@ -272,3 +272,63 @@ Patch #31 hooks the `LanguageHelper` constructor and rebuilds its table from
 platform's CaptionML resolve to their Windows LCIDs afterwards; on Windows the
 augmentation is a no-op. Session language selection is untouched, so a test
 that deliberately switches to zh-TW still gets Chinese captions.
+
+## ~~Random "Unexpected CLR exception thrown." NullReferenceException on any AL statement~~ (FIXED — Patch #32/#32b)
+
+Symptom: one test in one codeunit, in an otherwise green run, fails with
+
+```
+Unexpected CLR exception thrown.: System.NullReferenceException
+  at BclLicenseDataReader.ILicenseDataReader.TryGetPermissionMask(...)
+  at NavLicense.GetLicensePermissionMask(...)
+  at NavDatabaseSecurityAndLicense.<>c.<.ctor>b__13_0(ApplicationObjectId)
+  at NavDatabaseSecurityAndLicense.GetLicensePermissions(...)
+  at LicensePermissionSet.FetchPermissions()
+  ...
+  at RecordImplementation.VerifyPermissions(...)
+```
+
+The AL frame at the bottom is arbitrary — whatever statement happened to need
+a permission check. Observed on `Record.DeleteAll` inside a fixture-cleanup
+`Initialize`. Rerunning passes. Sibling BC versions on the same commit pass.
+
+Root cause is a use-after-dispose race in Microsoft's own code, not anything
+Linux-specific — there is no Win32 API anywhere in the chain:
+
+```csharp
+// BclLicenseDataReader — the ENTIRE Dispose body
+void IDisposable.Dispose() { reader = null; }
+
+// ...and every accessor, unguarded
+bool TryGetPermissionMask(ObjectType t, int n, out PermissionMask m) {
+    m = PermissionMask.None;
+    var p = reader.GetObjectRangePermission(...);   // NRE
+```
+
+`NavDatabase.Dispose` → `NavDatabaseSecurityAndLicense.Dispose` →
+`NavLicense.Dispose` → that. Meanwhile the reader side is unsynchronized:
+`GetLicensePermissions` holds `licenseLock` only around its memo-cache reads
+and writes, and calls the actual license lookup
+(`NavCurrentThread.Session.License.GetLicensePermissionMask`) between them
+holding nothing. So a database teardown concurrent with a running session
+gives that session an NRE.
+
+bc-linux does not cause the race but is unusually good at provoking it:
+`run-tests-altool.py`'s default `cli` transport starts a fresh BC session per
+codeunit, and `run-tests-hybrid.py` runs a websocket leg concurrently, so
+session start and database teardown overlap continuously for the length of a
+run. One bad landing in a 300-codeunit run reddens the leg.
+
+**Patch #32** no-ops `NavLicense.Dispose(bool)` and **Patch #32b** no-ops
+`NavDatabaseSecurityAndLicense.Dispose(bool)`. Both bodies are teardown
+bookkeeping: `isDisposed` is read nowhere but inside the Dispose that writes
+it, and the owner nulls its own reference regardless, so the object graph
+still becomes unreachable at the same instant. #32b additionally skips
+`ReaderWriterLockSlim.Dispose` — deliberate, because that lock is the other
+half of the same window (a race landing on `EnterReadLock` gets
+`ObjectDisposedException` instead of the NRE), and an undisposed RWLS costs
+at most three finalizer-reclaimed wait events per NavDatabase.
+
+Both patches shape-check the fields they reasoned about and skip themselves
+with a log line if Microsoft changes the type, so a future BC that gives these
+types a real resource to release will not silently leak it.

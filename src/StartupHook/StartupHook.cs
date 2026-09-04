@@ -174,6 +174,44 @@ using System.Threading.Tasks;
 ///   augmentation finds nothing, so the result is identical to the stock table. The session
 ///   language is NOT touched: a test that calls GLOBALLANGUAGE(1028) still gets Chinese.
 ///
+/// Patch #32: NavLicense.Dispose(bool) (Nav.Ncl.dll) — license teardown races an active session
+///   NavDatabase.Dispose tears down its NavDatabaseSecurityAndLicense, which disposes the
+///   NavLicense, which does `dataReader?.Dispose(); dataReader = null;`. BclLicenseDataReader
+///   .Dispose is literally `reader = null;` and every one of its readers — TryGetPermissionMask
+///   included — dereferences `reader` with no null check. Meanwhile
+///   NavDatabaseSecurityAndLicense.GetLicensePermissions calls getLicenseFunc (→
+///   NavCurrentThread.Session.License.GetLicensePermissionMask) OUTSIDE its licenseLock. So a
+///   database torn down while a session is still executing AL gives that session a
+///   NullReferenceException inside BclLicenseDataReader.TryGetPermissionMask — surfaced to the
+///   test runner as "Unexpected CLR exception thrown." on whatever statement happened to need a
+///   permission check (observed: ALTFixtureCleanup.Initialize → Record.DeleteAll).
+///   Not Linux-specific — nothing in the path is a Win32 API — but bc-linux provokes it hard:
+///   the altool runner's `cli` transport opens a fresh session per codeunit, and the hybrid
+///   runner runs a second websocket leg concurrently, so database teardown and session start
+///   overlap constantly. One flaky failure in a 315-codeunit run is enough to redden a leg.
+///   Fix: no-op Dispose(bool). Its entire body is GC bookkeeping — no unmanaged resource, no
+///   handle, and `isDisposed` is read nowhere but inside Dispose itself. The owning
+///   NavDatabaseSecurityAndLicense nulls its own `license` field regardless, so the whole graph
+///   still becomes unreachable at the same instant; nothing is retained. A session that races
+///   the teardown now reads a still-valid license instead of crashing.
+///   Method body verified byte-identical on BC 27.0, 28.0 and 28.4.
+///
+/// Patch #32b: NavDatabaseSecurityAndLicense.Dispose(bool) (Nav.Ncl.dll)
+///   The same teardown, one frame out, and the sibling of the window #32 closes.
+///   GetLicensePermissions brackets its memo-cache with licenseLock.EnterReadLock() /
+///   EnterUpgradeableReadLock(); Dispose calls licenseLock.Dispose() from the teardown
+///   thread. So a race that lands on either Enter gets ObjectDisposedException
+///   (ReaderWriterLockSlim) rather than the NullReferenceException #32 fixes — same trigger,
+///   same session, different exception. Fixing only #32 would swap one flake for another.
+///   Fix: no-op Dispose(bool). Unlike #32 this one DOES skip a real Dispose call — the
+///   ReaderWriterLockSlim's. That is acceptable and deliberate: RWLS holds no OS handle of
+///   its own, only up to three lazily-created wait events that the finalizer reclaims, there
+///   is exactly one lock per NavDatabase, and the object graph still becomes unreachable when
+///   NavDatabase drops it. `isDisposed` is read nowhere but inside Dispose itself, the type
+///   has no subclasses (so hooking the base cannot be bypassed by an override), and `license
+///   = null` is redundant once the owner is going away.
+///   Method body verified byte-identical on BC 27.0 and 28.0.
+///
 /// JMP hooks work ONLY on BC methods (JIT-compiled). BCL methods are ReadyToRun pre-compiled
 /// and cannot be patched this way.
 ///
@@ -600,6 +638,15 @@ internal class StartupHook
         if (name == "Microsoft.Dynamics.Nav.Ncl")
         {
             PatchNavFileExpandFileName(args.LoadedAssembly);
+        }
+
+        // Patch #32: NavLicense.Dispose(bool) races an in-flight session's permission check
+        // and hands it a NullReferenceException from BclLicenseDataReader. No-op the dispose;
+        // it is pure GC bookkeeping. See the header comment for the full chain.
+        if (name == "Microsoft.Dynamics.Nav.Ncl")
+        {
+            PatchNavLicenseDispose(args.LoadedAssembly);
+            PatchNavDatabaseSecurityAndLicenseDispose(args.LoadedAssembly);
         }
 
         // Patch #21: NavOpenTaskPageAction.ShowForm crashes on Linux when a test opens a
@@ -3761,6 +3808,191 @@ internal class StartupHook
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     public static object? Replacement_ReturnNull_1Arg(object? self) { return null; }
+
+    /// <summary>
+    /// No-op replacement for an instance `void Dispose(bool)`. The receiver arrives as the
+    /// first explicit argument; the bool is ignored.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Replacement_NoOp_ObjectBool(object self, bool disposing) { }
+
+    // ========================================================================
+    // Patch #32: NavLicense.Dispose(bool) — stop license teardown from killing
+    // an in-flight session's permission check
+    // ------------------------------------------------------------------------
+    // The chain, all inside Nav.Ncl:
+    //
+    //   NavDatabase.Dispose(bool)
+    //     -> NavDatabaseSecurityAndLicense.Dispose(bool)
+    //          licenseLock.Dispose();
+    //          license.Dispose(); license = null;
+    //     -> NavLicense.Dispose(bool)
+    //          dataReader?.Dispose(); dataReader = null;
+    //     -> BclLicenseDataReader.IDisposable.Dispose()
+    //          reader = null;                      // that is the ENTIRE body
+    //
+    // and on the reader side, every accessor dereferences `reader` unguarded:
+    //
+    //   bool TryGetPermissionMask(ObjectType t, int n, out PermissionMask m) {
+    //       m = PermissionMask.None;
+    //       var p = reader.GetObjectRangePermission(...);   // NRE once disposed
+    //
+    // The two sides are not serialized against each other. NavDatabaseSecurityAndLicense
+    // .GetLicensePermissions takes licenseLock only around its memo-cache reads and
+    // writes; the actual license lookup —
+    //   getLicenseFunc = id => NavCurrentThread.Session.License.GetLicensePermissionMask(...)
+    // — runs between the read lock and the upgradeable read lock, holding nothing. So a
+    // NavDatabase teardown concurrent with a running session hands that session a
+    // NullReferenceException from inside Microsoft's license reader, on whatever AL
+    // statement happened to trigger a permission check.
+    //
+    // Fix: no-op Dispose(bool). Justification for why that is free rather than a leak:
+    //
+    //   * The body releases nothing. There is no unmanaged resource, no OS handle, no
+    //     finalizer to suppress beyond the GC.SuppressFinalize the public Dispose() already
+    //     does. Setting fields to null is a GC hint, not a release.
+    //   * `isDisposed` is read in exactly one place — Dispose(bool) itself (verified with a
+    //     field-usage scan across the assembly). Nothing else changes behaviour once the
+    //     license is "disposed", so skipping the flag is not observable.
+    //   * The owner drops the reference anyway: NavDatabaseSecurityAndLicense.Dispose sets
+    //     its own `license` field to null immediately after. The NavLicense, its dataReader
+    //     and the parsed license content therefore become unreachable at the same moment
+    //     they would have before — the graph is collected, just one hop later.
+    //
+    // Net effect: a session that races the teardown reads a still-valid license and gets
+    // the correct permission mask, instead of dying.
+    //
+    // Not a Linux-specific defect — no Win32 surface anywhere in the chain — but bc-linux
+    // is unusually good at provoking it. run-tests-altool.py's default `cli` transport
+    // starts a fresh BC session per codeunit, and run-tests-hybrid.py runs a websocket leg
+    // concurrently, so session start and database teardown overlap continuously for the
+    // length of a run. Observed as a one-off red leg on BC 28.0 in a 315-codeunit run while
+    // seven sibling legs on the same commit passed.
+    //
+    // Applied on every BC version. Method body verified byte-identical on 27.0, 28.0, 28.4.
+    // ========================================================================
+    private static void PatchNavLicenseDispose(Assembly navNcl)
+    {
+        if (IsPatchDisabled("32")) return;
+        try
+        {
+            var type = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.NavLicense");
+            if (type == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #32: NavLicense type not found — skipping");
+                return;
+            }
+
+            var dispose = type.GetMethod("Dispose",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+                binder: null, types: new[] { typeof(bool) }, modifiers: null);
+            if (dispose == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #32: NavLicense.Dispose(bool) not found — skipping");
+                return;
+            }
+
+            // Shape check: only hook while the body is still the "null the fields" form we
+            // reasoned about. If Microsoft ever gives NavLicense a real resource to release,
+            // the field set changes and we back off rather than leak it.
+            var dataReaderField = type.GetField("dataReader",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (dataReaderField == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #32: NavLicense.dataReader field shape changed — skipping");
+                return;
+            }
+
+            var replacement = typeof(StartupHook).GetMethod(
+                nameof(Replacement_NoOp_ObjectBool),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            ApplyJmpHook(dispose, replacement, "NavLicense.Dispose (Patch #32)");
+            Console.WriteLine("[StartupHook] Patch #32: NavLicense.Dispose(bool) no-op'd (license teardown vs. in-flight session)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #32 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // ========================================================================
+    // Patch #32b: NavDatabaseSecurityAndLicense.Dispose(bool) — the lock half of #32
+    // ------------------------------------------------------------------------
+    //   protected virtual void Dispose(bool disposing) {
+    //       if (!isDisposed && disposing) {
+    //           if (licenseLock != null) licenseLock.Dispose();
+    //           if (license != null) { license.Dispose(); license = null; }
+    //           isDisposed = true;
+    //       }
+    //   }
+    //
+    // GetLicensePermissions runs licenseLock.EnterReadLock() … ExitReadLock(), then the
+    // unlocked license lookup that Patch #32 protects, then EnterUpgradeableReadLock() …
+    // EnterWriteLock(). Patch #32 only covers the middle step. A teardown that wins the race
+    // against either Enter throws ObjectDisposedException from ReaderWriterLockSlim instead —
+    // same trigger, same session, a differently-spelled flake. Both halves have to go.
+    //
+    // Unlike #32, this one does skip a genuine Dispose: the ReaderWriterLockSlim's. Why that
+    // is an acceptable trade rather than a leak:
+    //
+    //   * ReaderWriterLockSlim owns no OS handle directly. Its Dispose releases up to three
+    //     lazily-created wait events, which the finalizer reclaims anyway. Most .NET code
+    //     never disposes one at all.
+    //   * There is one per NavDatabase, not one per session or per request.
+    //   * `license = null` and `isDisposed = true` are bookkeeping. `isDisposed` is read in
+    //     exactly one place — this method (verified by field-usage scan). The owning
+    //     NavDatabase drops its securityAndLicense reference regardless, so the lock, the
+    //     license, the dataReader and the permission memo all become unreachable together.
+    //   * NavDatabaseSecurityAndLicense has no derived types in Nav.Ncl (checked), so hooking
+    //     this `protected virtual` cannot be routed around by an override.
+    //
+    // Applied on every BC version. Method body verified byte-identical on 27.0 and 28.0.
+    // ========================================================================
+    private static void PatchNavDatabaseSecurityAndLicenseDispose(Assembly navNcl)
+    {
+        if (IsPatchDisabled("32b")) return;
+        try
+        {
+            var type = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.NavDatabaseSecurityAndLicense");
+            if (type == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #32b: NavDatabaseSecurityAndLicense type not found — skipping");
+                return;
+            }
+
+            var dispose = type.GetMethod("Dispose",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+                binder: null, types: new[] { typeof(bool) }, modifiers: null);
+            if (dispose == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #32b: NavDatabaseSecurityAndLicense.Dispose(bool) not found — skipping");
+                return;
+            }
+
+            // Shape check: back off if the fields we reasoned about are gone — a changed
+            // field set is the signal that Microsoft gave this type a real resource to
+            // release, and skipping it would then be a genuine leak rather than a hint.
+            var lockField = type.GetField("licenseLock",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            var licenseField = type.GetField("license",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (lockField == null || licenseField == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #32b: NavDatabaseSecurityAndLicense field shape changed — skipping");
+                return;
+            }
+
+            var replacement = typeof(StartupHook).GetMethod(
+                nameof(Replacement_NoOp_ObjectBool),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            ApplyJmpHook(dispose, replacement, "NavDatabaseSecurityAndLicense.Dispose (Patch #32b)");
+            Console.WriteLine("[StartupHook] Patch #32b: NavDatabaseSecurityAndLicense.Dispose(bool) no-op'd (licenseLock teardown vs. in-flight session)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #32b failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
 
     // ========================================================================
     // Patch #29: NavDirectorySecurity.CreateSecurityForDomainDirectory
