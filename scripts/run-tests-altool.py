@@ -92,7 +92,10 @@ from xml.sax.saxutils import escape, quoteattr
 # live against BC 28.1). Empty-name PASS lines are dropped from the counts
 # (they aren't [Test] procedures and the legacy runner never counted them);
 # empty-name FAIL/SKIP lines are recorded as "(codeunit)" so a codeunit-
-# level failure (e.g. OnRun error) can't vanish silently.
+# level failure (e.g. OnRun error) can't vanish silently. A "(codeunit)"
+# FAIL is then dropped again if a NAMED test in the same codeunit already
+# failed — see CodeunitRun.drop_redundant_codeunit_result; there it is only
+# the rollup of that failure, and keeping it double-counts.
 RESULT_LINE = re.compile(r"^\s{2}(PASS|FAIL|SKIP)\s(.*)\((\d+)ms\)$")
 SUMMARY_LINE = re.compile(
     r"Test run completed: (\d+) passed, (\d+) failed, (\d+) skipped\."
@@ -258,6 +261,33 @@ class CodeunitRun:
         self.started = datetime.now(timezone.utc)
         self.elapsed_seconds = 0.0
 
+    def drop_redundant_codeunit_result(self) -> None:
+        """Drop the "(codeunit)" rollup when a named test already reports the failure.
+
+        The hub emits one extra result per codeunit with an empty method name (see
+        RESULT_LINE). An empty-name PASS is discarded at parse time; an empty-name
+        FAIL is kept as "(codeunit)" so a codeunit-level failure with no named test
+        attached to it — an OnRun error, a failed codeunit-level setup — cannot vanish
+        silently.
+
+        But when a named [Test] procedure in the same codeunit ALSO failed, the rollup
+        is just that failure counted a second time: one real failure is reported as
+        "2 failed", and the JUnit file carries a phantom "(codeunit)" test case whose AL
+        call stack points at whichever test ran last (often one that passed). The
+        websocket runner reports the same codeunit as 1 failure, so the two runners
+        disagree about the same run.
+
+        Keep the rollup only when it is the sole evidence of the failure.
+        """
+        named_failed = any(
+            status == "FAIL" and name != "(codeunit)" for status, name, _, _ in self.results
+        )
+        if not named_failed:
+            return
+        self.results = [
+            r for r in self.results if not (r[0] == "FAIL" and r[1] == "(codeunit)")
+        ]
+
 
 def run_codeunit(
     altool_cmd: str,
@@ -361,6 +391,7 @@ def run_codeunit(
             run.error = f"unrecognized al runtests output: {tail}"
         else:
             run.error = "no test results returned for a Subtype=Test codeunit"
+    run.drop_redundant_codeunit_result()
     return run
 
 
@@ -839,6 +870,9 @@ def run_codeunits_via_hub(
 
             if run.error:
                 print(f"    ERROR: {run.error}")
+            # Applies on every exit path above, including the timeout /
+            # connection-lost ones that carry partial results.
+            run.drop_redundant_codeunit_result()
             runs.append(run)
             i += 1
 

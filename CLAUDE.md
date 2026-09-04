@@ -80,6 +80,7 @@ docker compose build bc && docker compose up -d --wait
    - **#14, #15, #15a/b**: server-side AL compiler (Cecil) — strip the Windows .NET runtime probing path and fix type-forward resolution so AL extensions actually compile.
    - **#19, #20**: Reporting Service. The Windows PE binary is replaced with `stubs/reporting-service-stub` (Linux .NET), and `CustomReportingServiceClient` is swapped for a no-op so the watchdog stops flooding the log.
    - **#21**: `NavOpenTaskPageAction.ShowForm` no-op — without it, a single test that opens a task page kills the entire test session.
+   - **#32, #32b**: `NavLicense.Dispose(bool)` and `NavDatabaseSecurityAndLicense.Dispose(bool)` no-op'd. A `NavDatabase` teardown concurrent with a running session used to hand that session a `NullReferenceException` from inside Microsoft's `BclLicenseDataReader` (whose `Dispose` is `reader = null` and whose readers are unguarded), or an `ObjectDisposedException` from the `licenseLock`. Both bodies are pure GC bookkeeping. This is the single biggest source of *random* one-test red legs, because the altool `cli` transport starts a fresh session per codeunit — see KNOWN-LIMITATIONS.md.
 
 5. **`extensions/TestRunnerExtension/`** — AL extension (`src/*.al`) exposing the OData/WebSocket pages used by `run-tests.sh`. The compiled `.app` lives in the same dir and is copied into the image at build time (`extensions/TestRunnerExtension/TestRunnerExtension.app` → `/bc/testrunner/TestRunner.app`).
 
@@ -602,6 +603,20 @@ message="...">` with the BC error message in the attribute and the full
 AL call stack in the body. Skipped tests use `<skipped/>`.
 
 ### Things not to break
+
+- **The altool hub's empty-name result is a rollup, not a test.** BC's
+  TestRunnerHub emits one extra result per codeunit with an empty method
+  name (`  PASS  (656ms)` / `  FAIL  (876ms)`). `run-tests-altool.py`
+  drops the PASS form, keeps the FAIL form as `(codeunit)` so a real
+  codeunit-level failure (an OnRun error, a failed codeunit-level setup)
+  cannot vanish — and then **drops that too when a named `[Test]` in the
+  same codeunit already failed** (`CodeunitRun.drop_redundant_codeunit_result`).
+  Without that last step one real failure is reported as two, the JUnit
+  file carries a phantom `(codeunit)` case whose AL call stack points at
+  whichever test ran last (often a passing one), and the altool and
+  websocket runners disagree about the same run — the websocket leg
+  reports 1. Don't "simplify" this back to keeping every empty-name row,
+  and don't drop them unconditionally either; both directions have bitten.
 
 - **`Test Method Line.Name` on Function rows is the function name, not
   the codeunit name.** I expected the table to expose the codeunit name
