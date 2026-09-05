@@ -1363,15 +1363,45 @@ jobs:
           BC_TELEMETRY_OPT_OUT: ${{ vars.BC_TELEMETRY_OPT_OUT || 'false' }}
         run: bash bc-linux/scripts/workflow-summary.sh emit
 
+      # `tail -500` is the whole diagnosis for anything that goes wrong at the
+      # END of a run and NO diagnosis at all for anything earlier. Measured on
+      # the four intermittent TestRunnerHub aborts of 2026-09-05: the failing
+      # `al runtests` ran ~4 minutes before the job ended, and the 500-line tail
+      # covered the final 1-2 SECONDS of the container log. The server-side
+      # exception behind every one of them was written, then thrown away here.
+      #
+      # So: keep the inline excerpt (cheap to read in the web UI), and write the
+      # WHOLE container log to a file that gets uploaded. Nothing about a
+      # failing run should depend on the failure having happened last.
       - name: BC logs (on failure)
         if: failure()
         working-directory: bc-linux
         run: |
+          mkdir -p ../bc-logs
+          docker compose logs --no-color bc > "../bc-logs/bc-${{ inputs.bc_version }}.log" 2>&1 || true
           echo "=== entrypoint.sh + selective filter output ==="
-          docker compose logs bc 2>&1 | grep -E "\[entrypoint\]|Selective|KEEP:|BC_CLEAR_ALL_APPS|BC_KEEP_APP_IDS|test framework|Library Assert|Microsoft_Any|Microsoft_Test Runner" || true
+          grep -E "\[entrypoint\]|\[StartupHook\]|Selective|KEEP:|BC_CLEAR_ALL_APPS|BC_KEEP_APP_IDS|test framework|Library Assert|Microsoft_Any|Microsoft_Test Runner" "../bc-logs/bc-${{ inputs.bc_version }}.log" || true
+          echo ""
+          echo "=== BC-EventLog entries, Development + Runtime categories (full run) ==="
+          # The hub lives in Category.Development; a session/company-open failure
+          # lands in Development or Runtime. Print every one with 40 lines of
+          # context so an exception and its stack arrive together, capped so a
+          # pathological run cannot blow the job log.
+          grep -n -A40 "Category: \(Development\|Runtime\)" "../bc-logs/bc-${{ inputs.bc_version }}.log" | head -2000 || true
           echo ""
           echo "=== last 500 lines of bc-1 ==="
-          docker compose logs bc 2>&1 | tail -500
+          tail -500 "../bc-logs/bc-${{ inputs.bc_version }}.log"
+          echo ""
+          echo "Full container log uploaded as artifact bc-container-log-${{ inputs.bc_version }} ($(wc -l < "../bc-logs/bc-${{ inputs.bc_version }}.log") lines)."
+
+      - name: Upload full BC container log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bc-container-log-${{ inputs.bc_version }}
+          path: bc-logs/
+          retention-days: 14
+          if-no-files-found: ignore
 
       # Last step in the job, and after the log dump above — the containers
       # have to still be ours while that runs. `if: always()` so a failed test

@@ -287,6 +287,31 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
         sed -i '/<\/appSettings>/i\  <add key="TestAutomationEnabled" value="true"/>' "$CONFIG"
     fi
 
+    # SignalR hub errors: report the real exception, not "An unexpected error
+    # occurred invoking 'X' on the server."
+    #
+    # Both /dev hubs (DebuggerHub and TestRunnerHub) are registered through one
+    # services.AddSignalR(o => o.EnableDetailedErrors =
+    # ServerUserSettings.Instance.DebuggerSignalREnableDetailedErrors), and that
+    # setting defaults to false. TestRunnerHub.Initialize catches only
+    # TestRunnerException, so anything else out of TestRunnerRuntime
+    # .InitializeRuntime (CreateConnectionAndSession -> EnsureSessionOpened ->
+    # OpenCompanyAsync) leaves the server as SignalR's generic placeholder and
+    # `al runtests` prints "An unexpected error occurred invoking 'Initialize'
+    # on the server." with no type, no message and no stack. That is what four
+    # intermittent CI aborts have produced so far, and none of them could be
+    # diagnosed from the log.
+    #
+    # This is a throwaway dev/CI container reached only over localhost, so
+    # there is nothing to leak to. Declared internal-use-only by BC but
+    # EmitSetting.Allow, i.e. readable from CustomSettings.config like
+    # DefaultLanguage and the other internal settings this image already relies on.
+    if grep -q "DebuggerSignalREnableDetailedErrors" "$CONFIG"; then
+        sed -i 's|DebuggerSignalREnableDetailedErrors" value="[^"]*"|DebuggerSignalREnableDetailedErrors" value="true"|' "$CONFIG"
+    else
+        sed -i '/<\/appSettings>/i\  <add key="DebuggerSignalREnableDetailedErrors" value="true" />' "$CONFIG"
+    fi
+
     log_step "Service tier configured."
 else
     log_step "Service tier already set up."

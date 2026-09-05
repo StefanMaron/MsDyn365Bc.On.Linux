@@ -289,6 +289,55 @@ class CodeunitRun:
         ]
 
 
+# ---------------------------------------------------------------------------
+# "The server never got as far as running anything" vs "a test failed".
+#
+# TestRunnerHub.Initialize (Microsoft.Dynamics.Nav.Service.Dev.dll) catches only
+# TestRunnerException. Anything else out of TestRunnerRuntime.InitializeRuntime
+# — Connection.CreateConnectionAndSession, EnsureSessionOpened -> NavSession.Open,
+# OpenCompanyAsync — escapes the hub method, and SignalR replaces it with the
+# placeholder below unless DebuggerSignalREnableDetailedErrors is on. That call
+# happens BEFORE a single AL statement of the test codeunit runs.
+#
+# Four CI aborts on 2026-09-05 (BC 28.0/28.2 codeunit 60069, BC 28.4 codeunit
+# 60064, BC 28.3 codeunit 60942) were exactly this: one `al runtests` out of
+# ~2400 in a run failed to establish its session, every test that DID run
+# passed, and the leg went red with "0 failed".
+#
+# Retrying such a codeunit is safe, and the safety is structural rather than
+# hopeful:
+#   * `results` is empty, so no test result can be overwritten. A failing test
+#     emits a "  FAIL <name> (Nms)" line and lands in `results`, so a real
+#     failure never reaches this path.
+#   * Nothing executed, so there is no partial state to be re-applied. BC's
+#     per-codeunit test isolation rolls back regardless.
+#   * The retry is a NEW `al runtests` process, hence a new SignalR connection.
+#     That matters: a failed Initialize leaves Runtime non-null and Initialized
+#     false in the connection's Items, so a retry on the SAME connection would
+#     hit the "Test runtime already initialized" branch and silently no-op.
+#     (Which is why --transport hub is deliberately NOT covered here — it would
+#     have to reconnect first.)
+#   * A deterministic breakage fails both attempts and still reddens the leg.
+# Every retry is printed and counted, so this cannot quietly absorb a rising
+# failure rate.
+_INFRASTRUCTURE_ERROR_MARKERS = (
+    "an unexpected error occurred invoking",   # SignalR generic hub failure
+    "cannot access a disposed object",         # HubConnection torn down mid-call
+    "connection refused",
+    "connection reset",
+    "no connection could be made",
+    "the remote party closed the websocket connection",
+)
+
+
+def is_infrastructure_error(run: "CodeunitRun") -> bool:
+    """True when the run produced NO results and failed to establish a session."""
+    if run.results or not run.error:
+        return False
+    low = run.error.lower()
+    return any(marker in low for marker in _INFRASTRUCTURE_ERROR_MARKERS)
+
+
 def run_codeunit(
     altool_cmd: str,
     cuid: int,
@@ -1089,6 +1138,9 @@ def main() -> int:
     deadline = time.monotonic() + args.timeout * 60
     runs: list[CodeunitRun] = []
     overall_start = time.monotonic()
+    # Counted and reported, never silent — a retry that nobody can see is how a
+    # flake turns into an accepted background rate.
+    infrastructure_retries = 0
 
     def run_via_cli() -> list[CodeunitRun]:
         cli_runs: list[CodeunitRun] = []
@@ -1106,6 +1158,28 @@ def main() -> int:
                 args.altool_cmd, cuid, args.server, args.server_instance, args.port,
                 company, env, min(args.codeunit_timeout * 60, remaining),
             )
+            if is_infrastructure_error(run):
+                nonlocal infrastructure_retries
+                first_error = run.error
+                print(f"    WARN: {first_error}")
+                print(f"    WARN: codeunit {cuid} produced NO test results and failed "
+                      f"before any AL ran — this is a session/hub-initialization "
+                      f"failure, not a test result. Retrying once in a fresh process.")
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    infrastructure_retries += 1
+                    run = run_codeunit(
+                        args.altool_cmd, cuid, args.server, args.server_instance, args.port,
+                        company, env, min(args.codeunit_timeout * 60, remaining),
+                    )
+                    if run.error:
+                        run.error = f"{run.error} [retry of: {first_error}]"
+                    else:
+                        print(f"    codeunit {cuid} succeeded on retry "
+                              f"(first attempt was an infrastructure failure)")
+                else:
+                    print(f"    ERROR: no time left in the overall timeout to retry "
+                          f"codeunit {cuid}")
             if run.error:
                 print(f"    ERROR: {run.error}")
             cli_runs.append(run)
@@ -1150,6 +1224,10 @@ def main() -> int:
     print(f"{total} total, {passed} passed, {failed} failed, "
           f"{skipped} skipped, {errors} codeunit error(s) "
           f"in {total_elapsed:.0f}s")
+    if infrastructure_retries:
+        print(f"{infrastructure_retries} codeunit(s) needed an infrastructure retry "
+              f"(session/hub initialization failed with zero results on the first "
+              f"attempt). This is not normal; see KNOWN-LIMITATIONS.md.")
 
     if errors:
         for r in runs:
