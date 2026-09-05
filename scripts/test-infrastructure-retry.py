@@ -37,6 +37,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -163,6 +164,93 @@ def check_hybrid_completeness(check) -> None:
               old_signal_would_have_passed and missing_ids == [4])
 
 
+def check_hybrid_legs_are_serialised(check) -> None:
+    """The two legs must not overlap, and altool must go first
+    (StefanMaron/BusinessCentral.AL.Language.Tests#158).
+
+    They used to run on two threads at once, on the reasoning that different BC
+    endpoints cannot conflict. They share one service tier, tenant, company and
+    set of application metadata; a client session holding a page open dies with
+    "The page definition has changed while opening the page" when the metadata
+    generation moves under it. Five instances in the 18 most recent failed
+    corpus runs, all on 28.x — where the second leg exists — and none on 27.x,
+    where `test_runner: auto` runs the websocket runner alone.
+
+    Asserted on observed START and END times of the real run_legs, with the two
+    leg functions replaced by fakes. Under the previous threaded implementation
+    the websocket leg starts before the altool leg ends, so this fails; there is
+    no arrangement of a correct sequential implementation that fails it.
+
+    Order matters as much as non-overlap: the websocket leg is the one that
+    republishes the app, which is the only metadata-mutating action either leg
+    performs. Running it last means nothing else holds a session when it fires.
+    """
+    calls: list[tuple[str, float, float]] = []
+
+    def fake(name):
+        def run(args, ids, junit_path):
+            start = time.monotonic()
+            time.sleep(0.05)          # long enough that an overlap is measurable
+            calls.append((name, start, time.monotonic()))
+            r = hybrid._RunnerResult(name)
+            r.invoked = bool(ids)
+            return r
+        return run
+
+    real_altool, real_ws = hybrid._run_altool, hybrid._run_websocket
+    try:
+        hybrid._run_altool = fake("altool")
+        hybrid._run_websocket = fake("websocket")
+        results = hybrid.run_legs(object(), [1, 2], [3, 4], "/dev/null", "/dev/null")
+    finally:
+        hybrid._run_altool, hybrid._run_websocket = real_altool, real_ws
+
+    check("both legs ran", sorted(n for n, _, _ in calls) == ["altool", "websocket"])
+    check("run_legs returns a result for each leg",
+          sorted(results.keys()) == ["altool", "websocket"])
+
+    if len(calls) == 2:
+        by_name = {n: (s, e) for n, s, e in calls}
+        altool_start, altool_end = by_name["altool"]
+        ws_start, ws_end = by_name["websocket"]
+        check("the altool leg runs FIRST (the websocket leg republishes, so it goes last)",
+              altool_start < ws_start)
+        check("the legs DO NOT OVERLAP — the websocket leg starts only after altool ends",
+              ws_start >= altool_end)
+        # The negative that makes the above mean something: under the threaded
+        # implementation both legs start within microseconds of each other, so
+        # ws_start < altool_end by ~the whole sleep. A test that only checked
+        # ordering would have passed on the broken version roughly half the time.
+        check("the observed gap is a real serialisation, not a scheduling accident",
+              ws_start - altool_start >= 0.05)
+
+
+def check_hybrid_leg_order_survives_an_empty_leg(check) -> None:
+    """Negative: routing every codeunit to one leg is normal (no --al-source-dir
+    sends everything to websocket), and must still produce both result entries
+    rather than a KeyError in the caller's `for name in ("altool", "websocket")`
+    loop."""
+    def fake(name):
+        def run(args, ids, junit_path):
+            r = hybrid._RunnerResult(name)
+            r.invoked = bool(ids)
+            return r
+        return run
+
+    real_altool, real_ws = hybrid._run_altool, hybrid._run_websocket
+    try:
+        hybrid._run_altool = fake("altool")
+        hybrid._run_websocket = fake("websocket")
+        results = hybrid.run_legs(object(), [], [3, 4], "/dev/null", "/dev/null")
+    finally:
+        hybrid._run_altool, hybrid._run_websocket = real_altool, real_ws
+
+    check("an empty altool leg still yields both result entries",
+          sorted(results.keys()) == ["altool", "websocket"])
+    check("the empty leg is marked not-invoked and the populated one is",
+          results["altool"].invoked is False and results["websocket"].invoked is True)
+
+
 def main() -> int:
     failures = []
 
@@ -204,6 +292,11 @@ def main() -> int:
     print("")
     print("run-tests-hybrid.py completeness check:")
     check_hybrid_completeness(check)
+
+    print("")
+    print("run-tests-hybrid.py leg serialisation:")
+    check_hybrid_legs_are_serialised(check)
+    check_hybrid_leg_order_survives_an_empty_leg(check)
 
     if failures:
         print(f"\n{len(failures)} check(s) failed: {failures}")

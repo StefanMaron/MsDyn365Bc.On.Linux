@@ -680,8 +680,19 @@ cannot recover attribute usage from a compiled `.app` — checked empirically,
 `scripts/run-tests-hybrid.py` is the orchestrator: discovers the full test
 codeunit set from the `.app` (same `SymbolReference.json` discovery
 `run-tests-altool.py` already does), classifies via the AL source dir,
-runs both legs **concurrently** (different BC endpoints, no shared-resource
-conflict), and merges JUnit + summary counts into one report. Codeunits
+runs the two legs **one after the other, altool first**, and merges JUnit +
+summary counts into one report. They used to run concurrently, justified as
+"different BC endpoints, no shared-resource conflict" — the endpoints do
+differ, but the legs share one service tier, tenant, company and set of
+application metadata, and a client session holding a page open dies with
+"The page definition has changed while opening the page" when the metadata
+generation moves under it. Five instances in the 18 most recent failed runs
+of the corpus that consumes this workflow, all on 28.x legs (where the
+second leg exists) and none on 27.x. See `run_legs` in the script for the
+full evidence, and StefanMaron/BusinessCentral.AL.Language.Tests#158.
+Altool goes first because the websocket leg republishes the app, which is
+the only metadata-mutating action either leg performs; last is where it does
+the least harm. Codeunits
 with no matching AL source are conservatively routed to websocket —
 unproven safety is treated as unsafe.
 
