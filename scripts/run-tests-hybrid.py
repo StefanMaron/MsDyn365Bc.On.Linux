@@ -20,10 +20,15 @@ the websocket runner (unproven safety == unsafe) and this script behaves
 like a slower version of run-tests.sh — pass --al-source-dir to get the
 speedup.
 
-Both underlying runners are invoked concurrently (they hit different BC
-endpoints — the dev-endpoint hub vs the client-session websocket — so
-there's no shared-resource conflict), each restricted to its own codeunit
-subset via --codeunit-range with an explicit id list.
+The two runners are invoked ONE AFTER THE OTHER, altool first, each
+restricted to its own codeunit subset via --codeunit-range with an explicit
+id list. They used to run concurrently on two threads, justified as "they
+hit different BC endpoints, so there's no shared-resource conflict". The
+endpoints do differ; what they share is the whole of the rest of it — one
+service tier, one tenant, one company, and one set of APPLICATION METADATA.
+That last one is the resource that was in conflict, and it produced a real
+flake: see StefanMaron/BusinessCentral.AL.Language.Tests#158 and the
+comment on run_legs below for the evidence.
 
 The altool leg defaults to --altool-transport cli, NOT hub/auto, even
 though hub is ~40x faster per codeunit. Per
@@ -68,7 +73,6 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -153,6 +157,56 @@ def _run_websocket(args, codeunit_ids: list[int], junit_path: str) -> _RunnerRes
     r.stdout = proc.stdout or ""
     r.junit_path = junit_path if os.path.isfile(junit_path) else None
     return r
+
+
+def run_legs(args, hub_ids: list[int], ws_ids: list[int],
+             hub_junit: str, ws_junit: str) -> dict[str, _RunnerResult]:
+    """Run both legs SEQUENTIALLY, altool first, and return their results.
+
+    WHY NOT CONCURRENTLY (StefanMaron/BusinessCentral.AL.Language.Tests#158)
+      These two legs used to run on two threads at once. The justification was
+      that they hit different BC endpoints — the dev-endpoint hub versus the
+      client-session websocket — and therefore could not conflict. They do hit
+      different endpoints. They also share one service tier, one tenant, one
+      company and one set of application metadata, and that last one is what
+      broke: a client session that has a page open is invalidated when the
+      metadata generation moves under it, and BC says so with
+
+        The page definition has changed while opening the page, please try to
+        re-open the page. Page ID: <n>
+
+      Measured over the 18 most recent failed runs of the corpus that consumes
+      this workflow: five instances, every one on a 28.x leg and none on 27.0,
+      27.3 or 27.5 — which is the signature, because `test_runner: auto` falls
+      back to the single websocket runner below BC 28 and there is no second
+      leg there to race. Always codeunit 60933, and a DIFFERENT test inside it
+      each time, because the websocket leg's codeunit order is not
+      deterministic. Position predicted the outcome: five failures with 60933
+      at position 2 or 3 of the leg, and the one observation of it running at
+      position 12 passed. The websocket leg takes 25-29 s against the altool
+      leg's 208-271 s, so it fits entirely inside the altool leg's opening
+      phase — no part of it ever ran alone.
+
+      What is NOT established: the BC event-log capture is tail-truncated
+      across the failure window, so there is no server-side trace of a
+      metadata generation actually changing. Serialising is justified by that
+      correlation plus the mechanism, not by a proven server-side record.
+
+    WHY ALTOOL FIRST, and not the other order
+      The websocket leg republishes the app (`bc_publish_app` in
+      run-tests.sh, SchemaUpdateMode=forcesync) before it runs anything. That
+      is the one metadata-mutating action in either leg. Running it last means
+      it happens when nothing else holds a session, instead of at the moment
+      the other leg is opening its first ones.
+
+    Cost: the websocket leg's wall time is no longer hidden inside the altool
+    leg's. On the corpus that is 25-29 s added to a 208-271 s leg, per BC
+    version, across an eight-version matrix on a shared Actions queue.
+    """
+    results: dict[str, _RunnerResult] = {}
+    results["altool"] = _run_altool(args, hub_ids, hub_junit)
+    results["websocket"] = _run_websocket(args, ws_ids, ws_junit)
+    return results
 
 
 # One <testsuite> per codeunit that ever got a CodeunitRun/RecordedResult,
@@ -271,19 +325,7 @@ def main() -> int:
     hub_junit = f"{args.junit_output}.hub.xml" if args.junit_output else "/tmp/run-tests-hybrid-hub-junit.xml"
     ws_junit = f"{args.junit_output}.ws.xml" if args.junit_output else "/tmp/run-tests-hybrid-ws-junit.xml"
 
-    results: dict[str, _RunnerResult] = {}
-
-    def go_altool():
-        results["altool"] = _run_altool(args, hub_ids, hub_junit)
-
-    def go_websocket():
-        results["websocket"] = _run_websocket(args, ws_ids, ws_junit)
-
-    threads = [threading.Thread(target=go_altool), threading.Thread(target=go_websocket)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    results = run_legs(args, hub_ids, ws_ids, hub_junit, ws_junit)
     total_elapsed = time.monotonic() - overall_start
 
     for name in ("altool", "websocket"):

@@ -315,9 +315,14 @@ gives that session an NRE.
 
 bc-linux does not cause the race but is unusually good at provoking it:
 `run-tests-altool.py`'s default `cli` transport starts a fresh BC session per
-codeunit, and `run-tests-hybrid.py` runs a websocket leg concurrently, so
-session start and database teardown overlap continuously for the length of a
-run. One bad landing in a 300-codeunit run reddens the leg.
+codeunit, so session start and database teardown overlap continuously for the
+length of a run. One bad landing in a 300-codeunit run reddens the leg.
+
+`run-tests-hybrid.py` used to add a second, concurrent websocket leg on top of
+that; it no longer does — the legs are serialised (see `run_legs` there, and
+StefanMaron/BusinessCentral.AL.Language.Tests#158). That removes one source of
+overlap, not the race: the per-codeunit session churn inside the altool leg is
+by itself enough to provoke it, so Patches #32 and #32b below stay load-bearing.
 
 **Patch #32** no-ops `NavLicense.Dispose(bool)` and **Patch #32b** no-ops
 `NavDatabaseSecurityAndLicense.Dispose(bool)`. Both bodies are teardown
