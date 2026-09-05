@@ -40,6 +40,7 @@ var numCodeunitsOverride = 0; // explicit codeunit count for progress display
 var verbose = false;
 var junitOutput = ""; // path to write JUnit XML — empty = don't emit
 var authProbe = false; // authenticate through OpenConnection only; never open a company or run AL tests
+var selfTestExitCode = false; // run ComputeExitCode's own assertions; no BC connection needed
 const int AuthenticationRejectedExitCode = 2;
 
 for (int i = 0; i < args.Length; i++)
@@ -59,6 +60,7 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--verbose" || args[i] == "-v") verbose = true;
     else if (args[i] == "--junit-output" && i + 1 < args.Length) junitOutput = args[++i];
     else if (args[i] == "--auth-probe") authProbe = true;
+    else if (args[i] == "--self-test-exit-code") selfTestExitCode = true;
     else if (!args[i].StartsWith("--")) host = args[i];
 }
 
@@ -79,9 +81,66 @@ var recordedResults = new List<RecordedResult>();
 void Log(string msg) { if (verbose) Console.Error.WriteLine(msg); }
 
 int exitCode = 1;
-try { exitCode = authProbe ? await RunAuthenticationProbe() : await RunTests(); }
+try { exitCode = selfTestExitCode ? SelfTestExitCode() : authProbe ? await RunAuthenticationProbe() : await RunTests(); }
 catch (Exception ex) { Console.Error.WriteLine($"FATAL: {ex.Message}"); }
 return exitCode;
+
+// ComputeExitCode is the ENTIRE contract between "did the run actually finish"
+// and the process exit code — see #57. Drive it directly rather than only
+// tracing it by eye: `dotnet run --project tools/TestRunner -- --self-test-exit-code`
+// needs no BC connection and exits non-zero if any case below disagrees with
+// the real function.
+static int ComputeExitCode(bool runCompleted, int codeunitsRun, int numCodeunits, int liveFailed, int livePassed)
+{
+    if (!runCompleted)
+    {
+        // liveFailed can be 0 here — that used to mean "return 0". An abandoned
+        // run must never look like a clean pass: the codeunits that never ran
+        // recorded neither a pass nor a fail, and "0 failed" said nothing about
+        // them either way.
+        Console.WriteLine($"ERROR: run did not complete — only {codeunitsRun} of {numCodeunits} codeunit(s) executed");
+        return 1;
+    }
+    return liveFailed > 0 ? 1 : (livePassed > 0 ? 0 : 1);
+}
+
+int SelfTestExitCode()
+{
+    var failures = new List<string>();
+    void Check(string label, bool cond)
+    {
+        Console.WriteLine((cond ? "  PASS  " : "  FAIL  ") + label);
+        if (!cond) failures.Add(label);
+    }
+
+    Console.WriteLine("ComputeExitCode:");
+
+    // The bug this closes: an abandoned run (runCompleted=false) with 0 live
+    // failures used to fall through to `livePassed > 0 ? 0 : 1` and return 0 —
+    // a leg reporting green with codeunits that never ran at all.
+    Check("abandoned run, 0 failed, some passed -> FAILS (was: 0)",
+          ComputeExitCode(runCompleted: false, codeunitsRun: 12, numCodeunits: 24, liveFailed: 0, livePassed: 40) == 1);
+    Check("abandoned run, 0 failed, 0 passed (died before anything ran) -> FAILS",
+          ComputeExitCode(runCompleted: false, codeunitsRun: 0, numCodeunits: 24, liveFailed: 0, livePassed: 0) == 1);
+    Check("abandoned run, some failed anyway -> still FAILS",
+          ComputeExitCode(runCompleted: false, codeunitsRun: 12, numCodeunits: 24, liveFailed: 1, livePassed: 30) == 1);
+
+    // Completed runs keep their original semantics — this must NOT regress.
+    Check("completed run, 0 failed, some passed -> PASSES",
+          ComputeExitCode(runCompleted: true, codeunitsRun: 24, numCodeunits: 24, liveFailed: 0, livePassed: 40) == 0);
+    Check("completed run, some failed -> FAILS",
+          ComputeExitCode(runCompleted: true, codeunitsRun: 24, numCodeunits: 24, liveFailed: 1, livePassed: 39) == 1);
+    Check("completed run, 0 total (nothing to run) -> FAILS",
+          ComputeExitCode(runCompleted: true, codeunitsRun: 0, numCodeunits: 0, liveFailed: 0, livePassed: 0) == 1);
+
+    if (failures.Count > 0)
+    {
+        Console.WriteLine($"\n{failures.Count} check(s) failed: {string.Join(", ", failures)}");
+        return 1;
+    }
+    Console.WriteLine("\nall checks passed");
+    return 0;
+}
 
 async Task<int> RunAuthenticationProbe()
 {
@@ -194,6 +253,15 @@ async Task<int> RunTests()
     Log($"Running tests via WebSocket ({numCodeunits} codeunits, max {effectiveMaxIterations} iterations)...");
     int codeunitsRun = 0;
     printedCodeunits.Clear();
+    // Set true only when the loop breaks because BC confirmed there is no more
+    // work (allDone) or because we reached the codeunit count we were told to
+    // expect. Every other way out of this loop — a failed reconnect, a failed
+    // page-open, or running out of iterations — means the run was ABANDONED,
+    // not completed, and codeunitsRun < numCodeunits proves it: the caller
+    // (run-tests.sh) always passes --num-codeunits as the exact count it
+    // populated the suite with, so falling short of it here is never a
+    // legitimate outcome, only an unfinished one.
+    bool runCompleted = false;
     for (int iteration = 0; iteration < effectiveMaxIterations; iteration++)
     {
         // Proactive reconnect before each RunNextTest.
@@ -254,12 +322,21 @@ async Task<int> RunTests()
 
         if (allDone || codeunitsRun >= numCodeunits)
         {
+            runCompleted = true;
             if (allDone) Log("All tests executed (page confirmed)");
             else Log($"All {numCodeunits} codeunits executed — stopping");
             break;
         }
 
         await Task.Delay(500, CancellationToken.None);
+    }
+
+    if (!runCompleted)
+    {
+        Log($"WARN: run ended without completing — {codeunitsRun}/{numCodeunits} codeunit(s) executed. " +
+            "Stopped due to a reconnect/page-open failure or the iteration cap, not because BC " +
+            "reported the suite done. This is a session-establishment failure, not a test result — " +
+            "see https://github.com/StefanMaron/MsDyn365Bc.On.Linux/issues/57.");
     }
 
     // Print summary from live counts — no final OData read needed (saves ~3.5 minutes)
@@ -285,7 +362,7 @@ async Task<int> RunTests()
 
     Console.WriteLine($"\n=== Results ({elapsed.TotalSeconds:F0}s) ===");
     Console.WriteLine($"{total} total, {livePassed} passed, {liveFailed} failed, {liveSkipped} skipped");
-    return liveFailed > 0 ? 1 : (livePassed > 0 ? 0 : 1);
+    return ComputeExitCode(runCompleted, codeunitsRun, numCodeunits, liveFailed, livePassed);
 }
 
 async Task PrintLiveResults(byte[] authBytes, int codeunitsRun, int numCodeunits, DateTime startTime)

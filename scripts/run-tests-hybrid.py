@@ -65,6 +65,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -154,7 +155,20 @@ def _run_websocket(args, codeunit_ids: list[int], junit_path: str) -> _RunnerRes
     return r
 
 
-def merge_junit(paths: list[str], out_path: str, total_elapsed: float) -> None:
+# One <testsuite> per codeunit that ever got a CodeunitRun/RecordedResult,
+# named "Codeunit <id>" by both write_junit (run-tests-altool.py) and
+# JUnitWriter.Write (tools/TestRunner) — matches regardless of PASS, FAIL,
+# or "produced zero results, here is why" placeholder. Only a codeunit whose
+# id was silently dropped somewhere between dispatch and the report is
+# missing here.
+_SUITE_CODEUNIT_ID = re.compile(r"^Codeunit (\d+)$")
+
+
+def merge_junit(paths: list[str], out_path: str, total_elapsed: float) -> set[int]:
+    """Merge per-runner JUnit files into one, write it, and return the
+    codeunit ids that produced a <testsuite> in the result — the input a
+    completeness check needs. "The merged total is non-zero" cannot see a
+    codeunit that was dispatched but never came back at all; this can."""
     suites: list[ET.Element] = []
     for p in paths:
         if not p or not os.path.isfile(p):
@@ -180,13 +194,18 @@ def merge_junit(paths: list[str], out_path: str, total_elapsed: float) -> None:
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
     )
+    seen_ids: set[int] = set()
     for s in suites:
         merged.append(s)
+        m = _SUITE_CODEUNIT_ID.match(s.get("name") or "")
+        if m:
+            seen_ids.add(int(m.group(1)))
 
     parent = os.path.dirname(out_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     ET.ElementTree(merged).write(out_path, encoding="unicode", xml_declaration=True)
+    return seen_ids
 
 
 def main() -> int:
@@ -275,30 +294,60 @@ def main() -> int:
         print(f"--- {name} runner output ---")
         print(r.stdout)
 
+    # Merge — and check completeness — unconditionally, even when
+    # --junit-output wasn't requested: the merged codeunit-id set is how a
+    # dropped codeunit gets caught, not just how the file gets written.
+    junit_paths = [r.junit_path for r in results.values() if r.junit_path]
+    merged_out = args.junit_output or "/tmp/run-tests-hybrid-merged-junit.xml"
+    seen_ids = merge_junit(junit_paths, merged_out, total_elapsed)
     if args.junit_output:
-        junit_paths = [r.junit_path for r in results.values() if r.junit_path]
-        merge_junit(junit_paths, args.junit_output, total_elapsed)
         print(f"Merged JUnit XML written to {args.junit_output}")
-        for p in (hub_junit, ws_junit):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+    for p in (hub_junit, ws_junit):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    if not args.junit_output:
+        try:
+            os.remove(merged_out)
+        except OSError:
+            pass
 
     # Aggregate counts straight from the merged JUnit so the summary line
     # matches exactly what got written, rather than re-parsing two
     # differently-shaped stdout formats.
     total = passed = failed = skipped = errors = 0
-    if args.junit_output and os.path.isfile(args.junit_output):
-        root = ET.parse(args.junit_output).getroot()
+    if os.path.isfile(merged_out):
+        root = ET.parse(merged_out).getroot()
         total = int(root.get("tests", "0"))
         failed = int(root.get("failures", "0"))
         errors = int(root.get("errors", "0"))
         skipped = int(root.get("skipped", "0"))
         passed = total - failed - skipped - errors
-    else:
-        # No JUnit requested — fall back to exit codes only, no counts.
-        pass
+
+    # Completeness: every id in all_ids was dispatched to exactly one of
+    # hub_ids/ws_ids (discover_test_codeunits already intersected any
+    # --codeunit-range filter and reflects only what actually compiled into
+    # this .app, so all_ids IS the exact expected set — nothing legitimate
+    # is missing from it). A codeunit missing a <testsuite> entry never ran
+    # ANYTHING, including any infrastructure-error placeholder a runner
+    # would otherwise have recorded for it — that only happens when a
+    # runner's own early-exit path drops it before ever creating a
+    # CodeunitRun. "total != 0" cannot see this; it can look completely
+    # healthy while codeunits are missing (see
+    # https://github.com/StefanMaron/MsDyn365Bc.On.Linux/issues/57).
+    missing_ids = sorted(set(all_ids) - seen_ids)
+    if missing_ids:
+        missing_hub = sorted(set(hub_ids) & set(missing_ids))
+        missing_ws = sorted(set(ws_ids) & set(missing_ids))
+        print("")
+        print(f"ERROR: {len(missing_ids)} of {len(all_ids)} codeunit(s) produced NO result "
+              f"at all — no <testsuite>, not even a failure — in the merged report: "
+              f"{_ids_str(missing_ids)}")
+        if missing_hub:
+            print(f"       {len(missing_hub)} from the fast path (altool/hub): {_ids_str(missing_hub)}")
+        if missing_ws:
+            print(f"       {len(missing_ws)} from the slow path (websocket): {_ids_str(missing_ws)}")
 
     print("")
     # Keep this exact shape — bc-test-from-source.yml greps
@@ -312,7 +361,9 @@ def main() -> int:
     )
     if any_runner_failed:
         return 1
-    if args.junit_output and total == 0:
+    if missing_ids:
+        return 1
+    if total == 0:
         print("ERROR: no tests ran")
         return 1
     return 0
