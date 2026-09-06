@@ -2031,15 +2031,28 @@ internal class StartupHook
 
             var noop = typeof(StartupHook).GetMethod(nameof(WatsonSendReportNoop),
                 BindingFlags.Static | BindingFlags.NonPublic)!;
+            var sendReportNoop = typeof(StartupHook).GetMethod(nameof(WatsonSendReportSuccess),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
             var noopStr = typeof(StartupHook).GetMethod(nameof(WatsonGetRegistryValueNoop),
                 BindingFlags.Static | BindingFlags.NonPublic)!;
 
             int hooked = 0;
-            // Hook ALL SendReport overloads
+            // Hook ALL SendReport overloads. Pick the replacement by what the overload
+            // returns: SendReport returns WatsonResult (int-backed enum) today, and a void
+            // replacement would leave the caller's switch reading an undefined register.
             foreach (var m in watsonType.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
                 .Where(m => m.Name == "SendReport"))
             {
-                ApplyJmpHook(m, noop, $"WatsonReporting.SendReport({m.GetParameters().Length} params)");
+                var replacement = m.ReturnType == typeof(void) ? noop
+                    : m.ReturnType.IsEnum && m.ReturnType.GetEnumUnderlyingType() == typeof(int) ? sendReportNoop
+                    : null;
+                if (replacement == null)
+                {
+                    Console.WriteLine($"[StartupHook] Watson: SendReport({m.GetParameters().Length} params) returns "
+                        + $"{m.ReturnType.Name}, which has no matching no-op — leaving it unhooked.");
+                    continue;
+                }
+                ApplyJmpHook(m, replacement, $"WatsonReporting.SendReport({m.GetParameters().Length} params)");
                 hooked++;
             }
 
@@ -2083,6 +2096,29 @@ internal class StartupHook
     }
 
     private static void WatsonSendReportNoop() { }
+
+    /// <summary>
+    /// Replacement for WatsonReporting.SendReport, which returns
+    /// Microsoft.Dynamics.Nav.Watson.WatsonResult (an int-backed enum), not void.
+    ///
+    /// The void no-op above left the return register holding whatever the previous code
+    /// had put there, and WatsonReporting.SendWatsonReport switches on that value:
+    ///
+    ///     Success (0)          -> return true
+    ///     Debug   (16)         -> return false
+    ///     Unknown (-1), Fail(1)-> throw new WatsonReportException("Watson report failure", exception)
+    ///
+    /// So a garbage register value could make BC's own crash reporter throw, on the path
+    /// that is already handling a crash, at random. Return Success so SendWatsonReport
+    /// reports the crash as filed and does nothing further — Watson cannot work on Linux,
+    /// and the point of the hook is that it stops quietly.
+    ///
+    /// The type is an enum with an int underlying type, so returning int is the correct
+    /// ABI match; the replacement must not reference the BC type directly, because
+    /// ApplyJmpHook JITs it while the assembly is still loading.
+    /// </summary>
+    private static int WatsonSendReportSuccess() => 0; // WatsonResult.Success
+
     private static string? WatsonGetRegistryValueNoop() => null;
 
     private static void PatchNavTypes(Assembly navTypes)
@@ -2824,6 +2860,10 @@ internal class StartupHook
     /// <summary>True once BC_SHOWFORM_MODE has been read.</summary>
     private static bool _showFormSkipMode;
 
+    /// <summary>BC_SHOWFORM_TRACE=1 — log every call and how it ended. Off by default; a
+    /// task-page open is common enough that tracing it unconditionally would be noise.</summary>
+    private static bool _showFormTrace;
+
     private static void PatchShowForm(Assembly navClientUi)
     {
         try
@@ -2856,6 +2896,7 @@ internal class StartupHook
             _navBindingManagerType = navClientUi.GetType("Microsoft.Dynamics.Nav.Client.DataBinder.NavBindingManager");
             _showFormSkipMode = string.Equals(
                 Environment.GetEnvironmentVariable("BC_SHOWFORM_MODE"), "skip", StringComparison.OrdinalIgnoreCase);
+            _showFormTrace = Environment.GetEnvironmentVariable("BC_SHOWFORM_TRACE") == "1";
 
             var replacement = typeof(StartupHook).GetMethod(
                 nameof(Replacement_ShowForm),
@@ -2899,10 +2940,14 @@ internal class StartupHook
             try
             {
                 bool runModal = ShowFormGetProperty(formState, "RunModal") is bool b && b;
+                if (_showFormTrace)
+                    Console.WriteLine($"[StartupHook] Patch #21 trace: showing form (runModal={runModal})");
                 if (runModal)
                     ShowFormInvoke(childForm, "ShowDialog", new[] { parentForm });
                 else
                     ShowFormInvoke(uiSession, "ShowForm", new[] { childForm, parentForm });
+                if (_showFormTrace)
+                    Console.WriteLine("[StartupHook] Patch #21 trace: shown, returning true");
                 return true;
             }
             catch (Exception ex) when (ShowFormIsA(ex, InvalidBookmarkExceptionName))
@@ -2914,11 +2959,14 @@ internal class StartupHook
             {
                 // Carries NavTestPageInvokedWithoutHandlerException — the AL-visible
                 // "you opened a page with no handler" error. Must reach the test.
-                _ = ex;
+                if (_showFormTrace)
+                    Console.WriteLine($"[StartupHook] Patch #21 trace: rethrowing {ex.GetType().FullName}: {ex.Message}");
                 throw;
             }
             catch (Exception ex) when (ShowFormIsA(ex, NavBaseExceptionName))
             {
+                if (_showFormTrace)
+                    Console.WriteLine($"[StartupHook] Patch #21 trace: NavBaseException {ex.GetType().FullName}: {ex.Message}");
                 ShowFormReportNavBaseException(childForm, ex);
             }
             catch (NullReferenceException nre)
