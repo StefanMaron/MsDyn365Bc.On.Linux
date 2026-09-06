@@ -113,9 +113,15 @@ NullReferenceException when there's no UI session.
 that opens a page with a Camera control.
 
 **Potential fix**: Patch `NSClientCallback.CreateDotNetHandle` in Nav.Service to
-return a dummy handle (or null) instead of crashing. Similar approach to the
-existing `NavOpenTaskPageAction.ShowForm` no-op (Patch #21). Would turn crashes
-into graceful no-ops where the DotNet control simply isn't available.
+return a dummy handle (or null) instead of crashing. Would turn crashes into
+graceful no-ops where the DotNet control simply isn't available.
+
+Note that Patch #21 (`NavOpenTaskPageAction.ShowForm`) is no longer a model for
+that: it started as a no-op and was rewritten to do the real work, because
+skipping the call made the container silently unable to answer any question
+about opening a page through an action. A no-op that swallows a call whose
+*absence* the test can observe buys a live session at the price of a wrong
+answer. Prefer doing the real work and containing the failure.
 
 ## ~~Container crash after Tests-Misc in sequential Bucket 4 runs~~ (FIXED — Patch #23)
 
