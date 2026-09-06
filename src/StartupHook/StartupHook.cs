@@ -42,10 +42,17 @@ using System.Threading.Tasks;
 ///   Fix: No-op SideServiceProcessClient.EnsureAlive() so the watchdog loop becomes silent.
 ///
 /// Patch #21: NavOpenTaskPageAction.ShowForm (Nav.Client.UI.dll)
-///   When a test method opens a task page, the headless client has no UI renderer and
-///   NavOpenTaskPageAction.ShowForm throws NullReferenceException, terminating the entire
-///   test session and leaving all remaining test methods unexecuted.
-///   Fix: No-op ShowForm so task-page opens are silently skipped on Linux.
+///   When a test method opens a task page, something in the headless client's UI layer
+///   raised a NullReferenceException that terminated the entire test session and left all
+///   remaining test methods unexecuted.
+///   Fix: re-implement the real body (the signature and body are identical on 27.0 through
+///   28.4) so the form is actually shown, the client raises UISession.FormToShow, and
+///   NavTestExecution.ShowForm looks up and runs the test's [PageHandler] /
+///   [ModalPageHandler]. A NullReferenceException escaping the show call is logged with its
+///   full stack and reported as "not shown" instead of killing the session. The original
+///   no-op is still reachable via BC_SHOWFORM_MODE=skip.
+///   The old replacement also returned void where the real method returns bool, so
+///   InvokeCore's `if (!ShowForm(...))` read an undefined return value.
 ///
 /// Patch #22: AzureADGraphQuery..ctor (Nav.Ncl.dll)
 ///   Constructor pulls in Azure.Identity / MSAL Windows credential APIs and crashes the
@@ -649,9 +656,9 @@ internal class StartupHook
             PatchNavDatabaseSecurityAndLicenseDispose(args.LoadedAssembly);
         }
 
-        // Patch #21: NavOpenTaskPageAction.ShowForm crashes on Linux when a test opens a
-        // task page — the headless client has no UI renderer and a null reference occurs,
-        // terminating the entire test session. No-op ShowForm so task-page opens are skipped.
+        // Patch #21: NavOpenTaskPageAction.ShowForm used to crash the whole test session on
+        // Linux with a null reference. Re-implement the real body so the form is shown and
+        // the test's page handler runs, and contain a null reference to this one call.
         if (name == "Microsoft.Dynamics.Nav.Client.UI")
         {
             PatchShowForm(args.LoadedAssembly);
@@ -2024,15 +2031,28 @@ internal class StartupHook
 
             var noop = typeof(StartupHook).GetMethod(nameof(WatsonSendReportNoop),
                 BindingFlags.Static | BindingFlags.NonPublic)!;
+            var sendReportNoop = typeof(StartupHook).GetMethod(nameof(WatsonSendReportSuccess),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
             var noopStr = typeof(StartupHook).GetMethod(nameof(WatsonGetRegistryValueNoop),
                 BindingFlags.Static | BindingFlags.NonPublic)!;
 
             int hooked = 0;
-            // Hook ALL SendReport overloads
+            // Hook ALL SendReport overloads. Pick the replacement by what the overload
+            // returns: SendReport returns WatsonResult (int-backed enum) today, and a void
+            // replacement would leave the caller's switch reading an undefined register.
             foreach (var m in watsonType.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
                 .Where(m => m.Name == "SendReport"))
             {
-                ApplyJmpHook(m, noop, $"WatsonReporting.SendReport({m.GetParameters().Length} params)");
+                var replacement = m.ReturnType == typeof(void) ? noop
+                    : m.ReturnType.IsEnum && m.ReturnType.GetEnumUnderlyingType() == typeof(int) ? sendReportNoop
+                    : null;
+                if (replacement == null)
+                {
+                    Console.WriteLine($"[StartupHook] Watson: SendReport({m.GetParameters().Length} params) returns "
+                        + $"{m.ReturnType.Name}, which has no matching no-op — leaving it unhooked.");
+                    continue;
+                }
+                ApplyJmpHook(m, replacement, $"WatsonReporting.SendReport({m.GetParameters().Length} params)");
                 hooked++;
             }
 
@@ -2076,6 +2096,29 @@ internal class StartupHook
     }
 
     private static void WatsonSendReportNoop() { }
+
+    /// <summary>
+    /// Replacement for WatsonReporting.SendReport, which returns
+    /// Microsoft.Dynamics.Nav.Watson.WatsonResult (an int-backed enum), not void.
+    ///
+    /// The void no-op above left the return register holding whatever the previous code
+    /// had put there, and WatsonReporting.SendWatsonReport switches on that value:
+    ///
+    ///     Success (0)          -> return true
+    ///     Debug   (16)         -> return false
+    ///     Unknown (-1), Fail(1)-> throw new WatsonReportException("Watson report failure", exception)
+    ///
+    /// So a garbage register value could make BC's own crash reporter throw, on the path
+    /// that is already handling a crash, at random. Return Success so SendWatsonReport
+    /// reports the crash as filed and does nothing further — Watson cannot work on Linux,
+    /// and the point of the hook is that it stops quietly.
+    ///
+    /// The type is an enum with an int underlying type, so returning int is the correct
+    /// ABI match; the replacement must not reference the BC type directly, because
+    /// ApplyJmpHook JITs it while the assembly is still loading.
+    /// </summary>
+    private static int WatsonSendReportSuccess() => 0; // WatsonResult.Success
+
     private static string? WatsonGetRegistryValueNoop() => null;
 
     private static void PatchNavTypes(Assembly navTypes)
@@ -2726,19 +2769,100 @@ internal class StartupHook
     }
 
     // ========================================================================
-    // Patch #21: NavOpenTaskPageAction.ShowForm — no-op on headless Linux runner.
+    // Patch #21: NavOpenTaskPageAction.ShowForm — faithful headless replacement.
     //
-    // When a test method opens a task page, ShowForm is called on the headless
-    // client which has no UI renderer. The resulting NullReferenceException
-    // terminates the entire test session, preventing all subsequent test methods
-    // from executing. Replacing ShowForm with a no-op silently skips task-page
-    // opens so the rest of the test codeunit continues running.
+    // ShowForm is the single point where a task-page open becomes a shown form.
+    // Everything ActionBuilder routes into NavOpenTaskPageAction goes through it:
+    // every action RunObject, the Edit/View/ViewList/OpenInNewWindow menu actions,
+    // the built-in New action, and page views.
+    //
+    // The original patch replaced the method with a no-op, because *something* in
+    // the headless UI layer raised a NullReferenceException that took the whole
+    // test session down. Skipping the call keeps the session alive, but it also
+    // means the target page is built and then never shown — so the client never
+    // raises UISession.FormToShow, TestPageClientSession.UISession_FormToShow never
+    // fires the OnShowFormCallback, and NavTestExecution.ShowForm never runs. The
+    // AL-visible consequences of that are large and silent:
+    //
+    //   * the test's [PageHandler] / [ModalPageHandler] is never looked up or run,
+    //   * NavTestPageInvokedWithoutHandlerException is never raised for an
+    //     unhandled page open,
+    //   * a non-optional handler that never fired is not reported by
+    //     NavTestExecution.TestHandlers, so the test passes having done nothing.
+    //
+    // So the invoke returns normally and the test cannot tell the difference
+    // between "the page opened" and "nothing happened". That makes this container
+    // unable to adjudicate any question about opening a page through an action.
+    //
+    // This replacement re-implements the real body instead (it is byte-identical
+    // on 27.0, 27.5, 28.0 and 28.4 — verified by decompiling all four):
+    //
+    //   private bool ShowForm(LogicalForm childForm, LogicalForm parentForm,
+    //                         UISession uiSession, FormState formState)
+    //   {
+    //       SetThrowRowEntryNotFound(childForm.BindingManager, true);
+    //       var nbm = NavBindingManager.AsNavBindingManager(childForm.BindingManager);
+    //       try {
+    //           if (formState.RunModal) childForm.ShowDialog(parentForm);
+    //           else                    uiSession.ShowForm(childForm, parentForm);
+    //           return true;
+    //       }
+    //       catch (InvalidBookmarkException) { ...HandleRecordNoLongerExists... }
+    //       catch (NavTestBaseException)     { throw; }
+    //       catch (NavBaseException ex)      { ...ShowError, ForceClose... }
+    //       finally { SetThrowRowEntryNotFound(childForm.BindingManager, false); }
+    //       return false;
+    //   }
+    //
+    // Two deliberate differences from the original body, both narrow:
+    //
+    //   1. A NullReferenceException escaping the show call is caught, logged with
+    //      its full stack, and reported as "not shown" (return false) instead of
+    //      propagating. That preserves the one property the old no-op was added
+    //      for — a headless UI failure must not kill the session — while making
+    //      the failure visible instead of invisible. The stack in that log line is
+    //      the thing nobody has ever captured for this patch; if it turns out to be
+    //      fixable, fix it and delete this catch.
+    //   2. Null childForm/uiSession/formState are reported as "not shown" rather
+    //      than dereferenced.
+    //
+    // Everything else — including rethrowing NavTestBaseException, which is what
+    // carries NavTestPageInvokedWithoutHandlerException back to AL — is the real
+    // behaviour.
+    //
+    // Set BC_SHOWFORM_MODE=skip to restore the old unconditional no-op.
+    //
+    // The replacement is declared to return bool. The original returns bool and
+    // InvokeCore does `if (!ShowForm(...)) return null;`; the old void replacement
+    // left the caller reading whatever happened to be in the return register.
+    //
+    // The body reaches BC types by reflection only, never by a typed reference.
+    // ApplyJmpHook calls RuntimeHelpers.PrepareMethod on the replacement at patch
+    // time, so a typed reference here would force those assemblies to load during
+    // the AssemblyLoad callback that installs the patch.
     //
     // Assembly: Microsoft.Dynamics.Nav.Client.UI.dll
     // Namespace: Microsoft.Dynamics.Nav.Client.Actions
-    // Signature: void ShowForm(LogicalForm childForm, LogicalForm parentForm,
+    // Signature: bool ShowForm(LogicalForm childForm, LogicalForm parentForm,
     //                          UISession uiSession, FormState formState)
     // ========================================================================
+
+    private const string InvalidBookmarkExceptionName = "Microsoft.Dynamics.Framework.UI.InvalidBookmarkException";
+    private const string NavTestBaseExceptionName = "Microsoft.Dynamics.Nav.Types.Exceptions.NavTestBaseException";
+    private const string NavBaseExceptionName = "Microsoft.Dynamics.Nav.Types.Exceptions.NavBaseException";
+
+    /// <summary>Declaring type of the hooked ShowForm, captured when the patch is installed.</summary>
+    private static Type? _showFormActionType;
+
+    /// <summary><c>NavBindingManager</c>, resolved from the same assembly as the action type.</summary>
+    private static Type? _navBindingManagerType;
+
+    /// <summary>True once BC_SHOWFORM_MODE has been read.</summary>
+    private static bool _showFormSkipMode;
+
+    /// <summary>BC_SHOWFORM_TRACE=1 — log every call and how it ended. Off by default; a
+    /// task-page open is common enough that tracing it unconditionally would be noise.</summary>
+    private static bool _showFormTrace;
 
     private static void PatchShowForm(Assembly navClientUi)
     {
@@ -2759,11 +2883,28 @@ internal class StartupHook
                 return;
             }
 
+            // The real method returns bool and InvokeCore branches on it. If a future BC
+            // build changes that, a bool-returning replacement would be writing a return
+            // value the caller does not expect — refuse rather than guess.
+            if (showForm.ReturnType != typeof(bool))
+            {
+                Console.WriteLine($"[StartupHook] Patch #21: ShowForm returns {showForm.ReturnType.Name}, expected Boolean — skipping");
+                return;
+            }
+
+            _showFormActionType = actionType;
+            _navBindingManagerType = navClientUi.GetType("Microsoft.Dynamics.Nav.Client.DataBinder.NavBindingManager");
+            _showFormSkipMode = string.Equals(
+                Environment.GetEnvironmentVariable("BC_SHOWFORM_MODE"), "skip", StringComparison.OrdinalIgnoreCase);
+            _showFormTrace = Environment.GetEnvironmentVariable("BC_SHOWFORM_TRACE") == "1";
+
             var replacement = typeof(StartupHook).GetMethod(
                 nameof(Replacement_ShowForm),
                 BindingFlags.Static | BindingFlags.NonPublic)!;
             ApplyJmpHook(showForm, replacement, "NavOpenTaskPageAction.ShowForm");
-            Console.WriteLine("[StartupHook] Patch #21: NavOpenTaskPageAction.ShowForm hooked (no-op on Linux)");
+            Console.WriteLine(_showFormSkipMode
+                ? "[StartupHook] Patch #21: NavOpenTaskPageAction.ShowForm hooked (BC_SHOWFORM_MODE=skip — no-op)"
+                : "[StartupHook] Patch #21: NavOpenTaskPageAction.ShowForm hooked (faithful headless show)");
         }
         catch (Exception ex)
         {
@@ -2772,16 +2913,262 @@ internal class StartupHook
     }
 
     /// <summary>
-    /// No-op replacement for NavOpenTaskPageAction.ShowForm.
-    /// ShowForm is an instance method so JMP hooks pass 'this' as the first explicit parameter,
-    /// followed by the declared parameters (childForm, parentForm, uiSession, formState).
-    /// Silently dropping the call prevents NullReferenceException in the headless UI layer
-    /// and lets test sessions continue past task-page opens.
+    /// Replacement for NavOpenTaskPageAction.ShowForm. ShowForm is an instance method so
+    /// JMP hooks pass 'this' as the first explicit parameter, followed by the declared
+    /// parameters (childForm, parentForm, uiSession, formState).
+    /// Returns true when the form was shown, matching the original's contract.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void Replacement_ShowForm(object self, object? childForm, object? parentForm, object? uiSession, object? formState)
+    private static bool Replacement_ShowForm(object self, object? childForm, object? parentForm, object? uiSession, object? formState)
     {
-        Console.WriteLine("[StartupHook] Patch #21: NavOpenTaskPageAction.ShowForm skipped (no headless UI on Linux)");
+        if (_showFormSkipMode)
+        {
+            Console.WriteLine("[StartupHook] Patch #21: ShowForm skipped (BC_SHOWFORM_MODE=skip)");
+            return false;
+        }
+
+        if (childForm == null || uiSession == null || formState == null)
+        {
+            Console.WriteLine("[StartupHook] Patch #21: ShowForm called with a null form/session/state — reporting 'not shown'");
+            return false;
+        }
+
+        object? childBindingManager = ShowFormGetProperty(childForm, "BindingManager");
+        ShowFormSetThrowRowEntryNotFound(self, childBindingManager, throwException: true);
+        try
+        {
+            try
+            {
+                bool runModal = ShowFormGetProperty(formState, "RunModal") is bool b && b;
+                if (_showFormTrace)
+                    Console.WriteLine($"[StartupHook] Patch #21 trace: showing form (runModal={runModal})");
+                if (runModal)
+                    ShowFormInvoke(childForm, "ShowDialog", new[] { parentForm });
+                else
+                    ShowFormInvoke(uiSession, "ShowForm", new[] { childForm, parentForm });
+                if (_showFormTrace)
+                    Console.WriteLine("[StartupHook] Patch #21 trace: shown, returning true");
+                return true;
+            }
+            catch (Exception ex) when (ShowFormIsA(ex, InvalidBookmarkExceptionName))
+            {
+                if (ShowFormHandleInvalidBookmark(self, childBindingManager, parentForm))
+                    return true;
+            }
+            catch (Exception ex) when (ShowFormIsA(ex, NavTestBaseExceptionName))
+            {
+                // Carries NavTestPageInvokedWithoutHandlerException — the AL-visible
+                // "you opened a page with no handler" error. Must reach the test.
+                if (_showFormTrace)
+                    Console.WriteLine($"[StartupHook] Patch #21 trace: rethrowing {ex.GetType().FullName}: {ex.Message}");
+                throw;
+            }
+            catch (Exception ex) when (ShowFormIsA(ex, NavBaseExceptionName))
+            {
+                if (_showFormTrace)
+                    Console.WriteLine($"[StartupHook] Patch #21 trace: NavBaseException {ex.GetType().FullName}: {ex.Message}");
+                ShowFormReportNavBaseException(childForm, ex);
+            }
+            catch (NullReferenceException nre)
+            {
+                // The failure Patch #21 was originally created for. Nobody ever captured
+                // where it comes from; this is that capture. Swallowing it keeps the
+                // session alive, which is the whole reason the patch exists.
+                Console.WriteLine("[StartupHook] Patch #21: ShowForm raised NullReferenceException in the headless UI layer — "
+                    + "reporting 'not shown' so the session survives. Full exception follows:");
+                Console.WriteLine(nre.ToString());
+            }
+        }
+        finally
+        {
+            ShowFormSetThrowRowEntryNotFound(self, childBindingManager, throwException: false);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// NavOpenTaskPageAction.SetThrowRowEntryNotFound(BindingManager, bool) — private instance.
+    /// A failure here is logged, never thrown: it only toggles bookmark strictness and must
+    /// not turn into a second failure on top of the one being handled.
+    /// </summary>
+    private static void ShowFormSetThrowRowEntryNotFound(object self, object? bindingManager, bool throwException)
+    {
+        try
+        {
+            var m = _showFormActionType?.GetMethod("SetThrowRowEntryNotFound",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            m?.Invoke(self, new object?[] { bindingManager, throwException });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #21: SetThrowRowEntryNotFound({throwException}) failed: "
+                + $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The original's catch (InvalidBookmarkException) branch: ask the child binding manager
+    /// whether it can recover from the parent's now-stale bookmark.
+    /// </summary>
+    private static bool ShowFormHandleInvalidBookmark(object self, object? childBindingManager, object? parentForm)
+    {
+        try
+        {
+            object? childNbm = ShowFormAsNavBindingManager(childBindingManager);
+            if (childNbm == null)
+                return false;
+
+            object? parentNbm = ShowFormAsNavBindingManager(ShowFormGetProperty(parentForm, "BindingManager"));
+            object? requestedBookmark = parentNbm == null ? null : ShowFormGetProperty(parentNbm, "CurrentBookmark");
+
+            // ViewMode != PageMode.Delete
+            object? viewMode = ShowFormGetProperty(self, "ViewMode");
+            bool notDeleting = true;
+            if (viewMode != null)
+            {
+                var deleteValue = Enum.Parse(viewMode.GetType(), "Delete");
+                notDeleting = !viewMode.Equals(deleteValue);
+            }
+
+            var m = childNbm.GetType()
+                .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy)
+                .FirstOrDefault(c => c.Name == "HandleRecordNoLongerExists" && c.GetParameters().Length == 2);
+            if (m == null)
+                return false;
+            return ShowFormUnwrap(() => m.Invoke(childNbm, new object?[] { requestedBookmark, notDeleting })) is bool b && b;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #21: InvalidBookmarkException recovery failed: "
+                + $"{ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The original's catch (NavBaseException) branch: show the error unless the exception
+    /// suppresses it, then force-close the form.
+    /// </summary>
+    private static void ShowFormReportNavBaseException(object childForm, Exception ex)
+    {
+        try
+        {
+            bool suppress = ShowFormGetProperty(ex, "SuppressMessage") is bool s && s;
+            if (!suppress)
+            {
+                object? formUiSession = ShowFormGetProperty(childForm, "UISession");
+                object? messageHelper = ShowFormGetProperty(formUiSession, "MessageHelper");
+                if (messageHelper != null)
+                {
+                    var showError = messageHelper.GetType()
+                        .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                        .FirstOrDefault(m => m.Name == "ShowError" && m.GetParameters().Length == 2);
+                    showError?.Invoke(messageHelper, new object?[] { ex, true });
+                }
+            }
+
+            var close = childForm.GetType()
+                .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy)
+                .FirstOrDefault(c => c.Name == "Close"
+                                  && c.GetParameters().Length == 1
+                                  && c.GetParameters()[0].ParameterType.IsEnum);
+            if (close != null)
+                close.Invoke(childForm, new[] { Enum.Parse(close.GetParameters()[0].ParameterType, "ForceClose") });
+        }
+        catch (Exception inner)
+        {
+            Console.WriteLine($"[StartupHook] Patch #21: NavBaseException handling failed: "
+                + $"{inner.GetType().Name}: {inner.Message} (original: {ex.GetType().Name}: {ex.Message})");
+        }
+    }
+
+    /// <summary>NavBindingManager.AsNavBindingManager(BindingManager) — static, returns null on a mismatch.</summary>
+    private static object? ShowFormAsNavBindingManager(object? bindingManager)
+    {
+        if (bindingManager == null || _navBindingManagerType == null)
+            return null;
+        // Two single-argument overloads exist — AsNavBindingManager(BindingManager) and
+        // AsNavBindingManager(Binder) — and BindingManager derives from Binder, so both
+        // accept the argument. Pick the most derived one rather than whichever GetMethods
+        // happens to return first. (They agree either way: the Binder overload delegates to
+        // the BindingManager one. The point is not to depend on that.)
+        MethodInfo? m = null;
+        foreach (var c in _navBindingManagerType.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
+        {
+            if (c.Name != "AsNavBindingManager" || c.GetParameters().Length != 1)
+                continue;
+            Type candidate = c.GetParameters()[0].ParameterType;
+            if (!candidate.IsInstanceOfType(bindingManager))
+                continue;
+            if (m == null || m.GetParameters()[0].ParameterType.IsAssignableFrom(candidate))
+                m = c;
+        }
+        if (m == null)
+            return null;
+        return ShowFormUnwrap(() => m.Invoke(null, new[] { bindingManager }));
+    }
+
+    private static object? ShowFormGetProperty(object? target, string name)
+    {
+        if (target == null)
+            return null;
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy;
+        PropertyInfo? p;
+        try
+        {
+            p = target.GetType().GetProperty(name, flags);
+        }
+        catch (AmbiguousMatchException)
+        {
+            // A `new` re-declaration in a derived type. The most-derived one wins.
+            p = target.GetType().GetProperties(flags).FirstOrDefault(x => x.Name == name);
+        }
+        if (p == null || !p.CanRead)
+            return null;
+        return ShowFormUnwrap(() => p.GetValue(target));
+    }
+
+    /// <summary>
+    /// Invoke a one- or two-argument instance method by name, propagating the real exception
+    /// rather than the TargetInvocationException wrapper so the catch ladder above matches
+    /// the same exception types the original method matched.
+    /// </summary>
+    private static void ShowFormInvoke(object target, string name, object?[] args)
+    {
+        var m = target.GetType()
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy)
+            .FirstOrDefault(c => c.Name == name && c.GetParameters().Length == args.Length);
+        if (m == null)
+            throw new MissingMethodException(target.GetType().FullName, name);
+        ShowFormUnwrap(() => m.Invoke(target, args));
+    }
+
+    /// <summary>
+    /// Run a reflection call and rethrow its inner exception with the original stack, so the
+    /// exception filters above see the exception BC actually threw.
+    /// </summary>
+    private static object? ShowFormUnwrap(Func<object?> call)
+    {
+        try
+        {
+            return call();
+        }
+        catch (TargetInvocationException tie) when (tie.InnerException != null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(tie.InnerException).Throw();
+            throw; // unreachable
+        }
+    }
+
+    /// <summary>True when <paramref name="ex"/> is, or derives from, the named type.</summary>
+    private static bool ShowFormIsA(Exception ex, string fullTypeName)
+    {
+        for (Type? t = ex.GetType(); t != null; t = t.BaseType)
+        {
+            if (t.FullName == fullTypeName)
+                return true;
+        }
+        return false;
     }
 
     // ========================================================================
@@ -3550,6 +3937,21 @@ internal class StartupHook
         // the signature is unambiguous.
         if (IsAlreadyJmpHooked(original, name)) return;
 
+        // A JMP hook makes the caller's call site land on the replacement while still using
+        // the ORIGINAL method's calling convention, so the two signatures have to agree at
+        // the ABI level. Nothing checked that until now, and one hook had been wrong since
+        // it was written: Patch #21's replacement was declared `void` against a method that
+        // returns `bool`, so `if (!ShowForm(...))` in Microsoft's InvokeCore branched on
+        // whatever happened to be in the return register.
+        //
+        // This check reports, it does not refuse. Two hooks deliberately declare fewer
+        // parameters than the method they replace (IsTypeForwardingCircularNoop and
+        // CheckFileNameNoop take none) — harmless on x64, where unread argument registers
+        // are simply ignored — and refusing those would stop BC booting. A return-type
+        // class mismatch is the one that silently corrupts a caller, so it is logged as an
+        // error and is worth treating as a bug in the patch.
+        ValidateJmpHookAbi(original, replacement, name);
+
         RuntimeHelpers.PrepareMethod(original.MethodHandle);
         RuntimeHelpers.PrepareMethod(replacement.MethodHandle);
 
@@ -3634,6 +4036,80 @@ internal class StartupHook
     /// point WITHOUT calling PrepareMethod first — PrepareMethod is itself what dies on
     /// an already-patched method under .NET 10.
     /// </summary>
+
+    /// <summary>How a type is passed/returned on x64, coarse enough to catch a real mismatch.</summary>
+    private enum JmpAbiClass { Void, Integer, Float, Struct }
+
+    private static JmpAbiClass ClassifyForJmpAbi(Type t)
+    {
+        if (t == typeof(void)) return JmpAbiClass.Void;
+        if (!t.IsValueType) return JmpAbiClass.Integer;          // reference or pointer — one register
+        if (t.IsEnum) return JmpAbiClass.Integer;
+        if (t == typeof(float) || t == typeof(double)) return JmpAbiClass.Float;
+        if (t.IsPrimitive || t == typeof(IntPtr) || t == typeof(UIntPtr)) return JmpAbiClass.Integer;
+        return JmpAbiClass.Struct;                                // needs an exact type match
+    }
+
+    /// <summary>
+    /// Compare the hooked method's signature with the replacement's and log any way the two
+    /// disagree at the ABI level. Never throws and never refuses the hook — see the call site.
+    /// </summary>
+    private static void ValidateJmpHookAbi(MethodBase original, MethodInfo replacement, string name)
+    {
+        try
+        {
+            Type originalReturn = original is MethodInfo mi ? mi.ReturnType : typeof(void);
+            var originalReturnClass = ClassifyForJmpAbi(originalReturn);
+            var replacementReturnClass = ClassifyForJmpAbi(replacement.ReturnType);
+
+            bool returnMismatch = originalReturnClass != replacementReturnClass
+                || (originalReturnClass == JmpAbiClass.Struct && originalReturn != replacement.ReturnType);
+            if (returnMismatch)
+            {
+                Console.WriteLine($"[StartupHook] ERROR: JMP hook ABI mismatch on {name}: "
+                    + $"replaced method returns {originalReturn.Name} but the replacement returns "
+                    + $"{replacement.ReturnType.Name}. The caller will read an undefined return value.");
+            }
+
+            var originalParams = original.GetParameters();
+            var replacementParams = replacement.GetParameters();
+            int expected = originalParams.Length + (original.IsStatic ? 0 : 1);
+            if (replacementParams.Length != expected)
+            {
+                Console.WriteLine($"[StartupHook] WARNING: JMP hook arity on {name}: replacement takes "
+                    + $"{replacementParams.Length} parameter(s), the replaced "
+                    + $"{(original.IsStatic ? "static" : "instance")} method needs {expected} "
+                    + $"(this is deliberate for the two argument-ignoring no-ops).");
+                return;
+            }
+
+            // Line the two up: for an instance method the replacement's first parameter is 'this'.
+            int offset = original.IsStatic ? 0 : 1;
+            if (offset == 1 && ClassifyForJmpAbi(replacementParams[0].ParameterType) != JmpAbiClass.Integer)
+            {
+                Console.WriteLine($"[StartupHook] WARNING: JMP hook ABI on {name}: the replacement's first "
+                    + $"parameter is {replacementParams[0].ParameterType.Name}, but it receives 'this'.");
+            }
+            for (int i = 0; i < originalParams.Length; i++)
+            {
+                Type a = originalParams[i].ParameterType;
+                Type b = replacementParams[i + offset].ParameterType;
+                var ca = ClassifyForJmpAbi(a);
+                var cb = ClassifyForJmpAbi(b);
+                if (ca != cb || (ca == JmpAbiClass.Struct && a != b))
+                {
+                    Console.WriteLine($"[StartupHook] WARNING: JMP hook ABI on {name}: parameter {i} is "
+                        + $"{a.Name} on the replaced method but {b.Name} on the replacement.");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // Diagnostics only — a failure here must never stop a patch being applied.
+            Console.WriteLine($"[StartupHook] JMP hook ABI check failed for {name}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     private static bool IsAlreadyJmpHooked(MethodBase original, string name)
     {
         try

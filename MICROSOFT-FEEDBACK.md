@@ -262,7 +262,7 @@ and would never be set in production Windows BC deployments.
 | #13 (Watson) | No-ops Watson crash reporting | `DisableWatsonReporting=true` |
 | #19 (CustomReportingServiceClient) | Replaces gRPC client with no-op proxy so the watchdog stops flooding the log | `DisableReportingServiceWatchdog=true` |
 | #20 (SideServiceWatchdog) | No-ops `SideServiceProcessClient.EnsureAlive` so it stops trying to start the Windows PE Reporting Service | Same flag |
-| #21 (NavOpenTaskPageAction.ShowForm) | No-ops `ShowForm` so headless test sessions don't crash on task page opens | `DisableUIRendering=true` (already implied by headless mode but currently not enforced) |
+| #21 (NavOpenTaskPageAction.ShowForm) | Re-implements `ShowForm` so a task-page open still reaches the test's page handler, and contains a headless `NullReferenceException` to that one call instead of the session | A headless display target that shows a form without a renderer, so `ShowForm` cannot null-reference in the first place |
 | #22 (AzureADGraphQuery..ctor) | No-ops the constructor that pulls in MSAL Windows credential APIs | `DisableAzureADGraphIntegration=true` |
 | #23 (OpenXml WordDocPictureMerger) | Fixes a recursion bug in Microsoft's Word merger | (Not a flag — this is a real bug in shipped code, would just want it fixed) |
 
