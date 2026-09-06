@@ -253,6 +253,17 @@ When `--app` is provided the script reads `SymbolReference.json` from the
 `--codeunit-range` if also provided. This avoids the SetupSuite call having
 to iterate tens of thousands of nonexistent IDs.
 
+**Long codeunit lists are batched automatically.** The websocket runner sets
+the suite up by POSTing the ids as one string field, `CodeunitIds:
+Text[2048]` on table 99903, so a list past 2048 characters is rejected by BC
+outright — HTTP 400 `Application_StringExceededLength`, before any test runs.
+Roughly 340 five-digit ids is where that lands. `run-tests.sh` splits the
+list, sets the suite up and runs it once per batch, and merges the reports,
+so the JUnit XML and the `N total, P passed, F failed` line are the same as
+an un-batched run's. Set `BC_CODEUNIT_IDS_MAX_CHARS` to change the per-batch
+budget (default 1000). `python3 scripts/test-run-tests-batching.py` exercises
+the whole loop against a fake BC — no container needed.
+
 **Which company tests run in:** by default both runners read the OData
 `Company` page and pick the evaluation (demo) company. That works on any
 localization without knowing the name in advance — the CRONUS company is
@@ -348,6 +359,7 @@ BC_DEV_PORT=17049 docker compose up -d
 | `BC_SQL_IMAGE`    | GHCR mirror      | SQL Server image. See "SQL Server image" below.                              |
 | `BC_DL_STREAMS`   | `16`             | Parallel byte-range streams per artifact zip (32 total across the two).       |
 | `BC_DL_BIG_SHARE` | `70`             | Percent of the stream budget given to the larger zip so it lands first and its extraction overlaps the other download. `50` restores an even split. |
+| `BC_CODEUNIT_IDS_MAX_CHARS` | `1000` | Characters of codeunit ids `run-tests.sh` sends per suite-setup request. BC's `CodeunitIds` field is `Text[2048]`; the default leaves room for the test suite to grow. |
 
 **SQL Server image:** the `sql` service defaults to
 `ghcr.io/stefanmaron/msdyn365bc.on.linux/mssql:2022-zstd`, a mirror of

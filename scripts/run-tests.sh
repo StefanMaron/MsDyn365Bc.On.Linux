@@ -351,43 +351,103 @@ if [ -z "$CODEUNIT_IDS" ]; then
 fi
 echo "Test codeunits: $CODEUNIT_IDS"
 
-# === Setup Test Suite via OData ===
-echo -n "Setting up test suite... "
-CREATE_BODY=$(mktemp)
-CREATE_HTTP=$(curl -s -o "$CREATE_BODY" -w "%{http_code}" --max-time 15 -u "$AUTH" -X POST \
-    -H "Content-Type: application/json" \
-    -d "{\"CodeunitIds\": \"$CODEUNIT_IDS\"}" \
-    "${API_BASE}/codeunitRunRequests" 2>/dev/null)
-REQUEST_ID=$(py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" < "$CREATE_BODY" 2>/dev/null || true)
-
-if [ -z "$REQUEST_ID" ]; then
-    echo "FAIL (could not create request)"
-    echo ""
-    echo "ERROR: POST ${API_BASE}/codeunitRunRequests"
-    echo "       HTTP code: $CREATE_HTTP"
-    echo "       Request body: {\"CodeunitIds\": \"$CODEUNIT_IDS\"}"
-    echo "       Response body:"
-    sed 's/^/         /' "$CREATE_BODY"
-    echo ""
-    echo "       Likely causes:"
-    echo "         - The custom TestRunner extension (page 99902 'Codeunit Run Requests')"
-    echo "           is not installed for the default tenant. Check 'Test Runner Extension'"
-    echo "           in entrypoint.sh's BC startup logs."
-    echo "         - The OData endpoint we're hitting (\$API_PORT_BASE) is wrong for"
-    echo "           POST in this BC version (the auto-detection picked an endpoint that"
-    echo "           accepts GET on this path but not POST)."
-    echo "         - The request body schema doesn't match the page's bound action."
-    rm -f "$CREATE_BODY"
+# === Split the codeunit list into batches BC's API will accept ===
+#
+# The suite is populated by POSTing the codeunit ids as ONE string field,
+# `CodeunitIds: Text[2048]` on table 99903. Past 2048 characters BC rejects
+# the POST with HTTP 400 Application_StringExceededLength and the run dies
+# before a single test executes — nothing has failed, the list is simply too
+# long. StefanMaron/BusinessCentral.AL.Language.Tests walked into that on
+# 2026-09-05 at 342 test codeunits / 2051 characters, three over.
+#
+# So: split the list, and set the suite up and run it once per batch.
+# SetupSuite calls InitSuite, which CLEARS the DEFAULT suite, so batches
+# cannot be accumulated into one suite and then run together — each batch has
+# to be set up and executed before the next one replaces it. Batches are
+# contiguous slices in discovery order, so the execution order is the same as
+# an un-batched run's.
+#
+# scripts/chunk-codeunit-ids.py owns the split and proves it is total (nothing
+# dropped, duplicated or reordered) before returning; `--self-test` exercises
+# that without a BC container. The default budget is well under 2048 on
+# purpose — see DEFAULT_MAX_CHARS there.
+CODEUNIT_IDS_MAX_CHARS="${BC_CODEUNIT_IDS_MAX_CHARS:-1000}"
+CHUNKS=()
+CHUNK_LIST_FILE=$(mktemp)
+CHUNK_SPLIT_RC=0
+py3 "$REPO_DIR/scripts/chunk-codeunit-ids.py" \
+    --max-chars "$CODEUNIT_IDS_MAX_CHARS" "$CODEUNIT_IDS" > "$CHUNK_LIST_FILE" || CHUNK_SPLIT_RC=$?
+if [ "$CHUNK_SPLIT_RC" -ne 0 ]; then
+    echo "ERROR: could not split the codeunit id list into API-sized batches (rc=$CHUNK_SPLIT_RC)"
+    echo "       List was ${#CODEUNIT_IDS} chars: $CODEUNIT_IDS"
+    rm -f "$CHUNK_LIST_FILE"
     exit 1
 fi
-rm -f "$CREATE_BODY"
-
-SETUP_HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 -u "$AUTH" -X POST \
-    "${API_BASE}/codeunitRunRequests(${REQUEST_ID})/Microsoft.NAV.setupSuite" 2>/dev/null)
-if [ "$SETUP_HTTP" != "200" ] && [ "$SETUP_HTTP" != "204" ]; then
-    echo "FAIL (HTTP $SETUP_HTTP)"
+# Read the whole list into an array BEFORE the execution loop. The loop body
+# runs curl and `docker compose exec`, and a child that reads stdin would eat
+# the rest of a `while read` redirection — the loop would then run once and
+# look like it had run to completion.
+while IFS= read -r _chunk_line; do
+    [ -n "$_chunk_line" ] && CHUNKS+=("$_chunk_line")
+done < "$CHUNK_LIST_FILE"
+rm -f "$CHUNK_LIST_FILE"
+if [ ${#CHUNKS[@]} -eq 0 ]; then
+    echo "ERROR: codeunit id split produced no batches"
     exit 1
 fi
+if [ ${#CHUNKS[@]} -gt 1 ]; then
+    echo "Codeunit id list is ${#CODEUNIT_IDS} chars; BC's CodeunitIds field holds 2048."
+    echo "Running in ${#CHUNKS[@]} batches of at most ${CODEUNIT_IDS_MAX_CHARS} chars each."
+fi
+
+# === Setup Test Suite via OData (per batch) ===
+REQUEST_ID=""
+setup_suite_chunk() {
+    local chunk="$1" label="$2"
+    echo -n "Setting up test suite${label}... "
+    local create_body create_http
+    create_body=$(mktemp)
+    create_http=$(curl -s -o "$create_body" -w "%{http_code}" --max-time 15 -u "$AUTH" -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"CodeunitIds\": \"$chunk\"}" \
+        "${API_BASE}/codeunitRunRequests" 2>/dev/null)
+    REQUEST_ID=$(py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" < "$create_body" 2>/dev/null || true)
+
+    if [ -z "$REQUEST_ID" ]; then
+        echo "FAIL (could not create request)"
+        echo ""
+        echo "ERROR: POST ${API_BASE}/codeunitRunRequests"
+        echo "       HTTP code: $create_http"
+        echo "       Request body: {\"CodeunitIds\": \"$chunk\"}"
+        echo "       CodeunitIds length: ${#chunk} chars (BC's field limit is 2048)"
+        echo "       Response body:"
+        sed 's/^/         /' "$create_body"
+        echo ""
+        echo "       Likely causes:"
+        echo "         - The custom TestRunner extension (page 99902 'Codeunit Run Requests')"
+        echo "           is not installed for the default tenant. Check 'Test Runner Extension'"
+        echo "           in entrypoint.sh's BC startup logs."
+        echo "         - The OData endpoint we're hitting (\$API_PORT_BASE) is wrong for"
+        echo "           POST in this BC version (the auto-detection picked an endpoint that"
+        echo "           accepts GET on this path but not POST)."
+        echo "         - The request body schema doesn't match the page's bound action."
+        echo "         - Application_StringExceededLength above means the batch is still"
+        echo "           too long — lower BC_CODEUNIT_IDS_MAX_CHARS (currently"
+        echo "           ${CODEUNIT_IDS_MAX_CHARS})."
+        rm -f "$create_body"
+        return 1
+    fi
+    rm -f "$create_body"
+
+    local setup_http
+    setup_http=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 -u "$AUTH" -X POST \
+        "${API_BASE}/codeunitRunRequests(${REQUEST_ID})/Microsoft.NAV.setupSuite" 2>/dev/null)
+    if [ "$setup_http" != "200" ] && [ "$setup_http" != "204" ]; then
+        echo "FAIL (HTTP $setup_http)"
+        return 1
+    fi
+    return 0
+}
 
 # === Verify the suite was populated ===
 #
@@ -460,13 +520,13 @@ sys.exit(0 if matched else 1)
     return 1
 }
 
-echo ""   # newline so per-attempt logs are readable
-if ! verify_suite_populated "$REQUEST_ID" "$CODEUNIT_IDS"; then
+report_verify_failure() {
+    local chunk="$1"
     echo ""
     echo "ERROR: setupSuite returned 200 but the DEFAULT test suite never"
     echo "       contained any of the expected codeunits after 20 retries (~40s)."
     echo ""
-    echo "       Expected codeunit IDs: $CODEUNIT_IDS"
+    echo "       Expected codeunit IDs: $chunk"
     echo ""
     echo "       Last verify detail:    $VERIFY_LAST_DETAIL"
     echo ""
@@ -484,11 +544,17 @@ if ! verify_suite_populated "$REQUEST_ID" "$CODEUNIT_IDS"; then
     echo "       Cross-check installed extensions:"
     echo "         curl -u $AUTH '${BASE_URL}/api/v2.0/extensionDeployments'"
     echo "         curl -u $AUTH '${_API_FALLBACK}/api/v2.0/extensionDeployments'"
-    exit 1
-fi
-echo "Test suite populated."
+}
 
 # === Disable Known-Failing Tests ===
+#
+# Parsed once; APPLIED once per batch. Each batch's setupSuite calls
+# InitSuite, which deletes the DEFAULT suite's Test Method Line rows —
+# including the Run=false flags a previous batch's disableTests set. Applying
+# the disables outside the loop would silently re-enable every disabled test
+# from the second batch onwards.
+DISABLED_ENTRIES=""
+DISABLED_FILE_COUNT=0
 if [ -n "$DISABLED_TESTS_DIR" ] && [ -d "$DISABLED_TESTS_DIR" ]; then
     # Read each DisabledTests JSON file individually (concatenating produces invalid JSON)
     # BCApps format per file: [{"codeunitId": 132920, "method": "TestName"}, ...]
@@ -523,26 +589,37 @@ if current:
 for c in chunks:
     print(c)
 " "$DISABLED_TESTS_DIR" 2>/dev/null)
-    echo "Parsed disabled tests from $(find "$DISABLED_TESTS_DIR" -name '*.json' | wc -l) files"
-
-    if [ -n "$DISABLED_ENTRIES" ]; then
-        DISABLED_COUNT=0
-        while IFS= read -r CHUNK; do
-            # Create a request and call DisableTests
-            DIS_RESP=$(curl -s --max-time 15 -u "$AUTH" -X POST \
-                -H "Content-Type: application/json" \
-                -d "{\"CodeunitIds\": \"$CHUNK\"}" \
-                "${API_BASE}/codeunitRunRequests" 2>/dev/null)
-            DIS_ID=$(echo "$DIS_RESP" | py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" 2>/dev/null || true)
-            if [ -n "$DIS_ID" ]; then
-                curl -s -o /dev/null --max-time 30 -u "$AUTH" -X POST \
-                    "${API_BASE}/codeunitRunRequests(${DIS_ID})/Microsoft.NAV.disableTests" 2>/dev/null
-                DISABLED_COUNT=$((DISABLED_COUNT + 1))
-            fi
-        done <<< "$DISABLED_ENTRIES"
-        echo "Disabled tests: $DISABLED_COUNT chunk(s) from $(find "$DISABLED_TESTS_DIR" -name "*.json" | wc -l) file(s)"
-    fi
+    DISABLED_FILE_COUNT=$(find "$DISABLED_TESTS_DIR" -name '*.json' | wc -l)
+    echo "Parsed disabled tests from $DISABLED_FILE_COUNT files"
 fi
+
+# Same reason as the batch list above: materialise into an array first, so
+# nothing inside the apply loop can eat the input stream.
+DISABLED_CHUNKS=()
+if [ -n "$DISABLED_ENTRIES" ]; then
+    while IFS= read -r _dis_line; do
+        [ -n "$_dis_line" ] && DISABLED_CHUNKS+=("$_dis_line")
+    done <<< "$DISABLED_ENTRIES"
+fi
+
+apply_disabled_tests() {
+    [ ${#DISABLED_CHUNKS[@]} -eq 0 ] && return 0
+    local applied=0 dis_chunk dis_resp dis_id
+    for dis_chunk in "${DISABLED_CHUNKS[@]}"; do
+        dis_resp=$(curl -s --max-time 15 -u "$AUTH" -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"CodeunitIds\": \"$dis_chunk\"}" \
+            "${API_BASE}/codeunitRunRequests" 2>/dev/null)
+        dis_id=$(echo "$dis_resp" | py3 -c "import sys,json; print(json.load(sys.stdin)['Id'])" 2>/dev/null || true)
+        if [ -n "$dis_id" ]; then
+            curl -s -o /dev/null --max-time 30 -u "$AUTH" -X POST \
+                "${API_BASE}/codeunitRunRequests(${dis_id})/Microsoft.NAV.disableTests" 2>/dev/null
+            applied=$((applied + 1))
+        fi
+    done
+    echo "Disabled tests: $applied chunk(s) from $DISABLED_FILE_COUNT file(s)"
+    return 0
+}
 
 # === Execute Tests via WebSocket ===
 echo ""
@@ -558,12 +635,6 @@ ODATA_HOST="${BC_HOST}:7052"
 # Parse auth components
 AUTH_USER="${AUTH%%:*}"
 AUTH_PASS="${AUTH#*:}"
-
-# Calculate max iterations: each codeunit needs ~2 iterations (run + reconnect after isolation)
-IFS=',' read -ra CU_ARRAY <<< "$CODEUNIT_IDS"
-NUM_CODEUNITS=${#CU_ARRAY[@]}
-MAX_ITER=$(( NUM_CODEUNITS * 3 + 20 ))
-echo "Executing $NUM_CODEUNITS codeunits via WebSocket (max $MAX_ITER iterations)..."
 
 # Note: do NOT pass --codeunit-filter here — the suite is already set up via OData.
 # Passing it would re-trigger SetupSuite which clears test results.
@@ -607,94 +678,7 @@ if [ "$USE_DOCKER_EXEC" = "false" ]; then
         fi
     done
 fi
-
-if [ "$USE_DOCKER_EXEC" = "true" ]; then
-    # Inside the container, BC's WebSocket and API ports are local to the
-    # container itself, so always use localhost regardless of how the host
-    # has them mapped. The TestRunner.dll path is fixed by the Dockerfile.
-    #
-    # --verbose is now passed by default. Without it, every Log() message
-    # in TestRunner.dll is silently swallowed (the function gates on a
-    # `verbose` flag and writes to stderr only when set). That made the
-    # bc-copilot-blueprint debugging session needlessly painful: the
-    # runner would exit with "0 total, 0 passed, 0 failed" in 0 seconds
-    # and there was no way to see *why* — whether it was a connection
-    # failure, an empty suite, "All tests executed" on the first iter,
-    # or anything else. Verbose stderr is cheap and the right default.
-    #
-    # JUnit output: when --junit-output is set, TestRunner writes inside
-    # the container to /tmp/junit-result.xml, then we docker cp it back
-    # to the caller-supplied host path. This avoids needing to bind-mount
-    # the destination path.
-    JUNIT_FLAGS=()
-    if [ -n "$JUNIT_OUTPUT" ]; then
-        JUNIT_FLAGS+=(--junit-output /tmp/junit-result.xml)
-    fi
-    ( cd "$REPO_DIR" && printf '%s' "$AUTH_PASS" | docker compose exec -T bc \
-        env DOTNET_STARTUP_HOOKS= dotnet /bc/tools/TestRunner/TestRunner.dll \
-        --verbose \
-        --host "localhost:7085" \
-        --odata-host "localhost:7052" \
-        --company "$COMPANY" \
-        --user "$AUTH_USER" \
-        --password-stdin \
-        --suite "DEFAULT" \
-        --num-codeunits "$NUM_CODEUNITS" \
-        --timeout "$TIMEOUT_MIN" \
-        --codeunit-timeout 10 \
-        --max-iterations "$MAX_ITER" \
-        "${JUNIT_FLAGS[@]}" )
-    EXIT_CODE=$?
-    if [ -n "$JUNIT_OUTPUT" ]; then
-        # Pull the in-container JUnit file out to the host.
-        mkdir -p "$(dirname "$JUNIT_OUTPUT")"
-        if ( cd "$REPO_DIR" && docker compose cp bc:/tmp/junit-result.xml "$JUNIT_OUTPUT" 2>/dev/null ); then
-            echo "[run-tests] JUnit XML copied to $JUNIT_OUTPUT"
-        else
-            echo "[run-tests] WARN: TestRunner did not produce /tmp/junit-result.xml inside the container"
-        fi
-    fi
-elif [ -n "$HOST_PREBUILT" ]; then
-    # Pre-built binary on the host — no SDK needed, just the .NET 8 runtime.
-    echo "[run-tests] Using pre-built TestRunner at $HOST_PREBUILT"
-    JUNIT_FLAGS=()
-    if [ -n "$JUNIT_OUTPUT" ]; then
-        JUNIT_FLAGS+=(--junit-output "$JUNIT_OUTPUT")
-    fi
-    printf '%s' "$AUTH_PASS" | dotnet "$HOST_PREBUILT" \
-        --verbose \
-        --host "$WS_HOST" \
-        --odata-host "$ODATA_HOST" \
-        --company "$COMPANY" \
-        --user "$AUTH_USER" \
-        --password-stdin \
-        --suite "DEFAULT" \
-        --num-codeunits "$NUM_CODEUNITS" \
-        --timeout "$TIMEOUT_MIN" \
-        --codeunit-timeout 10 \
-        --max-iterations "$MAX_ITER" \
-        "${JUNIT_FLAGS[@]}"
-    EXIT_CODE=$?
-elif command -v dotnet >/dev/null 2>&1; then
-    JUNIT_FLAGS=()
-    if [ -n "$JUNIT_OUTPUT" ]; then
-        JUNIT_FLAGS+=(--junit-output "$JUNIT_OUTPUT")
-    fi
-    printf '%s' "$AUTH_PASS" | dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
-        --verbose \
-        --host "$WS_HOST" \
-        --odata-host "$ODATA_HOST" \
-        --company "$COMPANY" \
-        --user "$AUTH_USER" \
-        --password-stdin \
-        --suite "DEFAULT" \
-        --num-codeunits "$NUM_CODEUNITS" \
-        --timeout "$TIMEOUT_MIN" \
-        --codeunit-timeout 10 \
-        --max-iterations "$MAX_ITER" \
-        "${JUNIT_FLAGS[@]}"
-    EXIT_CODE=$?
-else
+if [ "$USE_DOCKER_EXEC" = "false" ] && [ -z "$HOST_PREBUILT" ] && ! command -v dotnet >/dev/null 2>&1; then
     echo "ERROR: cannot run TestRunner — no execution method available."
     echo "  Tried (in order):"
     echo "    1. docker compose exec bc (container not found or missing TestRunner.dll)"
@@ -706,6 +690,180 @@ else
     exit 1
 fi
 
-# The TestRunner already reads and prints results via OData.
-# Its exit code: 0 = all pass, 1 = failures or no tests.
-exit $EXIT_CODE
+# Runs ONE batch. $1 = codeunit count (for the runner's progress display and
+# its own "did every codeunit run" check), $2 = where to write this batch's
+# JUnit XML. Always emits JUnit, even when the caller did not ask for a file:
+# the merge step below needs it to prove no batch went missing.
+execute_chunk() {
+    local num_codeunits="$1" junit_path="$2"
+    local max_iter=$(( num_codeunits * 3 + 20 ))
+    local rc=0
+    mkdir -p "$(dirname "$junit_path")"
+    rm -f "$junit_path"
+    if [ "$USE_DOCKER_EXEC" = "true" ]; then
+        # Inside the container, BC's WebSocket and API ports are local to the
+        # container itself, so always use localhost regardless of how the host
+        # has them mapped. The TestRunner.dll path is fixed by the Dockerfile.
+        #
+        # --verbose is now passed by default. Without it, every Log() message
+        # in TestRunner.dll is silently swallowed (the function gates on a
+        # `verbose` flag and writes to stderr only when set). That made the
+        # bc-copilot-blueprint debugging session needlessly painful: the
+        # runner would exit with "0 total, 0 passed, 0 failed" in 0 seconds
+        # and there was no way to see *why* — whether it was a connection
+        # failure, an empty suite, "All tests executed" on the first iter,
+        # or anything else. Verbose stderr is cheap and the right default.
+        #
+        # JUnit output: TestRunner writes to a per-batch path inside the
+        # container, which we then docker cp back to the host path for this
+        # batch. Avoids needing to bind-mount the destination, and a per-batch
+        # name means a batch can never copy out the PREVIOUS batch's report if
+        # its own write failed — the copy fails instead, and the merge step
+        # turns that into a loud error rather than a duplicated result set.
+        local in_container_junit="/tmp/$(basename "$junit_path")"
+        ( cd "$REPO_DIR" && printf '%s' "$AUTH_PASS" | docker compose exec -T bc \
+            env DOTNET_STARTUP_HOOKS= dotnet /bc/tools/TestRunner/TestRunner.dll \
+            --verbose \
+            --host "localhost:7085" \
+            --odata-host "localhost:7052" \
+            --company "$COMPANY" \
+            --user "$AUTH_USER" \
+            --password-stdin \
+            --suite "DEFAULT" \
+            --num-codeunits "$num_codeunits" \
+            --timeout "$TIMEOUT_MIN" \
+            --codeunit-timeout 10 \
+            --max-iterations "$max_iter" \
+            --junit-output "$in_container_junit" )
+        rc=$?
+        # </dev/null: `docker compose cp` inherits this script's stdin, and
+        # run-tests.sh is itself called from a `while read ... done <<<` loop
+        # in bc-test-from-source.yml. A child that reads stdin eats the rest
+        # of that here-string and the caller's loop silently runs once.
+        if ( cd "$REPO_DIR" && docker compose cp "bc:$in_container_junit" "$junit_path" </dev/null 2>/dev/null ); then
+            echo "[run-tests] JUnit XML copied to $junit_path"
+        else
+            echo "[run-tests] WARN: TestRunner did not produce $in_container_junit inside the container"
+        fi
+    elif [ -n "$HOST_PREBUILT" ]; then
+        # Pre-built binary on the host — no SDK needed, just the .NET 8 runtime.
+        echo "[run-tests] Using pre-built TestRunner at $HOST_PREBUILT"
+        printf '%s' "$AUTH_PASS" | dotnet "$HOST_PREBUILT" \
+            --verbose \
+            --host "$WS_HOST" \
+            --odata-host "$ODATA_HOST" \
+            --company "$COMPANY" \
+            --user "$AUTH_USER" \
+            --password-stdin \
+            --suite "DEFAULT" \
+            --num-codeunits "$num_codeunits" \
+            --timeout "$TIMEOUT_MIN" \
+            --codeunit-timeout 10 \
+            --max-iterations "$max_iter" \
+            --junit-output "$junit_path"
+        rc=$?
+    else
+        printf '%s' "$AUTH_PASS" | dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
+            --verbose \
+            --host "$WS_HOST" \
+            --odata-host "$ODATA_HOST" \
+            --company "$COMPANY" \
+            --user "$AUTH_USER" \
+            --password-stdin \
+            --suite "DEFAULT" \
+            --num-codeunits "$num_codeunits" \
+            --timeout "$TIMEOUT_MIN" \
+            --codeunit-timeout 10 \
+            --max-iterations "$max_iter" \
+            --junit-output "$junit_path"
+        rc=$?
+    fi
+    return $rc
+}
+
+# --- The batch loop ---
+CHUNK_JUNIT_DIR=$(mktemp -d)
+CHUNK_JUNITS=()
+OVERALL_RC=0
+BATCHES_EXECUTED=0
+RUN_START_TS=$(date +%s)
+
+CHUNK_INDEX=0
+for CHUNK in "${CHUNKS[@]}"; do
+    CHUNK_INDEX=$((CHUNK_INDEX + 1))
+    CHUNK_LABEL=""
+    [ ${#CHUNKS[@]} -gt 1 ] && CHUNK_LABEL=" (batch $CHUNK_INDEX/${#CHUNKS[@]})"
+
+    IFS=',' read -ra CU_ARRAY <<< "$CHUNK"
+    NUM_CODEUNITS=${#CU_ARRAY[@]}
+
+    if ! setup_suite_chunk "$CHUNK" "$CHUNK_LABEL"; then
+        rm -rf "$CHUNK_JUNIT_DIR"
+        exit 1
+    fi
+
+    echo ""   # newline so per-attempt logs are readable
+    if ! verify_suite_populated "$REQUEST_ID" "$CHUNK"; then
+        report_verify_failure "$CHUNK"
+        rm -rf "$CHUNK_JUNIT_DIR"
+        exit 1
+    fi
+    echo "Test suite populated${CHUNK_LABEL}."
+
+    apply_disabled_tests
+
+    CHUNK_JUNIT="$CHUNK_JUNIT_DIR/batch-$CHUNK_INDEX.xml"
+    echo "Executing $NUM_CODEUNITS codeunits via WebSocket${CHUNK_LABEL}..."
+    execute_chunk "$NUM_CODEUNITS" "$CHUNK_JUNIT"
+    CHUNK_RC=$?
+    BATCHES_EXECUTED=$((BATCHES_EXECUTED + 1))
+    CHUNK_JUNITS+=("$CHUNK_JUNIT")
+    [ "$CHUNK_RC" -ne 0 ] && OVERALL_RC=1
+done
+
+# A batch that never ran is the failure mode this whole change could
+# introduce, and it would look exactly like a smaller green run. Assert it
+# directly rather than inferring it from the totals.
+if [ "$BATCHES_EXECUTED" -ne "${#CHUNKS[@]}" ]; then
+    echo "ERROR: $BATCHES_EXECUTED of ${#CHUNKS[@]} batch(es) were executed — the rest never ran"
+    rm -rf "$CHUNK_JUNIT_DIR"
+    exit 1
+fi
+
+# === Merge the batches into one report ===
+#
+# The per-batch JUnit files are disjoint by construction (each codeunit is in
+# exactly one batch), so merging is a concatenation of <testsuite> elements
+# with the roll-up attributes recomputed. Same shape run-tests-hybrid.py
+# produces, so downstream consumers cannot tell a batched run from a
+# single-request one.
+TOTAL_ELAPSED=$(( $(date +%s) - RUN_START_TS ))
+MERGED_JUNIT="$JUNIT_OUTPUT"
+[ -z "$MERGED_JUNIT" ] && MERGED_JUNIT="$CHUNK_JUNIT_DIR/merged.xml"
+
+# STRICT_COMPLETENESS: when the list was batched, a codeunit that produced no
+# <testsuite> at all means a batch was lost somewhere between dispatch and the
+# report, and that must fail the run (issue #57 is the same false-green
+# shape). On a single un-batched batch the check is reported but not fatal —
+# no batching happened, so a missing codeunit is a pre-existing condition this
+# change did not cause and must not newly re-verdict.
+STRICT_COMPLETENESS=0
+[ ${#CHUNKS[@]} -gt 1 ] && STRICT_COMPLETENESS=1
+
+STRICT_FLAG=()
+[ "$STRICT_COMPLETENESS" = "1" ] && STRICT_FLAG=(--strict)
+py3 "$REPO_DIR/scripts/merge-junit-batches.py" \
+    --out "$MERGED_JUNIT" \
+    --expected "$CODEUNIT_IDS" \
+    --elapsed "$TOTAL_ELAPSED" \
+    "${STRICT_FLAG[@]}" \
+    "${CHUNK_JUNITS[@]}"
+MERGE_RC=$?
+[ "$MERGE_RC" -ne 0 ] && OVERALL_RC=1
+
+if [ -n "$JUNIT_OUTPUT" ] && [ -f "$JUNIT_OUTPUT" ]; then
+    echo "JUnit XML written to $JUNIT_OUTPUT"
+fi
+rm -rf "$CHUNK_JUNIT_DIR"
+
+exit $OVERALL_RC
