@@ -42,6 +42,21 @@ jobs:
       - name: Check examples against the reusable workflows
         run: python3 scripts/check-example-drift.py
 
+      # run-tests.sh batches its codeunit list across several suite-setup
+      # requests once the joined ids pass BC's 2048-character CodeunitIds
+      # field. A batch lost in that loop does not look like an error — it
+      # looks like a green run with fewer tests in it, which is the shape
+      # issue #57 was about. These three run in seconds, need no BC, and are
+      # the only thing standing between that bug and a merge.
+      - name: Codeunit id batching is total
+        run: python3 scripts/chunk-codeunit-ids.py --self-test
+
+      - name: Batched JUnit reports merge without loss
+        run: python3 scripts/merge-junit-batches.py --self-test
+
+      - name: run-tests.sh runs every batch (end to end, fake BC)
+        run: python3 scripts/test-run-tests-batching.py
+
       # ci-lock.sh runs on every pipeline in the repo and in every consumer
       # that copied an example, and nothing else lints it — the only other
       # shellcheck pass in CI is snapshot-scoped (test-snapshot.yml). A bug
