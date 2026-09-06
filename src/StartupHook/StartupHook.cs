@@ -3040,12 +3040,21 @@ internal class StartupHook
         if (bindingManager == null || _navBindingManagerType == null)
             return null;
         // Two single-argument overloads exist — AsNavBindingManager(BindingManager) and
-        // AsNavBindingManager(Binder) — so pick by what the argument actually is.
-        var m = _navBindingManagerType
-            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
-            .FirstOrDefault(c => c.Name == "AsNavBindingManager"
-                              && c.GetParameters().Length == 1
-                              && c.GetParameters()[0].ParameterType.IsInstanceOfType(bindingManager));
+        // AsNavBindingManager(Binder) — and BindingManager derives from Binder, so both
+        // accept the argument. Pick the most derived one rather than whichever GetMethods
+        // happens to return first. (They agree either way: the Binder overload delegates to
+        // the BindingManager one. The point is not to depend on that.)
+        MethodInfo? m = null;
+        foreach (var c in _navBindingManagerType.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
+        {
+            if (c.Name != "AsNavBindingManager" || c.GetParameters().Length != 1)
+                continue;
+            Type candidate = c.GetParameters()[0].ParameterType;
+            if (!candidate.IsInstanceOfType(bindingManager))
+                continue;
+            if (m == null || m.GetParameters()[0].ParameterType.IsAssignableFrom(candidate))
+                m = c;
+        }
         if (m == null)
             return null;
         return ShowFormUnwrap(() => m.Invoke(null, new[] { bindingManager }));
