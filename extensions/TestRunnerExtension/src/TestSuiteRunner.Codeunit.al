@@ -64,12 +64,23 @@ codeunit 99904 "Test Suite Runner"
     /// <summary>
     /// Adds a test codeunit to the suite. Uses codeunit 130452 (Test Runner - Get Methods)
     /// to discover all test methods in the codeunit.
+    ///
+    /// Adding the same codeunit twice is a no-op. A suite is a set, and the
+    /// caller that populates one in several parts (see SetupSuiteAppend on
+    /// page 99902) has to be able to repeat a part without running its tests
+    /// twice.
     /// </summary>
     procedure AddTestCodeunit(CodeunitId: Integer)
     var
         TestMethodLine: Record "Test Method Line";
         LastLineNo: Integer;
     begin
+        TestMethodLine.SetRange("Test Suite", SuiteName);
+        TestMethodLine.SetRange("Test Codeunit", CodeunitId);
+        if not TestMethodLine.IsEmpty() then
+            exit;
+        TestMethodLine.Reset();
+
         // Get the last line number
         TestMethodLine.SetRange("Test Suite", SuiteName);
         if TestMethodLine.FindLast() then

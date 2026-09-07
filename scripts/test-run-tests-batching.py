@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""Drive the real scripts/run-tests.sh against a fake BC and prove its
-codeunit batching loses nothing.
+"""Drive the real scripts/run-tests.sh against a fake BC and prove that
+splitting the codeunit list for the POST loses nothing — and that it still
+runs as ONE session.
 
 WHY A HARNESS AND NOT A UNIT TEST
 ---------------------------------
 chunk-codeunit-ids.py proves the SPLIT is total and merge-junit-batches.py
 proves the MERGE is total, each with its own `--self-test`. Neither can see
-the thing in between: the bash loop in run-tests.sh that sets the suite up,
-runs it, and collects a report once per batch. That loop is where a batch
-would actually go missing, and a missing batch does not look like an error —
-it looks like a green run with fewer tests in it (issue #57's shape).
+the thing in between: the bash loop in run-tests.sh that posts the suite in
+parts and then runs it. That loop is where a part would actually go missing,
+and a missing part does not look like an error — it looks like a green run
+with fewer tests in it (issue #57's shape).
+
+It is also where issue #74 lived. The loop used to RUN each part as well as
+post it, so every part was its own runner process and its own client session,
+and session state restarted at every part boundary. The check that the runner
+is invoked exactly once is the regression guard for that: it is the whole
+difference between one session and several, and nothing else in the repo
+would notice it changing back.
 
 So this runs the real script, unmodified, with `curl`, `docker` and `dotnet`
 shimmed onto PATH. The fake BC enforces the same 2048-character `CodeunitIds`
@@ -47,7 +55,7 @@ LIMIT = 2048            # width of CodeunitIds (Text[2048]) on table 99903
 def load():
     if not os.path.isfile(STATE):
         return {"requests": {}, "suite": [], "posts": [], "setups": 0,
-                "runs": [], "disables": 0, "next": 1}
+                "appends": 0, "runs": [], "disables": 0, "next": 1}
     with open(STATE) as f:
         return json.load(f)
 
@@ -79,11 +87,24 @@ if url.endswith("/ODataV4/Company"):
         {"Name": "CRONUS", "Id": "aaa-bbb", "Evaluation_Company": True}]})
 elif url.endswith("/api/v2.0/companies"):
     code, body = 200, json.dumps({"value": [{"name": "CRONUS", "id": "aaa-bbb"}]})
+elif "Microsoft.NAV.setupSuiteAppend" in url:
+    rid = re.search(r"codeunitRunRequests\(([^)]+)\)", url).group(1)
+    s["appends"] += 1
+    # Sabotage hook: accept the Nth append and add nothing. A part silently
+    # missing from the suite is the modern shape of issue #57 — the run stays
+    # green and simply holds fewer tests.
+    if os.environ.get("FAKEBC_DROP_APPEND") != str(s["appends"]):
+        # Mirrors AddTestCodeunit: a codeunit already in the suite is ignored,
+        # so re-posting a part cannot run its tests twice.
+        for t in s["requests"][rid].split(","):
+            if t and t not in s["suite"]:
+                s["suite"].append(t)
+    code, body = 200, json.dumps({"@odata.context": "x", "value": True})
 elif "Microsoft.NAV.setupSuite" in url:
     rid = re.search(r"codeunitRunRequests\(([^)]+)\)", url).group(1)
     s["suite"] = [t for t in s["requests"][rid].split(",") if t]
     s["setups"] += 1
-    code = 200
+    code, body = 200, json.dumps({"@odata.context": "x", "value": True})
 elif "Microsoft.NAV.disableTests" in url:
     s["disables"] += 1
     code = 200
@@ -151,9 +172,9 @@ with open(STATE, "w") as f:
 
 per = int(os.environ.get("FAKEBC_TESTS_PER_CU", "2"))
 
-# Sabotage hook: pretend the Nth batch's runner exited 0 but never wrote its
-# report. That is the false-green the completeness check has to catch, and it
-# is invisible to an exit-code check.
+# Sabotage hook: pretend the Nth runner invocation exited 0 but never wrote
+# its report. That is the false-green the completeness check has to catch, and
+# it is invisible to an exit-code check.
 if os.environ.get("FAKEBC_DROP_RUN") == str(len(s["runs"])):
     print("0 total, 0 passed, 0 failed, 0 skipped")
     sys.exit(0)
@@ -204,7 +225,8 @@ class Run:
     @property
     def dispatched(self) -> list[str]:
         """Every codeunit id the runner was actually asked to execute, in
-        order, flattened across batches."""
+        order, flattened across runs. There should only ever be one run —
+        see the session check in main()."""
         return [cu for run in self.state["runs"] for cu in run]
 
     def merged_root(self):
@@ -265,42 +287,59 @@ def main() -> int:
               r.rc == 0)
         check("no request body exceeds BC's field limit",
               bool(r.posts) and max(len(p) for p in r.posts) <= 2048)
-        check("the list was actually split into more than one batch",
-              len(r.state["runs"]) > 1)
+        check("the list was actually posted in more than one part",
+              len(r.posts) > 1)
+        check("the first part clears the suite and the rest add to it",
+              r.state["setups"] == 1 and r.state["appends"] == len(r.posts) - 1)
+        # THE issue #74 guard. One runner process is one client session, and a
+        # session is what SingleInstance codeunit state lives in. Splitting the
+        # run back up would not fail any other check here.
+        check("the whole suite runs in ONE runner process, so one session",
+              len(r.state["runs"]) == 1)
         check("every dispatched codeunit is executed exactly once, in order",
               r.dispatched == CODEUNIT_IDS)
         merged = r.merged_root()
-        check("the merged report holds one testsuite per codeunit",
+        check("the report holds one testsuite per codeunit",
               merged is not None
               and len(merged.findall("testsuite")) == len(CODEUNIT_IDS))
-        check("the merged roll-up counts every batch's tests",
+        check("the roll-up counts every part's tests",
               merged is not None and merged.get("tests") == str(expected_total))
-        # bc-test-from-source.yml greps this line and takes the LAST match, so
-        # a per-batch line landing last would report one batch as the run.
+        # bc-test-from-source.yml greps this line and takes the LAST match.
         summary = [ln for ln in r.out.splitlines() if " total, " in ln]
-        check("the LAST summary line is the run total, not a batch's",
+        check("the LAST summary line is the run total",
               bool(summary) and summary[-1].startswith(f"{expected_total} total,"))
-        check("the completeness of the batching is stated in the log",
+        check("the completeness of the run is stated in the log",
               f"All {len(CODEUNIT_IDS)} dispatched codeunit(s) reported results"
               in r.out)
+        check("the disabled-test list is applied once, after the whole suite "
+              "is posted", r.state["disables"] == 0)
 
-        print("\na lost batch must not read as a smaller green run:")
-        # Third batch's runner exits 0 and writes nothing — the exact shape an
-        # exit-code check cannot see.
-        r2 = run_case(root, script, ids, env={"FAKEBC_DROP_RUN": "3"})
+        print("\na part that never reached the suite must not read as a "
+              "smaller green run:")
+        # The second append is accepted with HTTP 200 and adds nothing. The
+        # run then executes fewer codeunits and reports them all as passed —
+        # green, smaller, and invisible to an exit-code check.
+        r2 = run_case(root, script, ids, env={"FAKEBC_DROP_APPEND": "1"})
         check("the run FAILS", r2.rc != 0)
-        check("the lost batch's codeunits are named",
-              "produced NO result at all" in r2.out and "60341" in r2.out)
-        check("the missing batch report is named", "batch report missing" in r2.out)
+        check("the lost part's codeunits are named",
+              "produced NO result at all" in r2.out)
+        check("the runner still ran only once", len(r2.state["runs"]) == 1)
 
-        print("\na list that fits still behaves like an un-batched run:")
-        r3 = run_case(root, script, "60001,60002,60003")
-        check("it succeeds", r3.rc == 0)
-        check("it makes exactly one suite-setup request", len(r3.posts) == 1)
-        check("it runs the runner exactly once", len(r3.state["runs"]) == 1)
+        print("\na runner that writes no report at all must not read as "
+              "green:")
+        r3 = run_case(root, script, ids, env={"FAKEBC_DROP_RUN": "1"})
+        check("the run FAILS", r3.rc != 0)
+        check("the missing report is named", "batch report missing" in r3.out)
+
+        print("\na list that fits still behaves like an un-split run:")
+        r4 = run_case(root, script, "60001,60002,60003")
+        check("it succeeds", r4.rc == 0)
+        check("it makes exactly one suite-setup request", len(r4.posts) == 1)
+        check("it never calls the append action", r4.state["appends"] == 0)
+        check("it runs the runner exactly once", len(r4.state["runs"]) == 1)
         check("it still reports a run total",
               any(ln.startswith("6 total, 6 passed, 0 failed")
-                  for ln in r3.out.splitlines()))
+                  for ln in r4.out.splitlines()))
 
     if failures:
         print(f"\n{len(failures)} check(s) failed: {', '.join(failures)}")

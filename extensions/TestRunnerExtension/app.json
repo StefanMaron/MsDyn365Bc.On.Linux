@@ -2,7 +2,7 @@
   "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
   "name": "Test Runner Extension",
   "publisher": "ALDirectCompile",
-  "version": "3.1.0.0",
+  "version": "3.2.0.0",
   "runtime": "16.0",
   "target": "OnPrem",
   "dependencies": [

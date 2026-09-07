@@ -359,7 +359,7 @@ if [ -z "$CODEUNIT_IDS" ]; then
 fi
 echo "Test codeunits: $CODEUNIT_IDS"
 
-# === Split the codeunit list into batches BC's API will accept ===
+# === Split the codeunit list into parts BC's API will accept ===
 #
 # The suite is populated by POSTing the codeunit ids as ONE string field,
 # `CodeunitIds: Text[2048]` on table 99903. Past 2048 characters BC rejects
@@ -368,12 +368,20 @@ echo "Test codeunits: $CODEUNIT_IDS"
 # long. StefanMaron/BusinessCentral.AL.Language.Tests walked into that on
 # 2026-09-05 at 342 test codeunits / 2051 characters, three over.
 #
-# So: split the list, and set the suite up and run it once per batch.
-# SetupSuite calls InitSuite, which CLEARS the DEFAULT suite, so batches
-# cannot be accumulated into one suite and then run together — each batch has
-# to be set up and executed before the next one replaces it. Batches are
-# contiguous slices in discovery order, so the execution order is the same as
-# an un-batched run's.
+# So: split the list for the POST, and accumulate the parts into ONE suite.
+# The first part calls setupSuite (which clears the suite), every part after
+# it calls setupSuiteAppend (which does not). The whole suite then runs in a
+# single TestRunner process, and therefore a single client session.
+#
+# It used to run one TestRunner process per part, because SetupSuite was the
+# only action and it cleared the suite. That made session-scoped state —
+# SingleInstance codeunit instances above all — restart at every part
+# boundary, so a cross-codeunit SingleInstance test passed or failed
+# depending on which part its codeunits landed in, with nothing in the output
+# saying so. Issue #74; #65 is the same defect one level down.
+#
+# Parts are contiguous slices in discovery order, so the execution order is
+# the same as an un-batched run's.
 #
 # scripts/chunk-codeunit-ids.py owns the split and proves it is total (nothing
 # dropped, duplicated or reordered) before returning; `--self-test` exercises
@@ -386,7 +394,7 @@ CHUNK_SPLIT_RC=0
 py3 "$REPO_DIR/scripts/chunk-codeunit-ids.py" \
     --max-chars "$CODEUNIT_IDS_MAX_CHARS" "$CODEUNIT_IDS" > "$CHUNK_LIST_FILE" || CHUNK_SPLIT_RC=$?
 if [ "$CHUNK_SPLIT_RC" -ne 0 ]; then
-    echo "ERROR: could not split the codeunit id list into API-sized batches (rc=$CHUNK_SPLIT_RC)"
+    echo "ERROR: could not split the codeunit id list into API-sized parts (rc=$CHUNK_SPLIT_RC)"
     echo "       List was ${#CODEUNIT_IDS} chars: $CODEUNIT_IDS"
     rm -f "$CHUNK_LIST_FILE"
     exit 1
@@ -400,18 +408,20 @@ while IFS= read -r _chunk_line; do
 done < "$CHUNK_LIST_FILE"
 rm -f "$CHUNK_LIST_FILE"
 if [ ${#CHUNKS[@]} -eq 0 ]; then
-    echo "ERROR: codeunit id split produced no batches"
+    echo "ERROR: codeunit id split produced no parts"
     exit 1
 fi
 if [ ${#CHUNKS[@]} -gt 1 ]; then
     echo "Codeunit id list is ${#CODEUNIT_IDS} chars; BC's CodeunitIds field holds 2048."
-    echo "Running in ${#CHUNKS[@]} batches of at most ${CODEUNIT_IDS_MAX_CHARS} chars each."
+    echo "Posting the suite in ${#CHUNKS[@]} parts of at most ${CODEUNIT_IDS_MAX_CHARS} chars each; it runs as one."
 fi
 
-# === Setup Test Suite via OData (per batch) ===
+# === Setup Test Suite via OData (one call per part) ===
 REQUEST_ID=""
+# $3 is the bound action to call: setupSuite for the first part (clears the
+# suite), setupSuiteAppend for every part after it (adds to it).
 setup_suite_chunk() {
-    local chunk="$1" label="$2"
+    local chunk="$1" label="$2" action="${3:-setupSuite}"
     echo -n "Setting up test suite${label}... "
     local create_body create_http
     create_body=$(mktemp)
@@ -439,7 +449,7 @@ setup_suite_chunk() {
         echo "           POST in this BC version (the auto-detection picked an endpoint that"
         echo "           accepts GET on this path but not POST)."
         echo "         - The request body schema doesn't match the page's bound action."
-        echo "         - Application_StringExceededLength above means the batch is still"
+        echo "         - Application_StringExceededLength above means the part is still"
         echo "           too long — lower BC_CODEUNIT_IDS_MAX_CHARS (currently"
         echo "           ${CODEUNIT_IDS_MAX_CHARS})."
         rm -f "$create_body"
@@ -447,13 +457,40 @@ setup_suite_chunk() {
     fi
     rm -f "$create_body"
 
-    local setup_http
-    setup_http=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 -u "$AUTH" -X POST \
-        "${API_BASE}/codeunitRunRequests(${REQUEST_ID})/Microsoft.NAV.setupSuite" 2>/dev/null)
+    local setup_http setup_body
+    setup_body=$(mktemp)
+    setup_http=$(curl -s -o "$setup_body" -w "%{http_code}" --max-time 60 -u "$AUTH" -X POST \
+        "${API_BASE}/codeunitRunRequests(${REQUEST_ID})/Microsoft.NAV.${action}" 2>/dev/null)
     if [ "$setup_http" != "200" ] && [ "$setup_http" != "204" ]; then
         echo "FAIL (HTTP $setup_http)"
+        echo "       Action: Microsoft.NAV.${action}"
+        sed 's/^/       /' "$setup_body"
+        # setupSuiteAppend arrived in Test Runner Extension 3.2.0.0. A 404 on
+        # it means the container is older than this script — the extension is
+        # baked into the bc-runner image, so the two move together. Say that,
+        # because "HTTP 404" on its own points nowhere.
+        if [ "$action" = "setupSuiteAppend" ] && [ "$setup_http" = "404" ]; then
+            echo ""
+            echo "       The bc-runner image is older than this script."
+            echo "       Its Test Runner Extension has no setupSuiteAppend, which"
+            echo "       this script needs to post a codeunit list too long for"
+            echo "       one 2048-character CodeunitIds field (${#CODEUNIT_IDS} chars here)."
+            echo "       Pull a current image, or pin scripts and runner_image to"
+            echo "       the same bc-linux commit."
+        fi
+        rm -f "$setup_body"
         return 1
     fi
+    # The action returns false when it parsed nothing out of CodeunitIds. Only
+    # the append path checks it: the first part is checked far more strictly by
+    # verify_suite_populated below, and an older extension version that has no
+    # setupSuiteAppend fails on the HTTP code above, not here.
+    if [ "$action" = "setupSuiteAppend" ] && grep -q '"value" *: *false' "$setup_body" 2>/dev/null; then
+        echo "FAIL (the extension added none of this part's codeunits)"
+        rm -f "$setup_body"
+        return 1
+    fi
+    rm -f "$setup_body"
     return 0
 }
 
@@ -556,11 +593,11 @@ report_verify_failure() {
 
 # === Disable Known-Failing Tests ===
 #
-# Parsed once; APPLIED once per batch. Each batch's setupSuite calls
-# InitSuite, which deletes the DEFAULT suite's Test Method Line rows —
-# including the Run=false flags a previous batch's disableTests set. Applying
-# the disables outside the loop would silently re-enable every disabled test
-# from the second batch onwards.
+# Parsed once, applied once — after the whole suite is populated and before
+# it runs. It used to be applied once per part, because each part's setupSuite
+# call deleted the DEFAULT suite's Test Method Line rows and with them the
+# Run=false flags an earlier part had set. Nothing clears the suite mid-setup
+# any more, so one application at the end covers every part.
 DISABLED_ENTRIES=""
 DISABLED_FILE_COUNT=0
 if [ -n "$DISABLED_TESTS_DIR" ] && [ -d "$DISABLED_TESTS_DIR" ]; then
@@ -601,7 +638,7 @@ for c in chunks:
     echo "Parsed disabled tests from $DISABLED_FILE_COUNT files"
 fi
 
-# Same reason as the batch list above: materialise into an array first, so
+# Same reason as the part list above: materialise into an array first, so
 # nothing inside the apply loop can eat the input stream.
 DISABLED_CHUNKS=()
 if [ -n "$DISABLED_ENTRIES" ]; then
@@ -698,12 +735,13 @@ if [ "$USE_DOCKER_EXEC" = "false" ] && [ -z "$HOST_PREBUILT" ] && ! command -v d
     exit 1
 fi
 
-# Runs ONE batch. $1 = codeunit count (for the runner's progress display and
-# its own "did every codeunit run" check), $2 = where to write this batch's
-# JUnit XML. Always emits JUnit, even when the caller did not ask for a file:
-# the merge step below needs it to prove no batch went missing.
+# Runs the suite. $1 = codeunit count (for the runner's progress display and
+# its own "did every codeunit run" check), $2 = where to write the JUnit XML,
+# $3 = the run's timeout in minutes. Always writes JUnit, even when the caller
+# did not ask for a file: the completeness check below needs it to prove no
+# codeunit went missing.
 execute_chunk() {
-    local num_codeunits="$1" junit_path="$2"
+    local num_codeunits="$1" junit_path="$2" timeout_min="${3:-$TIMEOUT_MIN}"
     local max_iter=$(( num_codeunits * 3 + 20 ))
     local rc=0
     mkdir -p "$(dirname "$junit_path")"
@@ -722,12 +760,11 @@ execute_chunk() {
         # failure, an empty suite, "All tests executed" on the first iter,
         # or anything else. Verbose stderr is cheap and the right default.
         #
-        # JUnit output: TestRunner writes to a per-batch path inside the
-        # container, which we then docker cp back to the host path for this
-        # batch. Avoids needing to bind-mount the destination, and a per-batch
-        # name means a batch can never copy out the PREVIOUS batch's report if
-        # its own write failed — the copy fails instead, and the merge step
-        # turns that into a loud error rather than a duplicated result set.
+        # JUnit output: TestRunner writes to a path inside the container,
+        # which we then docker cp back to the host path. Avoids needing to
+        # bind-mount the destination. A run that failed to write its report
+        # fails the copy, and the completeness step turns that into a loud
+        # error rather than a stale or duplicated result set.
         local in_container_junit="/tmp/$(basename "$junit_path")"
         local renew_flag=(); if [ "$RENEW_CLIENT_CONTEXT" = "1" ]; then renew_flag=(--renew-client-context); fi
         ( cd "$REPO_DIR" && printf '%s' "$AUTH_PASS" | docker compose exec -T bc \
@@ -740,7 +777,7 @@ execute_chunk() {
             --password-stdin \
             --suite "DEFAULT" \
             --num-codeunits "$num_codeunits" \
-            --timeout "$TIMEOUT_MIN" \
+            --timeout "$timeout_min" \
             --codeunit-timeout 10 \
             --max-iterations "$max_iter" \
             "${renew_flag[@]}" \
@@ -768,7 +805,7 @@ execute_chunk() {
             --password-stdin \
             --suite "DEFAULT" \
             --num-codeunits "$num_codeunits" \
-            --timeout "$TIMEOUT_MIN" \
+            --timeout "$timeout_min" \
             --codeunit-timeout 10 \
             --max-iterations "$max_iter" \
             "${renew_flag[@]}" \
@@ -785,7 +822,7 @@ execute_chunk() {
             --password-stdin \
             --suite "DEFAULT" \
             --num-codeunits "$num_codeunits" \
-            --timeout "$TIMEOUT_MIN" \
+            --timeout "$timeout_min" \
             --codeunit-timeout 10 \
             --max-iterations "$max_iter" \
             "${renew_flag[@]}" \
@@ -795,71 +832,88 @@ execute_chunk() {
     return $rc
 }
 
-# --- The batch loop ---
+# --- Populate the suite, one part at a time ---
 CHUNK_JUNIT_DIR=$(mktemp -d)
 CHUNK_JUNITS=()
 OVERALL_RC=0
-BATCHES_EXECUTED=0
+CHUNKS_SETUP=0
 RUN_START_TS=$(date +%s)
 
 CHUNK_INDEX=0
 for CHUNK in "${CHUNKS[@]}"; do
     CHUNK_INDEX=$((CHUNK_INDEX + 1))
     CHUNK_LABEL=""
-    [ ${#CHUNKS[@]} -gt 1 ] && CHUNK_LABEL=" (batch $CHUNK_INDEX/${#CHUNKS[@]})"
+    [ ${#CHUNKS[@]} -gt 1 ] && CHUNK_LABEL=" (part $CHUNK_INDEX/${#CHUNKS[@]})"
 
-    IFS=',' read -ra CU_ARRAY <<< "$CHUNK"
-    NUM_CODEUNITS=${#CU_ARRAY[@]}
-
-    if ! setup_suite_chunk "$CHUNK" "$CHUNK_LABEL"; then
-        rm -rf "$CHUNK_JUNIT_DIR"
-        exit 1
+    if [ "$CHUNK_INDEX" -eq 1 ]; then
+        if ! setup_suite_chunk "$CHUNK" "$CHUNK_LABEL" "setupSuite"; then
+            rm -rf "$CHUNK_JUNIT_DIR"
+            exit 1
+        fi
+        # Only the first part is verified against the server. The check exists
+        # for the publish → install → metadata propagation race, which is a
+        # property of the whole app rather than of one part: if the metadata
+        # is not there yet, the first part cannot populate either. Its retry
+        # re-calls setupSuite, which is why it has to run before anything has
+        # been appended.
+        echo ""   # newline so per-attempt logs are readable
+        if ! verify_suite_populated "$REQUEST_ID" "$CHUNK"; then
+            report_verify_failure "$CHUNK"
+            rm -rf "$CHUNK_JUNIT_DIR"
+            exit 1
+        fi
+        echo "Test suite populated${CHUNK_LABEL}."
+    else
+        if ! setup_suite_chunk "$CHUNK" "$CHUNK_LABEL" "setupSuiteAppend"; then
+            rm -rf "$CHUNK_JUNIT_DIR"
+            exit 1
+        fi
+        echo "added${CHUNK_LABEL}."
     fi
-
-    echo ""   # newline so per-attempt logs are readable
-    if ! verify_suite_populated "$REQUEST_ID" "$CHUNK"; then
-        report_verify_failure "$CHUNK"
-        rm -rf "$CHUNK_JUNIT_DIR"
-        exit 1
-    fi
-    echo "Test suite populated${CHUNK_LABEL}."
-
-    apply_disabled_tests
-
-    CHUNK_JUNIT="$CHUNK_JUNIT_DIR/batch-$CHUNK_INDEX.xml"
-    echo "Executing $NUM_CODEUNITS codeunits via WebSocket${CHUNK_LABEL}..."
-    execute_chunk "$NUM_CODEUNITS" "$CHUNK_JUNIT"
-    CHUNK_RC=$?
-    BATCHES_EXECUTED=$((BATCHES_EXECUTED + 1))
-    CHUNK_JUNITS+=("$CHUNK_JUNIT")
-    [ "$CHUNK_RC" -ne 0 ] && OVERALL_RC=1
+    CHUNKS_SETUP=$((CHUNKS_SETUP + 1))
 done
 
-# A batch that never ran is the failure mode this whole change could
-# introduce, and it would look exactly like a smaller green run. Assert it
-# directly rather than inferring it from the totals.
-if [ "$BATCHES_EXECUTED" -ne "${#CHUNKS[@]}" ]; then
-    echo "ERROR: $BATCHES_EXECUTED of ${#CHUNKS[@]} batch(es) were executed — the rest never ran"
+# A part that never made it into the suite would look exactly like a smaller
+# green run. Assert it directly rather than inferring it from the totals. The
+# completeness check in merge-junit-batches.py catches the same thing from the
+# other end, by codeunit rather than by part.
+if [ "$CHUNKS_SETUP" -ne "${#CHUNKS[@]}" ]; then
+    echo "ERROR: $CHUNKS_SETUP of ${#CHUNKS[@]} part(s) reached the suite — the rest never did"
     rm -rf "$CHUNK_JUNIT_DIR"
     exit 1
 fi
 
-# === Merge the batches into one report ===
+apply_disabled_tests
+
+# --- Run the whole suite in one client session ---
+IFS=',' read -ra ALL_CU_ARRAY <<< "$CODEUNIT_IDS"
+NUM_CODEUNITS=${#ALL_CU_ARRAY[@]}
+RUN_JUNIT="$CHUNK_JUNIT_DIR/run.xml"
+CHUNK_JUNITS+=("$RUN_JUNIT")
+SESSION_NOTE=""
+[ ${#CHUNKS[@]} -gt 1 ] && SESSION_NOTE=" (suite posted in ${#CHUNKS[@]} parts, run as one)"
+echo "Executing $NUM_CODEUNITS codeunits via WebSocket${SESSION_NOTE}..."
+# --timeout was a per-part budget when each part was its own process. Scale it
+# by the number of parts so a suite that fit in the old total still fits.
+execute_chunk "$NUM_CODEUNITS" "$RUN_JUNIT" "$(( TIMEOUT_MIN * ${#CHUNKS[@]} ))"
+[ $? -ne 0 ] && OVERALL_RC=1
+
+# === Finish the report ===
 #
-# The per-batch JUnit files are disjoint by construction (each codeunit is in
-# exactly one batch), so merging is a concatenation of <testsuite> elements
-# with the roll-up attributes recomputed. Same shape run-tests-hybrid.py
-# produces, so downstream consumers cannot tell a batched run from a
-# single-request one.
+# One run, so one input file — this step is now here for the completeness
+# check rather than for the merge, and it still recomputes the roll-up
+# attributes and normalizes the shape. Same output run-tests-hybrid.py
+# produces, so downstream consumers cannot tell a suite posted in parts from
+# one posted in a single request.
 TOTAL_ELAPSED=$(( $(date +%s) - RUN_START_TS ))
 MERGED_JUNIT="$JUNIT_OUTPUT"
 [ -z "$MERGED_JUNIT" ] && MERGED_JUNIT="$CHUNK_JUNIT_DIR/merged.xml"
 
-# STRICT_COMPLETENESS: when the list was batched, a codeunit that produced no
-# <testsuite> at all means a batch was lost somewhere between dispatch and the
-# report, and that must fail the run (issue #57 is the same false-green
-# shape). On a single un-batched batch the check is reported but not fatal —
-# no batching happened, so a missing codeunit is a pre-existing condition this
+# STRICT_COMPLETENESS: when the list was posted in parts, a codeunit that
+# produced no <testsuite> at all means a part was lost somewhere between the
+# POST and the report, and that must fail the run (issue #57 is the same
+# false-green shape). With a single part the check is reported but not fatal —
+# nothing was split, so a missing codeunit is a pre-existing condition this
 # change did not cause and must not newly re-verdict.
 STRICT_COMPLETENESS=0
 [ ${#CHUNKS[@]} -gt 1 ] && STRICT_COMPLETENESS=1

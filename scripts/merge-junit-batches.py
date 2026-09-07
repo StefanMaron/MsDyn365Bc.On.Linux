@@ -149,9 +149,12 @@ def merge(paths: list[str], out_path: str, expected_raw: str,
                  f"{' ...' if len(missing) > 40 else ''}")
             if strict:
                 problems.append(f"{len(missing)} codeunit(s) reported nothing")
-        elif len(paths) > 1:
-            emit(f"All {len(expected)} dispatched codeunit(s) reported results "
-                 f"across {len(paths)} batches.")
+        else:
+            # Printed whether or not the input was split. The check runs
+            # either way, and a run that says nothing about completeness
+            # reads the same as one that was never checked. run-tests.sh
+            # now always hands this a single report — see issue #74.
+            emit(f"All {len(expected)} dispatched codeunit(s) reported results.")
 
     for problem in problems:
         emit(f"ERROR: {problem}")
