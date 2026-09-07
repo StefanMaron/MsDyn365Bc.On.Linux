@@ -24,7 +24,7 @@ Consequence: this only works for from-source workflows. A codeunit whose
 source isn't found in the given paths is classified as needing websocket —
 unproven safety is treated as unsafe, not the other way around.
 
-A test method is flagged "needs websocket" when either:
+A test method is flagged "needs websocket" when any of:
   (a) it carries [HandlerFunctions(...)] — it relies on handler dispatch,
       which this script treats conservatively as tied to the same
       Test-Runner-codeunit machinery implicated in issue #27, even though
@@ -34,7 +34,24 @@ A test method is flagged "needs websocket" when either:
       together with a modal-style invocation (`.RunModal(`, `.Invoke(`,
       bare `RunModal(`) — the exact shape of the repro in issue #27
       (`asserterror Host.PickIt.Invoke(); Assert.ExpectedError('Unhandled
-      UI');`).
+      UI');`), or
+  (c) its effective TestPermissions is anything other than `Disabled`.
+
+Rule (c) is issue #64, and unlike (a) and (b) it is measured rather than
+inferred. TestPermissions works "together with the OnBeforeTestRun and
+OnAfterTestRun triggers in test runner codeunits" (the property's own
+documentation), so with no test runner codeunit involved the hub never
+switches the permission execution context at all and every test runs as SUPER.
+Both non-Disabled values change that context — `Restrictive` (the default when
+the property is absent) and `NonRestrictive` both set it to 'D365 Full Access',
+which does not cover an extension's own tables. Only `Disabled` leaves the run
+as SUPER, which is what the hub gives unconditionally.
+
+Measured on BC 28.4, one container, one test codeunit with no TestPermissions
+declaration inserting into its own table: the websocket runner refuses it
+("Sorry, the current permissions prevented the action."), the altool/hub runner
+lets it through. At corpus scale that is 652 refusals the fast path silently
+turned green — see the issue for the Windows-container comparison.
 
 This is a heuristic, not a proof. It cannot see a modal invoked deep inside
 called business logic that the test codeunit's own source never mentions.
@@ -61,6 +78,8 @@ import sys
 
 CODEUNIT_DECL = re.compile(r'^\s*codeunit\s+(\d+)\s+', re.IGNORECASE)
 SUBTYPE_TEST = re.compile(r'^\s*Subtype\s*=\s*Test\s*;', re.IGNORECASE)
+# Codeunit-level property. Absent means Restrictive, per the property's docs.
+TEST_PERMISSIONS_PROP = re.compile(r'^\s*TestPermissions\s*=\s*(\w+)\s*;', re.IGNORECASE)
 ATTR_LINE = re.compile(r'^\s*\[\s*([A-Za-z]+)\s*(\([^)]*\))?\s*\]\s*$')
 PROC_DECL = re.compile(
     r'^(?P<indent>\s*)(local\s+|internal\s+|protected\s+)?procedure\s+'
@@ -85,11 +104,25 @@ def find_al_files(paths: list[str]) -> list[str]:
     return files
 
 
+# The only value that leaves a test running as SUPER, which is what the hub
+# gives every test unconditionally. Everything else moves the permission
+# execution context and so cannot be reproduced on the hub.
+HUB_SAFE_TEST_PERMISSIONS = "disabled"
+
+
 class _CodeunitState:
     def __init__(self, cuid: int):
         self.id = cuid
         self.is_test = False
         self.needs_websocket = False
+        # None until a codeunit-level `TestPermissions = X;` is seen. Resolved
+        # against the AL default (Restrictive) when the codeunit is flushed, so
+        # the property is honoured wherever in the object it is declared.
+        self.test_permissions: str | None = None
+        # Method-level [TestPermissions(X)] values, one entry per [Test] method:
+        # the attribute's argument, or None where the method didn't carry one
+        # (which means InheritFromTestCodeunit — take the codeunit's value).
+        self.method_permissions: list[str | None] = []
 
 
 def classify_al_source(paths: list[str]) -> dict[int, dict]:
@@ -113,11 +146,13 @@ def classify_al_source(paths: list[str]) -> dict[int, dict]:
         proc_indent = 0
         proc_is_test_attr = False
         proc_has_handler_attr = False
+        proc_permissions_attr: str | None = None
         proc_body: list[str] = []
 
         def flush_proc():
             if cur is None or not proc_is_test_attr:
                 return
+            cur.method_permissions.append(proc_permissions_attr)
             if proc_has_handler_attr:
                 cur.needs_websocket = True
             elif ASSERTERROR_RE.search("\n".join(proc_body)) and MODAL_CALL_RE.search(
@@ -127,6 +162,16 @@ def classify_al_source(paths: list[str]) -> dict[int, dict]:
 
         def flush_codeunit():
             if cur is not None and cur.is_test:
+                # Resolve TestPermissions last, so a codeunit-level declaration
+                # applies however late in the object it appears.
+                cu_level = (cur.test_permissions or "restrictive").lower()
+                for method_level in cur.method_permissions or [None]:
+                    effective = (method_level or "").lower()
+                    if effective in ("", "inheritfromtestcodeunit"):
+                        effective = cu_level
+                    if effective != HUB_SAFE_TEST_PERMISSIONS:
+                        cur.needs_websocket = True
+                        break
                 prev = result.get(cur.id)
                 if prev is None:
                     result[cur.id] = {"is_test": True, "needs_websocket": cur.needs_websocket}
@@ -161,16 +206,25 @@ def classify_al_source(paths: list[str]) -> dict[int, dict]:
                 cur.is_test = True
                 continue
 
+            tp = TEST_PERMISSIONS_PROP.match(line)
+            if tp:
+                cur.test_permissions = tp.group(1)
+                continue
+
             am = ATTR_LINE.match(line)
             if am:
-                pending_attrs.append(am.group(1).lower())
+                pending_attrs.append((am.group(1).lower(), (am.group(2) or "").strip("()").strip()))
                 continue
 
             pm = PROC_DECL.match(line)
             if pm:
+                attr_names = [a for a, _ in pending_attrs]
                 proc_indent = len(pm.group("indent"))
-                proc_is_test_attr = "test" in pending_attrs
-                proc_has_handler_attr = "handlerfunctions" in pending_attrs
+                proc_is_test_attr = "test" in attr_names
+                proc_has_handler_attr = "handlerfunctions" in attr_names
+                proc_permissions_attr = next(
+                    (v for a, v in pending_attrs if a == "testpermissions" and v), None
+                )
                 pending_attrs = []
                 if proc_is_test_attr:
                     in_proc = True

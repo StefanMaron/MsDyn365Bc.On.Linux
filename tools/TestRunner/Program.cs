@@ -15,12 +15,13 @@ using StreamJsonRpc;
 // BC Test Runner — connects via WebSocket client services to page 130455
 // (Command Line Test Tool) and runs tests using RunNextTest + TestResultJson.
 //
-// Mirrors BcContainerHelper's Run-TestsInBcContainer external behavior with
-// renewClientContextBetweenTests: reconnect BEFORE each RunNextTest call so
-// that BC's test-isolation session kill (which drops the WebSocket after each
-// codeunit) is never treated as an error.  BC tracks test-suite progress in
-// the Test Method Line table, so a fresh session always picks up where it
-// left off.
+// Mirrors BcContainerHelper's Run-TestsInBcContainer external behavior, INCLUDING
+// its RenewClientContextBetweenTests default of $false: one client session runs the
+// whole suite, and a new one is opened only when the old one is gone.  BC tracks
+// test-suite progress in the Test Method Line table, so a fresh session always picks
+// up where it left off — which is what makes a mid-run reconnect safe when it is
+// actually needed.  Pass --renew-client-context to reconnect before every codeunit
+// the way this runner used to unconditionally.
 //
 // Note: The DEFAULT test suite must be pre-created (via SQL in run-tests.sh).
 // The suite is opened by filtering TableView to Name=suiteName, which positions
@@ -40,6 +41,10 @@ var numCodeunitsOverride = 0; // explicit codeunit count for progress display
 var verbose = false;
 var junitOutput = ""; // path to write JUnit XML — empty = don't emit
 var authProbe = false; // authenticate through OpenConnection only; never open a company or run AL tests
+// Reconnect (new client session) before every RunNextTest. Default false, matching
+// BcContainerHelper's own RenewClientContextBetweenTests default — see the loop below
+// for why this is a fidelity setting and not just a performance one.
+var renewClientContextBetweenTests = false;
 var selfTestExitCode = false; // run ComputeExitCode's own assertions; no BC connection needed
 const int AuthenticationRejectedExitCode = 2;
 
@@ -59,6 +64,7 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--num-codeunits" && i + 1 < args.Length) numCodeunitsOverride = int.Parse(args[++i]);
     else if (args[i] == "--verbose" || args[i] == "-v") verbose = true;
     else if (args[i] == "--junit-output" && i + 1 < args.Length) junitOutput = args[++i];
+    else if (args[i] == "--renew-client-context") renewClientContextBetweenTests = true;
     else if (args[i] == "--auth-probe") authProbe = true;
     else if (args[i] == "--self-test-exit-code") selfTestExitCode = true;
     else if (!args[i].StartsWith("--")) host = args[i];
@@ -232,22 +238,35 @@ async Task<int> RunTests()
     }
     catch (Exception ex) { Log($"Clear warning: {ex.Message[..Math.Min(80, ex.Message.Length)]}"); }
 
-    rpc.Dispose(); ws.Dispose();
-
-    // RunNextTest loop — reconnect BEFORE every call (mirrors BcContainerHelper's
-    // renewClientContextBetweenTests).  Each test-codeunit run will kill the BC
-    // session (test isolation), so ConnectionLostException is the normal outcome.
-    // BC tracks which codeunit to run next in the Test Method Line table, so a
-    // fresh session always advances to the next pending codeunit.
+    // RunNextTest loop.  The connection opened above is REUSED for the whole run
+    // unless --renew-client-context was passed.
+    //
+    // This used to reconnect before every call, on the stated grounds that BC kills
+    // the session after each codeunit under test isolation.  It does not:
+    // TestIsolation = Codeunit rolls back DATABASE changes after each test codeunit
+    // (see the property's own documentation) and says nothing about the client
+    // session, which is why the non-exception path below is reached at all.  The
+    // reconnect was voluntary, and it cost fidelity:
+    //
+    //   SingleInstance codeunit instances live for the lifetime of the SESSION, so a
+    //   fresh session per codeunit resets them.  Real BC — BcContainerHelper defaults
+    //   RenewClientContextBetweenTests to $false, so one client context runs the whole
+    //   suite — carries that state across test codeunits.  Measured on BC 28.4 with a
+    //   SingleInstance codeunit written by one test codeunit and read by the next:
+    //   reconnecting reads back the default, holding one session reads back the value.
+    //   See StefanMaron/MsDyn365Bc.On.Linux#65.
+    //
+    // A lost connection is still handled: haveSession goes false on any failure and
+    // the top of the loop opens a new session, so an aborted or server-dropped session
+    // recovers exactly the way the old code did on every iteration.
     var startTime = DateTime.UtcNow;
 
-    // Limit iterations to roughly 2x the number of codeunits (each codeunit = 1 run + 1 reconnect)
-    // plus extra buffer for the "All tests executed" detection.
+    // Upper bound on iterations. One codeunit per iteration is the normal case; the
+    // headroom covers iterations spent re-establishing a lost session, plus the extra
+    // pass the "All tests executed" detection can need.
     int numCodeunits = numCodeunitsOverride > 0 ? numCodeunitsOverride
         : !string.IsNullOrEmpty(codeunitFilter) ? codeunitFilter.Split(',').Length
         : 100;
-    // With test isolation (runner 130451), each codeunit kills the session.
-    // We need ~2 iterations per codeunit: one that runs + one empty reconnect.
     int effectiveMaxIterations = Math.Min(maxIterations, numCodeunits * 3 + 10);
 
     Log($"Running tests via WebSocket ({numCodeunits} codeunits, max {effectiveMaxIterations} iterations)...");
@@ -262,38 +281,51 @@ async Task<int> RunTests()
     // populated the suite with, so falling short of it here is never a
     // legitimate outcome, only an unfinished one.
     bool runCompleted = false;
+    // The session opened for ClearTestResults above is still live and is what the
+    // first iteration uses.  Set false whenever the session is gone (renewed, lost,
+    // or aborted by the watchdog) so the next iteration opens a new one.
+    bool haveSession = true;
     for (int iteration = 0; iteration < effectiveMaxIterations; iteration++)
     {
-        // Proactive reconnect before each RunNextTest.
-        CancellationTokenSource sessionEndedCts;
-        try
+        if (!haveSession)
         {
-            (rpc, ws, sessionEndedCts) = await Connect(authBytes, tokenCapture, cts.Token);
-            formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
-            if (formState == null)
+            CancellationTokenSource sessionEndedCts;
+            try
             {
-                Log("Could not open test page after reconnect");
+                (rpc, ws, sessionEndedCts) = await Connect(authBytes, tokenCapture, cts.Token);
+                formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
+                if (formState == null)
+                {
+                    Log("Could not open test page after reconnect");
+                    break;
+                }
+                haveSession = true;
+            }
+            catch (Exception ex)
+            {
+                Log($"Reconnect failed: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
                 break;
             }
-        }
-        catch (Exception ex)
-        {
-            Log($"Reconnect failed: {ex.Message[..Math.Min(80, ex.Message.Length)]}");
-            break;
         }
 
         string testResultJson = "";
         bool allDone = false;
+        // Cancelled as soon as this iteration finishes.  With one session spanning the
+        // whole run, an uncancelled watchdog from codeunit N would abort the connection
+        // in the middle of codeunit N+1.
+        var watchdogCts = new CancellationTokenSource();
         try
         {
             var capturedRpc = rpc;
             var capturedWs = ws;
-            _ = Task.Delay(TimeSpan.FromMinutes(codeunitTimeoutMin)).ContinueWith(_ =>
-            {
-                Log($"Watchdog: aborting hung connection after {codeunitTimeoutMin} min");
-                try { capturedWs.Abort(); } catch { }
-                try { capturedRpc.Dispose(); } catch { }
-            });
+            _ = Task.Delay(TimeSpan.FromMinutes(codeunitTimeoutMin), watchdogCts.Token)
+                .ContinueWith(t =>
+                {
+                    if (t.IsCanceled) return;
+                    Log($"Watchdog: aborting hung connection after {codeunitTimeoutMin} min");
+                    try { capturedWs.Abort(); } catch { }
+                    try { capturedRpc.Dispose(); } catch { }
+                }, TaskScheduler.Default);
 
             var result = await Invoke(rpc, formState, "RunNextTest", cts.Token);
             if (result?["DataSetState"] != null) formState = result["DataSetState"];
@@ -304,7 +336,7 @@ async Task<int> RunTests()
                 allDone = true;
             else
             {
-                // RunNextTest completed without killing the session (no test isolation on Linux).
+                // RunNextTest completed without killing the session — the normal path.
                 // Count the codeunit and fetch results normally.
                 codeunitsRun++;
                 await PrintLiveResults(authBytes, codeunitsRun, numCodeunits, startTime);
@@ -312,13 +344,22 @@ async Task<int> RunTests()
         }
         catch (Exception ex) when (ex is ConnectionLostException || ex is RemoteInvocationException || ex is OperationCanceledException)
         {
-            // Expected: BC killed the session after the codeunit finished (test isolation).
+            // The session died mid-codeunit (BC recycled it, or the watchdog aborted a
+            // hung one). The codeunit itself still ran, and its per-function results are
+            // in the Test Method Line table, so read them and open a fresh session next
+            // time round.
+            haveSession = false;
             codeunitsRun++;
             // Print live per-function results for the codeunit that just completed
             await PrintLiveResults(authBytes, codeunitsRun, numCodeunits, startTime);
         }
+        finally
+        {
+            watchdogCts.Cancel();
+        }
 
-        try { rpc.Dispose(); ws.Dispose(); } catch { }
+        if (renewClientContextBetweenTests) haveSession = false;
+        if (!haveSession) { try { rpc.Dispose(); ws.Dispose(); } catch { } }
 
         if (allDone || codeunitsRun >= numCodeunits)
         {
@@ -328,8 +369,13 @@ async Task<int> RunTests()
             break;
         }
 
-        await Task.Delay(500, CancellationToken.None);
+        // Only worth pausing when the next iteration has to establish a new session —
+        // BC needs a moment after dropping one. On the reused-session path there is
+        // nothing to wait for, and 500ms per codeunit is real time on a long suite.
+        if (!haveSession) await Task.Delay(500, CancellationToken.None);
     }
+
+    try { rpc.Dispose(); ws.Dispose(); } catch { }
 
     if (!runCompleted)
     {

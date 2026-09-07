@@ -49,6 +49,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_RUNNER_APP=""
 JUNIT_OUTPUT=""
+RENEW_CLIENT_CONTEXT=0
 
 show_help() {
     cat <<'HELPEOF'
@@ -70,6 +71,12 @@ Options:
   --timeout <minutes>        Overall timeout (default: 30)
   --test-runner-app <path>   TestRunnerExtension .app (auto-detected)
   --disabled-tests <dir>     Directory with DisabledTests JSON files
+  --renew-client-context     Open a NEW client session before every test codeunit.
+                             Off by default, matching BcContainerHelper's
+                             RenewClientContextBetweenTests default: one session runs
+                             the whole suite, so SingleInstance codeunit state carries
+                             across test codeunits the way it does on a real tier.
+                             Turn this on only to reproduce the pre-#65 behaviour.
   -h, --help                 Show this help
 
 Examples:
@@ -95,6 +102,7 @@ while [[ $# -gt 0 ]]; do
         --test-runner-app) TEST_RUNNER_APP="$2"; shift 2;;
         --disabled-tests) DISABLED_TESTS_DIR="$2"; shift 2;;
         --junit-output) JUNIT_OUTPUT="$2"; shift 2;;
+        --renew-client-context) RENEW_CLIENT_CONTEXT=1; shift;;
         --host|--test-runner|--suite-name|--codeunit-timeout|--extension-id|--sql-password) shift 2;;
         *) echo "Unknown option: $1 (try --help)"; exit 1;;
     esac
@@ -721,6 +729,7 @@ execute_chunk() {
         # its own write failed — the copy fails instead, and the merge step
         # turns that into a loud error rather than a duplicated result set.
         local in_container_junit="/tmp/$(basename "$junit_path")"
+        local renew_flag=(); if [ "$RENEW_CLIENT_CONTEXT" = "1" ]; then renew_flag=(--renew-client-context); fi
         ( cd "$REPO_DIR" && printf '%s' "$AUTH_PASS" | docker compose exec -T bc \
             env DOTNET_STARTUP_HOOKS= dotnet /bc/tools/TestRunner/TestRunner.dll \
             --verbose \
@@ -734,6 +743,7 @@ execute_chunk() {
             --timeout "$TIMEOUT_MIN" \
             --codeunit-timeout 10 \
             --max-iterations "$max_iter" \
+            "${renew_flag[@]}" \
             --junit-output "$in_container_junit" )
         rc=$?
         # </dev/null: `docker compose cp` inherits this script's stdin, and
@@ -748,6 +758,7 @@ execute_chunk() {
     elif [ -n "$HOST_PREBUILT" ]; then
         # Pre-built binary on the host — no SDK needed, just the .NET 8 runtime.
         echo "[run-tests] Using pre-built TestRunner at $HOST_PREBUILT"
+        local renew_flag=(); if [ "$RENEW_CLIENT_CONTEXT" = "1" ]; then renew_flag=(--renew-client-context); fi
         printf '%s' "$AUTH_PASS" | dotnet "$HOST_PREBUILT" \
             --verbose \
             --host "$WS_HOST" \
@@ -760,9 +771,11 @@ execute_chunk() {
             --timeout "$TIMEOUT_MIN" \
             --codeunit-timeout 10 \
             --max-iterations "$max_iter" \
+            "${renew_flag[@]}" \
             --junit-output "$junit_path"
         rc=$?
     else
+        local renew_flag=(); if [ "$RENEW_CLIENT_CONTEXT" = "1" ]; then renew_flag=(--renew-client-context); fi
         printf '%s' "$AUTH_PASS" | dotnet run --project "$REPO_DIR/tools/TestRunner" -v q -- \
             --verbose \
             --host "$WS_HOST" \
@@ -775,6 +788,7 @@ execute_chunk() {
             --timeout "$TIMEOUT_MIN" \
             --codeunit-timeout 10 \
             --max-iterations "$max_iter" \
+            "${renew_flag[@]}" \
             --junit-output "$junit_path"
         rc=$?
     fi

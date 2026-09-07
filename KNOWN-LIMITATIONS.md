@@ -1,5 +1,56 @@
 # Known Test Limitations on BC Linux
 
+## Where a green Linux leg is not evidence about BC
+
+A test can pass here for the wrong reason. The corpus
+(StefanMaron/BusinessCentral.AL.Language.Tests) started running its own nightly
+against an official Microsoft BC container on Windows, and the disagreements it
+found are listed below with what each one actually turned out to be. Anything on
+this list is a surface where a green result on this tier says something about the
+image or the harness, not about Business Central.
+
+**This is a worklist, not a list of things we have decided to live with.** A
+divergence is a defect from an AL developer's point of view whichever tier is
+"cleaner", so every row says either what the fix is or why there is no fix. Only
+one row below is genuinely closed as unfixable. Add to it whenever a new
+divergence is settled, and take rows off it when they are fixed.
+
+All rows measured on BC 28.4 unless stated. The Windows side is corpus run
+34068376154 (BC 28.4, onprem, w1); the Linux side is a local BC 28.4 sandbox w1
+container plus, where noted, corpus run 34079926224.
+
+| Surface | Linux says | Real BC says | What it actually is |
+|---|---|---|---|
+| ~~`IsolatedStorage(Encrypted)`, `ENCRYPT`/`DECRYPT`~~ (issue #66) | ~~encrypted write reads back as plaintext~~ | "An encryption key is required to complete the request." | **FIXED — this tier now does real encryption.** Patch #26's premise was wrong: nothing in `CreateKey()` is Windows-only. It failed because the CRONUS demo backup ships its single `[$ndo$tenantproperty]` row with a BLANK `tenantid` while the NST runs tenant `default`, so the `UPDATE ... WHERE tenantid=@p` that persists the key file name matched zero rows — and the next line's `RequireKeyCreatedAndPresent()` threw. The key file was on disk the whole time; the tier could not remember its name. `entrypoint.sh` sets that tenantid, Patch #26 is now opt-in (`BC_FAKE_ENCRYPTION=1`), and the keys directory is symlinked onto the service volume so a container recreate does not orphan a key BC still remembers. Measured on a clean BC 28.4 boot: `EnableEncryption` succeeds and `EncryptText` returns 344 bytes of real ciphertext where the proxy returned 16. |
+| ~~`Media.ExportStream()` byte length~~ (issue #67) | ~~exactly the imported bytes (68 in, 68 out)~~ **now 68 in, 93 out** | 31 bytes more (68 in, 99 out) | **FIXED — the round-trip re-encodes.** BC's `NavMediaImage.Bytes()` copies the original stream when it still holds one and only calls `Image.Save()` where it deliberately re-encodes, so `Save()` is reached exactly where a real tier produces different bytes. `DrawingStub` wrote the source bytes back there; it now decodes and re-encodes through SkiaSharp, which is already in the service dir for the report renderer. Reflection-only and optional — a hard reference would break the Add-Ins compile-time copy, and the entrypoint links `libSkiaSharp.so` only when it can version-match, so every failure path falls back to the old pass-through. **Residual, deliberate:** Skia's encoder is not GDI+'s, so the length is 93 here and 99 on Windows. A test asserting equality with the import now correctly fails on both; a test pinning 99 is pinning a GDI+ version. |
+| Outbound-HTTP consent prompt (issue #68) | prompt fires; a `[StrMenuHandler]` answers it | no prompt; a declared handler goes unexecuted | **Not a divergence in this image — the two tiers were not comparable.** The prompt is a sandbox protection: BC raises it in sandbox environments and never in production, gated on `TenantEnvironmentType`. This image sets that to `Sandbox`, and must — measured: with `Production` the platform test framework returns no results at all, on BOTH runners ("no test results returned for a Subtype=Test codeunit" on altool, "TestRunner API not available" on websocket). A sandbox prompts, we prompt, and **a Windows sandbox container would prompt too.** The Windows nightly does not prompt because it runs `onprem` artifacts. So the fix is on the comparison, not the image: the nightly needs to run `sandbox` artifacts (or run both and label them) before any difference between the two tiers means something about the operating system. Anything else BC gates on `TenantEnvironmentType` will show up the same way. |
+| `Published Application`: `Package ID` vs `Runtime Package ID` (issue #69) | one GUID in both columns | two different GUIDs | **Neither — it is the publish route, and it is BC's own rule.** `NavAppPackageCompiler.CreateRuntimePackageId` (Nav.Ncl.dll) reads, in full: `new RuntimePackageId((isDeveloperExtension && !forceUniqueRuntimePackageId) ? packageId.Value.Value : Guid.NewGuid())`. bc-linux publishes through the dev endpoint, i.e. as a developer extension, so the package id is reused. BcContainerHelper publishes with `Publish-NAVApp`, which does not. Measured on a live container: of 141 rows in `[Published Application]`, the 9 with identical ids are exactly the 9 this image published through the dev endpoint. Publishing the same app the same way on Windows would give the same answer. |
+| `Report.SaveAs(Pdf)` with an RDLC layout (issue #70) | returns false — RDLC rendering is not implemented | returns true | **The image. Re-measured 2026-09-07 on BC 28.4: still false**, so the claim is current, not stale. Note this does NOT generalise to "reports don't render on Linux": the Aspose.Words path (Word and Excel layouts) does render, since commit 9679545 linked Linux `libSkiaSharp.so` + harfbuzz into the service dir. RDLC is separate — it goes to the Windows Reporting Service PE binary, which the entrypoint replaces with a stub and Patch #19 makes throw `NavReportException` from `RenderAsync`. Fixing it means running Microsoft's own renderer, which is .NET Framework, under Mono — investigated and parked at a `TypeLoadException` inside ReportViewer's intermediate-format serializer; the CAS blocker before it IS solved. See `docs/RDLC-ON-LINUX.md` and issue #73. Until then the assertion belongs here (e.g. `extensions/smoke-test`), not in a corpus whose premise is "validated against a real service tier". |
+
+Two entries that were on this list and are now closed, both harness rather than
+tier:
+
+- **`TestPermissions` was not enforced on the fast path** (issue #64). The
+  altool/TestRunnerHub runner runs no AL test runner codeunit, and that is what
+  the platform switches the permission execution context through — so every test
+  on that leg ran as SUPER regardless of what it declared. Measured on one
+  container in one minute: a test codeunit with no `TestPermissions` declaration
+  inserting into its own table is refused by the websocket runner ("Sorry, the
+  current permissions prevented the action.") and succeeds on the hub. At corpus
+  scale the websocket runner reports 652 permission refusals where the hybrid
+  runner's fast path reported none, against 659 on the Windows container — the
+  same defect, the same size. `classify-handler-codeunits.py` now routes anything
+  not declaring `TestPermissions = Disabled` to the websocket leg.
+- **`SingleInstance` codeunit state was torn down between test codeunits**
+  (issue #65). That state lives for the lifetime of the session, and the
+  websocket runner opened a new one before every codeunit. Real BC does not:
+  BcContainerHelper defaults `RenewClientContextBetweenTests` to `$false`.
+  `tools/TestRunner/Program.cs` no longer renews by default
+  (`--renew-client-context` restores the old behaviour). Note the reason recorded
+  for the old behaviour — "BC kills the session after each codeunit under test
+  isolation" — was wrong: `TestIsolation = Codeunit` rolls back database changes
+  and says nothing about the session.
+
 ## Failure triage: bcapps-gate run 2026-08-06 (BC 28.1, hub runner, TC=0 legs)
 
 Full classification of the 787 Tests-Misc + 165 Tests-Workflow failures from
@@ -155,7 +206,25 @@ The Misc tests do not validate rendered image content.
   `PipelinePerformanceComparison/benchmark-results/local-20260404/bc-container.log`
 - GitHub Actions run 23974655275 (same crash pattern, same offending test)
 
-## Data Encryption Mgmt. tests (Tests-Misc CU 132569) — 7 failures, by design
+## ~~Data Encryption Mgmt. tests (Tests-Misc CU 132569) — 7 failures, by design~~ (SUPERSEDED — real encryption works, see issue #66)
+
+**Everything below described the pass-through proxy, which is no longer applied by
+default.** The reason it existed — "CreateKey() depends on Windows-only key storage"
+— was wrong. `RsaEncryptionProviderBase.CreateKey()` is `RSACryptoServiceProvider`
++ `ToXmlString` + `File.Create(name, 1024, FileOptions.Encrypted)` + a hash; all of
+that works on .NET 8 Linux (`FileOptions.Encrypted` is Windows EFS and .NET ignores
+it on Unix). It failed because the CRONUS demo backup ships its single
+`[$ndo$tenantproperty]` row with a blank `tenantid` while the NST runs tenant
+`default`, so the UPDATE that persists the key file name matched zero rows. See the
+tenantid fix in `scripts/entrypoint.sh` Step 3.
+
+With that fixed, `EnableEncryption` succeeds and `EncryptText` returns real
+ciphertext, so the 7 residual failures listed at the end of this section should no
+longer be expected — they were properties of the fake. **That has not been
+re-measured against CU 132569 itself**; the check was done with a purpose-built
+probe on BC 28.4. Re-run the BCApps sweep before trusting the old numbers either
+way. `BC_FAKE_ENCRYPTION=1` restores the proxy and everything below with it.
+
 
 **Root cause (was)**: `TenantEncryptionProviderFactory.GetTenantEncryptionProvider`
 (Nav.Ncl.dll) — the factory AL's `ENCRYPT`/`DECRYPT`, `IsolatedStorage(Encrypted=true)`,
