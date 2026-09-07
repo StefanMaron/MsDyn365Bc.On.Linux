@@ -59,12 +59,25 @@ tests that now fail the way a Windows container fails them.
 `TestRunner.dll`. A session lost mid-run is still recovered — the loop opens a
 new one on the next iteration, which is what it always did.
 
-Caveat that remains: `run-tests.sh` still **batches** a long codeunit list into
-several `TestRunner.dll` invocations, and each batch is its own process and
-therefore its own session. Session-scoped state resets at batch boundaries. It
-is much coarser than the old per-codeunit reset, but it is not nothing — a
-cross-codeunit `SingleInstance` test can still pass or fail depending on which
-batch its codeunits land in.
+**The suite is posted in parts and run as one** (issue #74). `CodeunitIds` on
+table 99903 is `Text[2048]`, so a long list still has to be split for the POST.
+It used to be set up and *executed* once per part, because `SetupSuite` cleared
+the suite — so every part was its own `TestRunner.dll` process and its own
+client session, and session state restarted at every part boundary. Page 99902
+now also exposes `setupSuiteAppend`, which adds to the suite without clearing
+it: the first part calls `setupSuite`, the rest call `setupSuiteAppend`, and the
+whole suite runs in one process.
+
+Measured on BC 28.4 with five codeunits forced into five parts
+(`BC_CODEUNIT_IDS_MAX_CHARS=6`), against the same five in one part: master gave
+**6 passed / 0 failed** split and **4 passed / 2 failed** unsplit — the split
+turned two real failures green. Both now report 4 passed / 2 failed. The full
+corpus (363 codeunits, 3 parts) is unchanged at 2712 results, so nothing else
+moved.
+
+`AddTestCodeunit` ignores a codeunit already in the suite, which is what makes a
+part safe to re-post. `--timeout` is scaled by the number of parts, because it
+used to be a per-part budget and is now a whole-run one.
 
 **EXPERIMENTAL altool runner (BC 28+ only):** `scripts/run-tests-altool.py` runs tests through the AL dotnet tool's native `al runtests` command (Microsoft.Dynamics.BusinessCentral.Development.Tools, 18.x prerelease — stable 17.x has no `runtests`), which drives the NST's built-in SignalR hub at `/dev/TestRunnerHub`. No TestRunnerExtension, no OData suite, no WebSocket emulation — the server pushes per-method results (status, output, duration) over the hub. Requires the server to advertise Dev API 7.0 (`GET /BC/dev/metadata`), which only exists in BC 28.0+. Caveats: tests do NOT run under an AL test runner codeunit (no AI tests, no test-runner setup/teardown events, isolation from `RequiredTestIsolation`, default Codeunit) — so Microsoft BCApps suites may behave differently than under `run-tests.sh`; the test app must already be published+installed (the script doesn't publish). The reusable workflow's `test_runner` input defaults to `auto`: after BC is healthy it probes `GET /dev/metadata` (via `run-tests-altool.py --probe`, exit 0 = Dev API ≥ 7.0) and uses the altool runner when supported, falling back to the websocket runner otherwise — so 27.x legs and consumers on older versions keep working unchanged. `websocket` forces the legacy flow; `altool` forces the hub and fails hard when unsupported (the regression-detection mode). `altool_version` pins the dotnet tool. Auth comes from `BC_SERVER_USERNAME`/`BC_SERVER_PASSWORD` env vars, which the script sets from `--auth`. The script's stdout deliberately prints the same `N total, P passed, F failed` and `Test codeunits: ...` lines the workflow parser greps — keep that contract if you touch either side.
 
