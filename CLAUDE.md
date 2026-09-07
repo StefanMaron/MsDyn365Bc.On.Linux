@@ -838,6 +838,52 @@ GitHub secrets block.
 - When adding any further file imports via OPENROWSET BULK, remember
   the sql-container mount requirement (see "CRITICAL" above).
 
+## The tier creates its own encryption key
+
+AL's `ENCRYPT`/`DECRYPT`, `IsolatedStorage(Encrypted = true)` and the Data
+Encryption Management pages all read one RSA key that belongs to the tenant.
+**Business Central never creates that key on its own.** On Windows it is an
+explicit setup step (`New-NAVEncryptionKey`, or the Enable Encryption action on
+page 9905); a Business Central online tenant is handed one by the service. This
+container had neither, so every AL encryption call failed with "An encryption
+key is required to complete the request." That was BC behaving correctly, and a
+permanent difference from the sandbox this image is meant to match — issue #75.
+
+Two halves, and both are needed:
+
+- **`scripts/entrypoint.sh` keys the tenant-property row** (issue #66) and
+  symlinks the server's `Keys` directory onto the `/bc/service` volume, so the
+  key file and the file name recorded in `[$ndo$tenantproperty]` survive a
+  container recreate together. A key file without its recorded name, or a name
+  without its file, both fail — the second one worse, with
+  `NavEncryptionKeyNotFoundException` instead of "no key".
+- **`extensions/TestRunnerExtension/src/EncryptionKeyBootstrap.Codeunit.al`
+  creates the key**, through BC's own `CreateEncryptionKey()`. It runs from an
+  install codeunit (`OnInstallAppPerDatabase`) and an upgrade codeunit. The SQL
+  data lives on a tmpfs, so the database is restored fresh on every container
+  start and this extension is installed again each time — which is exactly when
+  a new tenant needs a key. The entrypoint then reads the recorded file name
+  back and logs it, so a tier without a key says so at boot instead of surfacing
+  in the first AL test that encrypts.
+
+Three things not to change without knowing why they are that way:
+
+- **The install trigger uses a `[TryFunction]`, not `Codeunit.Run`.**
+  `Codeunit.Run` opens a nested transaction, and creating a key inside one fails
+  the whole install with "An error occurred and the transaction is stopped" —
+  measured on BC 28.4, where the identical calls made directly succeed. The
+  guard is still needed: an install trigger that raises fails the publish, and
+  the test runner matters more than the key.
+- **The key setup lives in the test runner extension** because that is the one
+  extension the entrypoint publishes on every boot. A separate app would add
+  another publish to every startup.
+- **`CreateEncryptionKey()`'s Boolean return is what keeps a failure quiet.**
+  Called without it, a failed creation raises.
+
+Patch #26 (`BC_FAKE_ENCRYPTION=1`) is the pass-through proxy that used to stand
+in for all of this. It is opt-in and should stay that way — see
+`KNOWN-LIMITATIONS.md` for why its stated reason was wrong.
+
 ## Web client on Linux (PoC, opt-in)
 
 `BC_WEBCLIENT=1 docker compose up -d --wait` self-hosts Microsoft's real
