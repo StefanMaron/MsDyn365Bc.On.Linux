@@ -116,6 +116,14 @@ using System.Threading.Tasks;
 ///   proxy Patch #7 already builds (extended to no-op CreateKey/DeleteKey/ImportKey/ExportKey
 ///   too), so "encryption" always reports enabled/present and Encrypt/Decrypt round-trip as
 ///   plain text. Good enough for tests to stop erroring; not real cryptography.
+///   OPT-IN SINCE 2026-09 (issue #66): the header above was wrong about why CreateKey()
+///   failed. Nothing in it is Windows-only — it is RSACryptoServiceProvider, ToXmlString and
+///   File.Create, all of which work on .NET 8 Linux. It failed because the CRONUS demo backup
+///   ships its single [$ndo$tenantproperty] row with a BLANK tenantid while the NST runs
+///   tenant 'default', so the UPDATE that persists the key file name matched zero rows and the
+///   next line's RequireKeyCreatedAndPresent() threw. entrypoint.sh sets that tenantid now and
+///   real encryption works, so this patch no longer applies by default.
+///   BC_FAKE_ENCRYPTION=1 brings it back.
 ///
 /// Patch #27: NavClientHandle.Dispose (Nav.Ncl.dll)
 ///   Disposing a form/page that held a .NET client handle throws NullReferenceException on
@@ -3419,9 +3427,26 @@ internal class StartupHook
     // See header comment for the full story.
     // ========================================================================
 
+    // Opt-in since the real cause was found (issue #66). AL encryption on this tier
+    // failed because the CRONUS demo backup ships its single [$ndo$tenantproperty]
+    // row with a BLANK tenantid while the NST runs tenant 'default', so every
+    // tenant-property write matched zero rows and CreateKey() could not remember the
+    // key file it had just written. scripts/entrypoint.sh now sets that tenantid, and
+    // with it real RSA encryption works — measured on BC 28.4: EnableEncryption
+    // succeeds and EncryptText returns real ciphertext, not the 16 bytes this proxy
+    // hands back. Set BC_FAKE_ENCRYPTION=1 to restore the pass-through proxy.
+    private static bool FakeEncryptionRequested =>
+        Environment.GetEnvironmentVariable("BC_FAKE_ENCRYPTION") == "1";
+
     private static void PatchTenantEncryptionProvider(Assembly navNcl)
     {
         if (IsPatchDisabled("26")) return;
+        if (!FakeEncryptionRequested)
+        {
+            Console.WriteLine("[StartupHook] Patch #26: skipped — real tenant encryption is used " +
+                              "(set BC_FAKE_ENCRYPTION=1 for the pass-through proxy)");
+            return;
+        }
         try
         {
             var factoryType = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.Encryption.TenantEncryptionProviderFactory");

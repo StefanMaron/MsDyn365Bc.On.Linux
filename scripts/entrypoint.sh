@@ -674,8 +674,30 @@ if [ -n "$LICENSE_TO_IMPORT" ]; then
     log_step "License imported: $(basename "$LICENSE_TO_IMPORT")"
 fi
 
-# Sandbox tenant type
+# Sandbox tenant type, and give the row the tenant id the NST actually uses.
+#
+# The CRONUS demo backup ships exactly one [$ndo$tenantproperty] row with
+# tenantid = '' (empty, not NULL). The NST runs tenant 'default' even with
+# Multitenant=false, and every tenant-property write is
+#   UPDATE [$ndo$tenantproperty] SET <field>=@p, lastmodified=getutcdate()
+#   WHERE tenantid=@tenantId
+# so with a blank tenantid EVERY such write silently matches zero rows. It is
+# an UPDATE, not an upsert, and nothing checks the row count.
+#
+# That is why AL encryption did not work here (issue #66). CreateKey() writes
+# the RSA key file to disk, then sets StoredEncryptionFileName — which goes to
+# this table, matched nothing, and read back empty — so the very next line's
+# RequireKeyCreatedAndPresent() threw NavEncryptionNotCreatedException ("An
+# encryption key is required to complete the request."). The key existed on
+# disk; the tier just could not remember its name. Diagnosed by noticing that
+# lastmodified was three days stale after several CreateKey calls.
+#
+# With tenantid set, real encryption works with Patch #26 disabled: measured on
+# BC 28.4, EnableEncryption succeeds and EncryptText returns 344 bytes of real
+# ciphertext instead of the pass-through proxy's 16.
 $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1;" 2>/dev/null
+$SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenantid = N'default' WHERE ISNULL(tenantid, N'') = N'';" 2>/dev/null
+log_step "Tenant property row keyed to tenant 'default' (was blank; every tenant-property write matched 0 rows)"
 
 # Normalize demo-DB user time zones to UTC. The CRONUS backup ships
 # [User Personalization].[Time Zone] = 'Europe/Amsterdam' for the default
@@ -1207,6 +1229,35 @@ PYEOF
 else
     log_step "WARN: Could not determine platform version; skipping R2R pre-seed"
 fi
+
+# Keep the tenant encryption keys on the service volume.
+#
+# RsaEncryptionProviderBase writes the RSA key file to
+# /usr/share/Microsoft/Microsoft Dynamics NAV/<ver>/Server/Keys/<tenant>_<guid>.key,
+# which is on the container's own filesystem, not on a volume. The key file name
+# IS persisted (in [$ndo$tenantproperty], see the tenantid fix in Step 3), so
+# after a container recreate BC remembers a key whose file is gone and every
+# decrypt fails with NavEncryptionKeyNotFoundException rather than "no key".
+# Symlink the directory onto /bc/service so the two halves survive together.
+# Runs on every boot: the symlink lives on the ephemeral layer even when the
+# stamped Step 2 is skipped.
+BC_KEYS_DIR="/bc/service/Keys"
+mkdir -p "$BC_KEYS_DIR"
+for _server_dir in /usr/share/Microsoft/"Microsoft Dynamics NAV"/*/Server; do
+    [ -d "$_server_dir" ] || continue
+    _keys_link="$_server_dir/Keys"
+    if [ -L "$_keys_link" ]; then
+        continue
+    fi
+    if [ -d "$_keys_link" ]; then
+        # Real directory from an earlier boot — move anything in it onto the volume
+        # before replacing it, so a key created before this change is not lost.
+        find "$_keys_link" -maxdepth 1 -type f -name '*.key' -exec mv -n {} "$BC_KEYS_DIR"/ \; 2>/dev/null || true
+        rm -rf "$_keys_link"
+    fi
+    ln -sfn "$BC_KEYS_DIR" "$_keys_link"
+    log_step "Encryption keys directory linked to the service volume ($_keys_link -> $BC_KEYS_DIR)"
+done
 
 log_step "Starting BC service tier..."
 # Start BC — use a FIFO to keep stdin open for /console mode

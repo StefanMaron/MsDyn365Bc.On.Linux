@@ -8,6 +8,8 @@
 // type identity duplication.
 
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Drawing; // Color, Point, Rectangle etc. from framework
 
 // ============================================================================
@@ -155,10 +157,114 @@ namespace System.Drawing
         public void SetPixel(int x, int y, Color color) { }
     }
 
-    // Emits real, decodable image bytes for the stubbed Save() paths. Source bytes are
-    // passed through verbatim when the Image came from a stream; otherwise a valid image
-    // is synthesized at the Image's dimensions (opaque white). Not gated to specific BC
-    // call sites — anything that saves an Image gets non-empty, well-formed output.
+    // Reflection-only bridge to SkiaSharp. Deliberately NOT a compile-time reference:
+    // DrawingStub is loaded in two very different places — into Add-Ins for the AL
+    // compile (metadata only, Save() is never called) and into the NST at runtime via
+    // SetupStubWithResolver — and only the second one has SkiaSharp next to it. A hard
+    // reference would turn "no Skia here" into a load failure of System.Drawing.Common
+    // itself. It also has to stay optional at runtime: the entrypoint links
+    // libSkiaSharp.so ONLY when it can version-match the artifact's managed
+    // SkiaSharp.dll, so on a version it has no native for, Skia is present as metadata
+    // and unusable. Every failure path here falls back to the caller's source bytes.
+    internal static class SkiaCodec
+    {
+        private static bool _probed;
+        private static MethodInfo? _decode;      // SKBitmap.Decode(byte[])
+        private static MethodInfo? _fromBitmap;  // SKImage.FromBitmap(SKBitmap)
+        private static MethodInfo? _encode;      // SKImage.Encode(SKEncodedImageFormat, int)
+        private static MethodInfo? _toArray;     // SKData.ToArray()
+        private static Type? _formatEnum;
+
+        private static readonly Guid JpegFormat = new Guid("b96b3cae-0728-11d3-9d7b-0000f81ef32e");
+        private static readonly Guid ExifFormat = new Guid("b96b3cb2-0728-11d3-9d7b-0000f81ef32e");
+
+        private static void Probe()
+        {
+            if (_probed) return;
+            _probed = true;
+            try
+            {
+                var asm = AppDomain.CurrentDomain.GetAssemblies()
+                              .FirstOrDefault(x => x.GetName().Name == "SkiaSharp")
+                          ?? Assembly.Load("SkiaSharp");
+                var bitmap = asm.GetType("SkiaSharp.SKBitmap");
+                var image = asm.GetType("SkiaSharp.SKImage");
+                var data = asm.GetType("SkiaSharp.SKData");
+                _formatEnum = asm.GetType("SkiaSharp.SKEncodedImageFormat");
+                if (bitmap == null || image == null || data == null || _formatEnum == null) return;
+
+                _decode = bitmap.GetMethod("Decode", BindingFlags.Public | BindingFlags.Static,
+                                           null, new[] { typeof(byte[]) }, null);
+                _fromBitmap = image.GetMethod("FromBitmap", BindingFlags.Public | BindingFlags.Static,
+                                              null, new[] { bitmap }, null);
+                _encode = image.GetMethod("Encode", BindingFlags.Public | BindingFlags.Instance,
+                                          null, new[] { _formatEnum, typeof(int) }, null);
+                _toArray = data.GetMethod("ToArray", BindingFlags.Public | BindingFlags.Instance,
+                                          Type.EmptyTypes);
+            }
+            catch
+            {
+                _decode = null; // any failure: stay unavailable, callers pass bytes through
+            }
+        }
+
+        /// <summary>Re-encode <paramref name="source"/>, or null when Skia is unavailable
+        /// or cannot handle this content — the caller then writes the source verbatim.</summary>
+        internal static byte[]? TryReencode(byte[] source, Guid formatGuid)
+        {
+            Probe();
+            if (_decode == null || _fromBitmap == null || _encode == null || _toArray == null || _formatEnum == null)
+                return null;
+
+            // Skia encodes PNG and JPEG. Everything else GDI+ can save (GIF, BMP, TIFF,
+            // ICO, EMF, WMF) is left alone rather than silently converted to a different
+            // format, which would be a bigger divergence than passing the bytes through.
+            string formatName = (formatGuid == JpegFormat || formatGuid == ExifFormat) ? "Jpeg" : "Png";
+
+            object? bmp = null, img = null, data = null;
+            try
+            {
+                bmp = _decode.Invoke(null, new object[] { source });
+                if (bmp == null) return null;               // not decodable by Skia
+                img = _fromBitmap.Invoke(null, new[] { bmp });
+                if (img == null) return null;
+                var fmt = Enum.Parse(_formatEnum, formatName);
+                data = _encode.Invoke(img, new object[] { fmt, 100 });
+                if (data == null) return null;              // encoder refused this format
+                var bytes = _toArray.Invoke(data, null) as byte[];
+                return (bytes != null && bytes.Length > 0) ? bytes : null;
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                (data as IDisposable)?.Dispose();
+                (img as IDisposable)?.Dispose();
+                (bmp as IDisposable)?.Dispose();
+            }
+        }
+    }
+
+    // Re-encodes through SkiaSharp when it is available, so a Save() round-trip
+    // behaves the way GDI+ does: the bytes that come out are a fresh encode, not the
+    // bytes that went in. Falls back to writing the source bytes verbatim when Skia
+    // cannot be used, and synthesizes a valid image when the Image was constructed
+    // from dimensions rather than from a stream. Not gated to specific BC call sites
+    // — anything that saves an Image gets non-empty, well-formed output.
+    //
+    // Why this matters (issue #67): BC's NavMediaImage.Bytes() copies the ORIGINAL
+    // stream when it still holds one, and only calls Image.Save() on the path where
+    // it deliberately re-encodes. So Save() is reached exactly where a real tier
+    // produces different bytes from the ones imported. Passing the source through
+    // there made a Media round-trip byte-preserving on Linux and re-encoded on
+    // Windows — a test asserting "ExportStream returns what I imported" passed here
+    // and failed on a real tier.
+    //
+    // This does NOT reproduce GDI+ byte-for-byte; Skia's PNG encoder is its own. The
+    // observable class of behaviour matches (the stream is re-encoded), the exact
+    // length does not. A test pinning an exact byte count is pinning a GDI+ version.
     internal static class StubImageWriter
     {
         private static readonly Guid JpegGuid = new Guid("b96b3cae-0728-11d3-9d7b-0000f81ef32e");
@@ -177,7 +283,9 @@ namespace System.Drawing
             var src = image?.SourceBytes;
             if (src != null && src.Length > 0)
             {
-                stream.Write(src, 0, src.Length);
+                var reencoded = SkiaCodec.TryReencode(src, formatGuid);
+                var outBytes = reencoded ?? src;
+                stream.Write(outBytes, 0, outBytes.Length);
                 return;
             }
             if (formatGuid == JpegGuid || formatGuid == ExifGuid)
