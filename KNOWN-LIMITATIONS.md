@@ -1,5 +1,51 @@
 # Known Test Limitations on BC Linux
 
+## Where a green Linux leg is not evidence about BC
+
+A test can pass here for the wrong reason. The corpus
+(StefanMaron/BusinessCentral.AL.Language.Tests) started running its own nightly
+against an official Microsoft BC container on Windows, and the disagreements it
+found are listed below with what each one actually turned out to be. Anything on
+this list is a surface where a green result on this tier says something about the
+image or the harness, not about Business Central. Add to it whenever a new
+divergence is settled.
+
+All rows measured on BC 28.4 unless stated. The Windows side is corpus run
+34068376154 (BC 28.4, onprem, w1); the Linux side is a local BC 28.4 sandbox w1
+container plus, where noted, corpus run 34079926224.
+
+| Surface | Linux says | Real BC says | What it actually is |
+|---|---|---|---|
+| `IsolatedStorage(Encrypted)`, `ENCRYPT`/`DECRYPT` (issue #66) | encrypted write reads back as plaintext | "An encryption key is required to complete the request." | **The image.** Patch #26 substitutes a pass-through encryption provider so AL encryption never errors. It reports "enabled" and round-trips plaintext. Any test asserting a property of encryption here is measuring the patch. See "Data Encryption Mgmt. tests" below. |
+| `Media.ExportStream()` byte length (issue #67) | exactly the imported bytes (68 in, 68 out) | 31 bytes more (68 in, 99 out) | **The image.** BC's `NavMediaImage.Bytes()` re-encodes through `Image.Save()` when it holds no original stream; `DrawingStub`'s `Save()` writes the source bytes back verbatim instead (deliberately — a re-encoding stub is what issue #18 was). So a media round-trip is byte-preserving here and re-encoded on a real tier. Not fixed: matching GDI+'s encoder byte-for-byte is not something a stub can do, and byte-preservation is the better behaviour for a Linux runtime — it just is not BC's. |
+| Outbound-HTTP consent prompt (issue #68) | prompt fires; a `[StrMenuHandler]` answers it | no prompt; a declared handler goes unexecuted | **Not settled.** Reproduced here: `HttpClient.Get` from a test raises the approval StrMenu and the handler runs. The corpus's own test comment records the prompt on BC 27.5 and no prompt on 28.3, so this varies with the extension's consent state rather than with the OS. Whichever tier matches production is still open. |
+| `Published Application`: `Package ID` vs `Runtime Package ID` (issue #69) | one GUID in both columns | two different GUIDs | **Neither — it is the publish route, and it is BC's own rule.** `NavAppPackageCompiler.CreateRuntimePackageId` (Nav.Ncl.dll) reads, in full: `new RuntimePackageId((isDeveloperExtension && !forceUniqueRuntimePackageId) ? packageId.Value.Value : Guid.NewGuid())`. bc-linux publishes through the dev endpoint, i.e. as a developer extension, so the package id is reused. BcContainerHelper publishes with `Publish-NAVApp`, which does not. Measured on a live container: of 141 rows in `[Published Application]`, the 9 with identical ids are exactly the 9 this image published through the dev endpoint. Publishing the same app the same way on Windows would give the same answer. |
+| `Report.SaveAs(Pdf)` with an RDLC layout (issue #70) | returns false — RDLC rendering is not implemented | returns true | **The image, and known.** The corpus test says so in its own name (`...OnLinux`). Nothing to fix here; the open question is whose repository the assertion belongs in, which is the issue. |
+
+Two entries that were on this list and are now closed, both harness rather than
+tier:
+
+- **`TestPermissions` was not enforced on the fast path** (issue #64). The
+  altool/TestRunnerHub runner runs no AL test runner codeunit, and that is what
+  the platform switches the permission execution context through — so every test
+  on that leg ran as SUPER regardless of what it declared. Measured on one
+  container in one minute: a test codeunit with no `TestPermissions` declaration
+  inserting into its own table is refused by the websocket runner ("Sorry, the
+  current permissions prevented the action.") and succeeds on the hub. At corpus
+  scale the websocket runner reports 652 permission refusals where the hybrid
+  runner's fast path reported none, against 659 on the Windows container — the
+  same defect, the same size. `classify-handler-codeunits.py` now routes anything
+  not declaring `TestPermissions = Disabled` to the websocket leg.
+- **`SingleInstance` codeunit state was torn down between test codeunits**
+  (issue #65). That state lives for the lifetime of the session, and the
+  websocket runner opened a new one before every codeunit. Real BC does not:
+  BcContainerHelper defaults `RenewClientContextBetweenTests` to `$false`.
+  `tools/TestRunner/Program.cs` no longer renews by default
+  (`--renew-client-context` restores the old behaviour). Note the reason recorded
+  for the old behaviour — "BC kills the session after each codeunit under test
+  isolation" — was wrong: `TestIsolation = Codeunit` rolls back database changes
+  and says nothing about the session.
+
 ## Failure triage: bcapps-gate run 2026-08-06 (BC 28.1, hub runner, TC=0 legs)
 
 Full classification of the 787 Tests-Misc + 165 Tests-Workflow failures from

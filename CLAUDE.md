@@ -43,6 +43,29 @@ Multiple parallel instances: use `-p <project>` with a unique port offset for ev
 
 `run-tests.sh` is a hybrid OData (suite population + result reading) + WebSocket (test execution via a real client session) flow. The WebSocket step is required because TestPage support needs a `serviceConnection`-style session, which OData can't provide. The test runner extension is in `extensions/TestRunnerExtension/` (AL source under `src/`); the prebuilt `.app` is baked into the image and republished automatically on container start.
 
+**One client session runs a whole batch, and that is deliberate** (issue #65).
+`tools/TestRunner/Program.cs` used to open a new session before every codeunit,
+on the stated grounds that BC kills the session after each one under test
+isolation. It does not — `TestIsolation = Codeunit` rolls back database changes
+and says nothing about the session, which is why the non-exception path in that
+loop is reached at all. The renewal cost fidelity: `SingleInstance` codeunit
+instances live for the lifetime of the session, so a fresh session per codeunit
+reset state that a real tier carries across test codeunits (BcContainerHelper
+defaults `RenewClientContextBetweenTests` to `$false`). It also cost time.
+Measured on the AL language corpus, 363 codeunits, BC 28.4: **296s → 88s, with
+2712 results either way and exactly two outcome changes**, both `SingleInstance`
+tests that now fail the way a Windows container fails them.
+`--renew-client-context` restores the old behaviour on both `run-tests.sh` and
+`TestRunner.dll`. A session lost mid-run is still recovered — the loop opens a
+new one on the next iteration, which is what it always did.
+
+Caveat that remains: `run-tests.sh` still **batches** a long codeunit list into
+several `TestRunner.dll` invocations, and each batch is its own process and
+therefore its own session. Session-scoped state resets at batch boundaries. It
+is much coarser than the old per-codeunit reset, but it is not nothing — a
+cross-codeunit `SingleInstance` test can still pass or fail depending on which
+batch its codeunits land in.
+
 **EXPERIMENTAL altool runner (BC 28+ only):** `scripts/run-tests-altool.py` runs tests through the AL dotnet tool's native `al runtests` command (Microsoft.Dynamics.BusinessCentral.Development.Tools, 18.x prerelease — stable 17.x has no `runtests`), which drives the NST's built-in SignalR hub at `/dev/TestRunnerHub`. No TestRunnerExtension, no OData suite, no WebSocket emulation — the server pushes per-method results (status, output, duration) over the hub. Requires the server to advertise Dev API 7.0 (`GET /BC/dev/metadata`), which only exists in BC 28.0+. Caveats: tests do NOT run under an AL test runner codeunit (no AI tests, no test-runner setup/teardown events, isolation from `RequiredTestIsolation`, default Codeunit) — so Microsoft BCApps suites may behave differently than under `run-tests.sh`; the test app must already be published+installed (the script doesn't publish). The reusable workflow's `test_runner` input defaults to `auto`: after BC is healthy it probes `GET /dev/metadata` (via `run-tests-altool.py --probe`, exit 0 = Dev API ≥ 7.0) and uses the altool runner when supported, falling back to the websocket runner otherwise — so 27.x legs and consumers on older versions keep working unchanged. `websocket` forces the legacy flow; `altool` forces the hub and fails hard when unsupported (the regression-detection mode). `altool_version` pins the dotnet tool. Auth comes from `BC_SERVER_USERNAME`/`BC_SERVER_PASSWORD` env vars, which the script sets from `--auth`. The script's stdout deliberately prints the same `N total, P passed, F failed` and `Test codeunits: ...` lines the workflow parser greps — keep that contract if you touch either side.
 
 ### Editing the startup hook
@@ -656,19 +679,41 @@ correctness gaps trace back to that:
    modal page call (`asserterror ... .Invoke(); Assert.ExpectedError
    ('Unhandled UI')`) doesn't get that error under the hub — the call
    just silently returns.
-2. **Cross-codeunit `SingleInstance` state leakage under `--transport
-   hub`/`auto`.** Tests asserting that a `SingleInstance` codeunit's state
-   resets at the per-test-codeunit isolation boundary
-   (`RequiredTestIsolation = Codeunit`, the AL default) fail under one
-   persistent hub connection for a whole run and pass under websocket —
-   the hub apparently doesn't tear down and recreate the isolation scope
-   per codeunit the way a fresh session does. This is unrelated to
-   `[HandlerFunctions]` and isn't visible from any one codeunit's own
-   source.
+2. **`TestPermissions` is never applied** (issue #64). The property "works
+   together with the OnBeforeTestRun and OnAfterTestRun triggers in test
+   runner codeunits" — its own documentation — so with no test runner
+   codeunit the permission execution context is never switched and every
+   test on the hub runs as SUPER. Both non-`Disabled` values are affected:
+   `Restrictive` (the default when the property is absent) and
+   `NonRestrictive` both set the context to 'D365 Full Access', which does
+   not cover an extension's own tables. Measured on BC 28.4, one container:
+   a test codeunit with no `TestPermissions` declaration inserting into its
+   own table is refused by the websocket runner ("Sorry, the current
+   permissions prevented the action.") and succeeds on the hub. At corpus
+   scale that was 652 refusals the fast path silently turned green, against
+   659 the same corpus produced on a Windows container.
+
+There was a third entry here, and **the diagnosis in it was backwards** —
+worth knowing because it is what made two runners agree on the wrong answer.
+It claimed that cross-codeunit `SingleInstance` state leaked under
+`--transport hub` and that websocket was correct to reset it. `SingleInstance`
+instances live for the lifetime of the SESSION; `TestIsolation = Codeunit`
+rolls back DATABASE changes and says nothing about the session, and real BC
+runs a suite in one client session (BcContainerHelper defaults
+`RenewClientContextBetweenTests` to `$false`). So the hub was the only one of
+the three transports that matched a Windows container and a SaaS sandbox. The
+websocket runner has stopped renewing its session per codeunit and now agrees
+too — see issue #65 and `tools/TestRunner/Program.cs`.
+
+**Neither leg is faithful across the board**: the hub gets `SingleInstance`
+lifetime right and `TestPermissions` wrong; the websocket runner gets both
+right, at ~3x the wall time on the corpus. That asymmetry is the reason the
+split exists and the reason routing errs toward websocket.
 
 `scripts/classify-handler-codeunits.py` statically scans a test app's AL
-source for `[HandlerFunctions(...)]` usage (and the specific unhandled-
-modal-plus-`asserterror` shape) and routes each codeunit to either the fast
+source for `[HandlerFunctions(...)]` usage (the specific unhandled-
+modal-plus-`asserterror` shape, and any effective `TestPermissions` other
+than `Disabled`) and routes each codeunit to either the fast
 path or the classic websocket path — decided ONCE, before either runner
 starts, so nothing runs twice even when many codeunits fail. It's a
 heuristic tied to the *known* failure shape, not a proof of full
@@ -697,15 +742,13 @@ with no matching AL source are conservatively routed to websocket —
 unproven safety is treated as unsafe.
 
 **The fast leg defaults to `--altool-transport cli`, not `hub`/`auto`**,
-even though hub is ~40x faster per codeunit. `cli` spawns a fresh
-`al runtests` process — a fresh connection — per codeunit, which is the
-same per-codeunit isolation shape `run-tests.sh` already gets from its own
-reconnect-before-every-codeunit design, and is the plausible reason `cli`
-doesn't show the `SingleInstance` leak that `hub` does (per the issue's
-diagnosis; not independently re-verified here). Don't change this default
-back to `hub`/`auto` without first confirming `cli` is actually clean of
-gap #2 above — the whole point of this design is that a wrong assumption
-here fails silently, the same way the original bug did.
+even though hub is ~40x faster per codeunit: `cli` spawns a fresh
+`al runtests` process per codeunit, so a codeunit that kills its session
+costs only that codeunit and not the rest of the run. That is the reason to
+keep the default, and it is the only one — the `SingleInstance` argument that
+used to be given here is contradicted by the measurement above, and `cli`'s
+fresh session per codeunit is in fact the LESS faithful of the two on that
+surface.
 
 `test_runner=altool` (explicit force, BC 27/28's "catch hub regressions"
 mode) is untouched by any of this — it still runs every codeunit through

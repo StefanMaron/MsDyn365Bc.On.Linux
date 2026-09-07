@@ -31,21 +31,38 @@ flake: see StefanMaron/BusinessCentral.AL.Language.Tests#158 and the
 comment on run_legs below for the evidence.
 
 The altool leg defaults to --altool-transport cli, NOT hub/auto, even
-though hub is ~40x faster per codeunit. Per
-https://github.com/StefanMaron/MsDyn365Bc.On.Linux/issues/27#issuecomment-5239717306:
-tests asserting that a SingleInstance codeunit's state resets at the
-per-test-codeunit isolation boundary (RequiredTestIsolation = Codeunit, the
-AL default) fail under --transport hub and pass under websocket, on
-codeunits with no [HandlerFunctions] at all — so this is a second,
-independent hub-transport bug that the static classification above cannot
-see (it's about state leaking BETWEEN codeunits in one run, not about any
-one codeunit's own source). cli spawns a fresh `al runtests` process — a
-fresh connection — per codeunit, matching the per-codeunit isolation
-websocket already gets from its own reconnect-before-every-codeunit design;
-hub's one persistent connection for the whole run apparently doesn't tear
-down and recreate that isolation scope. Until cli is verified clean of the
-same leak, it's the responsible default — pass --altool-transport hub/auto
-explicitly to opt back into the faster, less-proven path. Output contract is
+though hub is ~40x faster per codeunit, because cli spawns a fresh `al runtests`
+process per codeunit, so a codeunit that kills its session costs only that
+codeunit and not the rest of the run.
+
+READ THIS BEFORE CHANGING THAT DEFAULT ON SingleInstance GROUNDS. The reason
+originally recorded here was that tests asserting a SingleInstance codeunit's
+state RESETS between test codeunits fail under --transport hub and pass under
+websocket, so hub was assumed buggy. That reading was backwards, and it is
+worth stating plainly because it made two runners agree on the wrong answer:
+
+  SingleInstance instances live for the lifetime of the SESSION. Nothing about
+  RequiredTestIsolation / TestIsolation touches them — TestIsolation = Codeunit
+  rolls back DATABASE changes (see the property's documentation). Real BC runs
+  a suite in one client session, because BcContainerHelper defaults
+  RenewClientContextBetweenTests to $false, so that state DOES carry across
+  test codeunits on a real tier.
+
+  Measured on BC 28.4, one container, a SingleInstance codeunit written by one
+  test codeunit and read by the next: --transport hub reads back the written
+  value (correct), --transport cli reads back the default, and the websocket
+  runner used to read back the default too because it renewed its client
+  session before every codeunit. hub was the only one of the three that agreed
+  with a Windows container and a SaaS sandbox. See
+  StefanMaron/MsDyn365Bc.On.Linux#65; the websocket runner no longer renews
+  (tools/TestRunner/Program.cs), so it now agrees as well.
+
+Neither leg is faithful across the board, which is the thing to keep in mind
+when routing: the hub gets SingleInstance lifetime right and TestPermissions
+wrong (issue #64 — no test runner codeunit means the permission execution
+context is never switched, so every test runs as SUPER), and that is why the
+classifier routes anything not declaring TestPermissions = Disabled to
+websocket. Output contract is
 kept identical to run-tests.sh / run-tests-altool.py so existing workflow
 parsing (the "Test codeunits: ..." line, the "N total, P passed, F failed,
 ..." summary line, PIPESTATUS-based exit code checks) keeps working
