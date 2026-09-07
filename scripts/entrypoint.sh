@@ -1689,6 +1689,21 @@ PYEOF
                 -F "file=@/bc/testrunner/TestRunner.app;type=application/octet-stream" \
                 "$DEV_URL/apps?SchemaUpdateMode=synchronize" 2>&1)
             echo "[entrypoint] Test Runner Extension: HTTP $HTTP_CODE"
+
+            # Report the tenant encryption key (issue #75). The key itself is
+            # created by that extension's install codeunit, through BC's own
+            # CreateEncryptionKey() — this only reads back what the tier
+            # recorded, so a tier without a key says so in the boot log
+            # instead of surfacing as "An encryption key is required to
+            # complete the request." in the first AL test that encrypts.
+            ENC_KEY_FILE=$($SQLCMD_DB -h -1 -W -Q "SET NOCOUNT ON; SELECT ISNULL(encryptionkeyfilename, N'') FROM [\$ndo\$tenantproperty];" 2>/dev/null | head -1 | tr -d '\r')
+            if [ -n "$ENC_KEY_FILE" ] && [ -f "$BC_KEYS_DIR/$ENC_KEY_FILE" ]; then
+                echo "[entrypoint] Tenant encryption key: $ENC_KEY_FILE"
+            elif [ -n "$ENC_KEY_FILE" ]; then
+                echo "[entrypoint] WARN: tenant records encryption key '$ENC_KEY_FILE' but $BC_KEYS_DIR/$ENC_KEY_FILE is missing — AL decryption will fail"
+            else
+                echo "[entrypoint] WARN: no tenant encryption key — AL encryption calls will fail with 'An encryption key is required to complete the request.'"
+            fi
         fi
     fi
     TOTAL_ELAPSED=$(( $(date +%s) - ENTRYPOINT_START ))
