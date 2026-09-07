@@ -465,6 +465,19 @@ setup_suite_chunk() {
         echo "FAIL (HTTP $setup_http)"
         echo "       Action: Microsoft.NAV.${action}"
         sed 's/^/       /' "$setup_body"
+        # setupSuiteAppend arrived in Test Runner Extension 3.2.0.0. A 404 on
+        # it means the container is older than this script — the extension is
+        # baked into the bc-runner image, so the two move together. Say that,
+        # because "HTTP 404" on its own points nowhere.
+        if [ "$action" = "setupSuiteAppend" ] && [ "$setup_http" = "404" ]; then
+            echo ""
+            echo "       The bc-runner image is older than this script."
+            echo "       Its Test Runner Extension has no setupSuiteAppend, which"
+            echo "       this script needs to post a codeunit list too long for"
+            echo "       one 2048-character CodeunitIds field (${#CODEUNIT_IDS} chars here)."
+            echo "       Pull a current image, or pin scripts and runner_image to"
+            echo "       the same bc-linux commit."
+        fi
         rm -f "$setup_body"
         return 1
     fi
