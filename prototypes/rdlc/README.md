@@ -176,11 +176,26 @@ neither report 1305 nor its only report extension (Subscription Billing's own
 columns) defines `GlobalLocationNumber`. `GlobalLocationNumber` exists in Base
 Application only on the *posted* document reports and tables.
 
-**The most likely explanation is a country difference, not a platform one.**
-This container is `sandbox/28.4/w1`. A localization app for another country can
-add that column to report 1305 via its own report extension, in which case the
-layout resolves there and fails on W1. Before treating this as a Linux fault,
-check whether the working Windows container is the same country and version.
+**Checked against the US artifact too, and it is not a country difference.**
+Inspected `sandbox/28.4.53241.54183/us` directly (HTTP range reads over the
+artifact zip — no full download needed; see the method in this repo's history):
+
+- US Base Application's `StandardSalesOrderConf.Report.al`: **zero** occurrences
+  of `GlobalLocationNumber`.
+- Scanned **all 127 non-language US apps** for a report extension on
+  `Standard Sales - Order Conf.`: exactly one exists, Subscription Billing's own
+  `ContractSalesOrderConf.ReportExt.al`, and it adds only the eleven
+  `ServiceCommitment*` columns.
+- The US copy of `SalesOrderConfForSubscriptionBilling.rdlc` has the identical
+  defect: 250 fields declared, `GlobalLocationNumber` and
+  `GlobalLocationNumber_Lbl` referenced but never declared.
+
+Since `PatchRdlcWithNewDataSetAsync` builds `<Fields>` from that merged metadata,
+and the metadata has no such column on either W1 or US, **the prediction is that
+this layout fails identically on a Windows US 28.4 sandbox**. That is a
+prediction from the shipped artifact, not a Windows test — nobody has run it.
+If it does render on Windows, then something in this integration diverges after
+all and this section is wrong again; previewing that one layout settles it.
 
 ### Two ways to misread this log, both of which cost a wrong diagnosis
 
