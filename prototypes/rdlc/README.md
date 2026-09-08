@@ -232,25 +232,44 @@ in this tree.
 And when driving the web client: a report that renders opens in the **viewer**,
 it does not download. "No download" is not "no render" — take a screenshot.
 
-## Corpus result: the renderer changes nothing yet, and here is why
+## Corpus result: 31 Microsoft RDLC tests fixed, 0 regressed
 
-Ran the nine Tests-ERM codeunits whose corpus failures are attributed to "RDLC
-report rendering is not implemented" (134008, 134325-134330, 134377, 134386),
-twice, on the same image, with only `BC_RDLC_RENDERER` differing.
+Measured on BC 28.4 W1, same image both times, only `BC_RDLC_RENDERER`
+differing. The test app is Microsoft's **Tests-Report** (`Microsoft_Tests-Report.app`
+from the artifact), codeunits **134607 "Test Report SaveAs"** and
+**132600 "Report Layout"**.
 
-| | total | passed | failed | of which "RDLC not implemented" |
-|---|---|---|---|---|
-| renderer off | 737 | 669 | 68 | 19 |
-| renderer on | 737 | 669 | 68 | **0** |
+| | total | passed | failed |
+|---|---|---|---|
+| renderer off | 60 | 20 | 40 |
+| renderer on | 60 | **51** | **9** |
 
-The renderer is genuinely engaged — the "not implemented" message is gone
-entirely. But the same 68 tests fail either way, and the same 19 now fail with
-`The system encountered an internal error while rendering the report`. **Net
-change: zero.**
+**31 fixed, 0 regressed.** Among them:
 
-**Why: those tests render to Excel, not PDF.** All 18 of the 19 whose bodies
-resolve call `Report.SaveAsExcel`. ReportViewer's Excel rendering extension
-builds the .xlsx through `System.IO.Packaging`, and Mono's implementation fails:
+- `134607 TestRdlcSaveAsPDF` — runs an RDLC report through the Job Queue
+  dispatcher and verifies the Report Outbox actually contains output. This is
+  the "does a PDF stream come back" case.
+- `134607 TestRdlcSaveAsPDFClassic` — `REPORT.SaveAsPdf(...)` to a file.
+- 29 real Microsoft reports in `132600 Report Layout`: Account Schedule, Trial
+  Balance by Period, Consolidated Trial Balance, Customer/Vendor Balance to
+  Date, Customer Statement, Summary Aging, Check, Price List, VAT VIES
+  Declaration, Inventory Availability Plan, Item Age Composition, Post Inventory
+  Cost to G/L, Sales/Purchase Reservation Availability, and more.
+
+The 9 that still fail are not rendering faults except two:
+
+- **7 are missing demo data** — "The Cost Center table is empty", "The G/L
+  Budget Name table is empty", "The Analysis Line Template table is empty",
+  "There is no Item Analysis View within the filter", "The Accounting Period
+  does not exist", a Production BOM validation error. These fail identically
+  with the renderer off.
+- **2 are Word and Excel output** — `TestRdlcSaveAsWord` and
+  `TestRdlcSaveAsExcel`. See below.
+
+### Excel and Word output do not work, and that is a separate problem
+
+`Report.SaveAsExcel` and `SaveAsWord` fail under Mono inside
+`System.IO.Packaging`, which ReportViewer uses to build the OPC package:
 
 ```
 System.Exception: Could not open unzip archive
@@ -258,14 +277,17 @@ System.Exception: Could not open unzip archive
   at System.IO.Packaging.ZipPackage.LoadParts
 ```
 
-So this work — which is PDF only, deliberately — is not what those tests
-exercise, and the corpus cannot validate it. Getting them green needs Mono's
-`System.IO.Packaging` working, which is a separate piece of work from anything
-in this tree.
+This matters for reading the corpus. The nine Tests-ERM codeunits whose failures
+are labelled "RDLC report rendering is not implemented" (134008, 134325-134330,
+134377, 134386) are **all `SaveAsExcel`** — 18 of the 19 whose bodies resolve.
+Running them proves nothing about this work: 737 tests, 669 passed, 68 failed,
+with the renderer both off and on. The "not implemented" message disappears
+because the renderer is engaged, and then they fail in the Excel writer instead.
 
-**The error-propagation bug is now confirmed with a stack**, and it is worse
-than a diagnostics annoyance: it destroys the real error before the client sees
-it.
+Do not use those ERM codeunits to judge PDF rendering. Use Tests-Report 134607
+and 132600.
+
+### The error-propagation bug, confirmed with a stack
 
 ```
 System.NullReferenceException
@@ -276,14 +298,11 @@ System.NullReferenceException
   at Microsoft.BusinessCentral.Reporting.Server.LocalReportHandle.Render
 ```
 
-`LocalReportHandle.Render` catches a render failure, asks BC's telemetry to log
-it, Mono throws inside `StackTrace.AddFrames`, and the original message is lost.
-That is why every failure above reads "an internal error". Fixing it is the
-first thing to do next: without it, the Excel work below cannot be diagnosed
-either.
-
-Reproduce: `prototypes/rdlc/README.md` history has the exact commands; the JUnit
-from both runs is kept outside the repo.
+`LocalReportHandle.Render` catches a render failure, hands it to BC's telemetry,
+Mono throws inside `StackTrace.AddFrames`, and the original message is lost — so
+the client sees only "The system encountered an internal error while rendering
+the report". Fixing this is worth doing before the Excel work, because without
+it the Excel failures cannot be diagnosed either.
 
 ## Layout
 
