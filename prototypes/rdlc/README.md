@@ -232,6 +232,59 @@ in this tree.
 And when driving the web client: a report that renders opens in the **viewer**,
 it does not download. "No download" is not "no render" — take a screenshot.
 
+## Corpus result: the renderer changes nothing yet, and here is why
+
+Ran the nine Tests-ERM codeunits whose corpus failures are attributed to "RDLC
+report rendering is not implemented" (134008, 134325-134330, 134377, 134386),
+twice, on the same image, with only `BC_RDLC_RENDERER` differing.
+
+| | total | passed | failed | of which "RDLC not implemented" |
+|---|---|---|---|---|
+| renderer off | 737 | 669 | 68 | 19 |
+| renderer on | 737 | 669 | 68 | **0** |
+
+The renderer is genuinely engaged — the "not implemented" message is gone
+entirely. But the same 68 tests fail either way, and the same 19 now fail with
+`The system encountered an internal error while rendering the report`. **Net
+change: zero.**
+
+**Why: those tests render to Excel, not PDF.** All 18 of the 19 whose bodies
+resolve call `Report.SaveAsExcel`. ReportViewer's Excel rendering extension
+builds the .xlsx through `System.IO.Packaging`, and Mono's implementation fails:
+
+```
+System.Exception: Could not open unzip archive
+  at zipsharp.NativeUnzip.OpenArchive64
+  at System.IO.Packaging.ZipPackage.LoadParts
+```
+
+So this work — which is PDF only, deliberately — is not what those tests
+exercise, and the corpus cannot validate it. Getting them green needs Mono's
+`System.IO.Packaging` working, which is a separate piece of work from anything
+in this tree.
+
+**The error-propagation bug is now confirmed with a stack**, and it is worse
+than a diagnostics annoyance: it destroys the real error before the client sees
+it.
+
+```
+System.NullReferenceException
+  at System.Diagnostics.StackTrace.AddFrames
+  at System.Diagnostics.StackTrace.ToString
+  at NavDiagnostics.ComposeExceptionTelemetryMessages
+  at NavDiagnostics.SendExceptionTag
+  at Microsoft.BusinessCentral.Reporting.Server.LocalReportHandle.Render
+```
+
+`LocalReportHandle.Render` catches a render failure, asks BC's telemetry to log
+it, Mono throws inside `StackTrace.AddFrames`, and the original message is lost.
+That is why every failure above reads "an internal error". Fixing it is the
+first thing to do next: without it, the Excel work below cannot be diagnosed
+either.
+
+Reproduce: `prototypes/rdlc/README.md` history has the exact commands; the JUnit
+from both runs is kept outside the repo.
+
 ## Layout
 
 | path | what |
