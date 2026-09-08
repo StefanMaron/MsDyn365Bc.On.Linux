@@ -1,0 +1,69 @@
+--- StringType.vb
++++ StringType.vb
+@@ -26,7 +26,11 @@
+         Private Const GENERAL_FORMAT As String = "G"
+         Private Const OptionCompareTextFlags As CompareOptions =
+             CompareOptions.IgnoreCase Or CompareOptions.IgnoreWidth Or CompareOptions.IgnoreKanaType
+-        Private Shared ReadOnly m_InvariantCompareInfo As CompareInfo = CultureInfo.InvariantCulture.CompareInfo
++        Private Shared ReadOnly Property m_InvariantCompareInfo As NativeIcuCompareInfo
++            Get
++                Return NativeIcuCompareInfo.ForCulture(CultureInfo.InvariantCulture)
++            End Get
++        End Property
+ 
+         '============================================================================
+         ' Coercion to functions.
+@@ -206,7 +210,7 @@
+             End If
+ 
+             If TextCompare Then
+-                Return CultureInfo.CurrentCulture.CompareInfo.Compare(sLeft, sRight, OptionCompareTextFlags)
++                Return NativeIcuCompareInfo.ForCulture(CultureInfo.CurrentCulture).Compare(sLeft, sRight, OptionCompareTextFlags)
+             Else
+                 Return System.String.CompareOrdinal(sLeft, sRight)
+             End If
+@@ -422,7 +426,7 @@
+             Dim SeenNot As Boolean
+             Dim Skip As Integer
+             Dim Options As CompareOptions
+-            Dim ci As CompareInfo
++            Dim ci As NativeIcuCompareInfo
+             Const NullChar As Char = ChrW(0)
+             Dim LiteralIsRangeEnd As Boolean = False
+ 
+@@ -442,7 +446,7 @@
+                 s = Source.Chars(SourceIndex)
+             End If
+ 
+-            ci = CultureInfo.CurrentCulture.CompareInfo
++            ci = NativeIcuCompareInfo.ForCulture(CultureInfo.CurrentCulture)
+             Options = CompareOptions.IgnoreCase Or _
+                       CompareOptions.IgnoreWidth Or _
+                       CompareOptions.IgnoreNonSpace Or _
+@@ -626,7 +630,7 @@
+             End If
+         End Function
+ 
+-        Private Shared Function StrLikeCompare(ByVal ci As CompareInfo, ByVal SeenNot As Boolean, ByVal Match As Boolean, ByVal p As Char, ByVal s As Char, ByVal Options As CompareOptions) As Boolean
++        Private Shared Function StrLikeCompare(ByVal ci As NativeIcuCompareInfo, ByVal SeenNot As Boolean, ByVal Match As Boolean, ByVal p As Char, ByVal s As Char, ByVal Options As CompareOptions) As Boolean
+             If SeenNot AndAlso Match Then
+                 If Options = CompareOptions.Ordinal Then
+                     Return p <> s
+@@ -645,7 +649,7 @@
+         End Function
+ 
+         Private Shared Function AsteriskSkip(ByVal Pattern As String, ByVal Source As String, ByVal SourceEndIndex As Integer, _
+-            ByVal CompareOption As CompareMethod, ByVal ci As CompareInfo) As Integer
++            ByVal CompareOption As CompareMethod, ByVal ci As NativeIcuCompareInfo) As Integer
+ 
+             'Returns the number of source characters to skip over to handle an asterisk in the pattern. 
+             'When there's only a single asterisk in the pattern, it computes how many pattern equivalent chars  
+@@ -769,8 +773,6 @@
+                     Throw ex
+                 Catch ex As System.Threading.ThreadAbortException
+                     Throw ex
+-                Catch
+-                    Result = False
+                 End Try
+ 
+                 If Result Then

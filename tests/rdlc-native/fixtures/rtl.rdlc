@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2010/01/reportdefinition">
+  <ReportSections><ReportSection><Body><ReportItems>
+    <Textbox Name="Latin">
+      <CanGrow>true</CanGrow>
+      <Paragraphs><Paragraph><TextRuns><TextRun><Value>office affinity ffi fi — café naïve Straße</Value>
+        <Style><FontFamily>Liberation Sans</FontFamily><FontSize>16pt</FontSize></Style>
+      </TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+      <Top>0in</Top><Left>0in</Left><Height>0.5in</Height><Width>6in</Width><Style />
+    </Textbox>
+    <Textbox Name="Arabic">
+      <CanGrow>true</CanGrow>
+      <Paragraphs><Paragraph><TextRuns><TextRun><Value>مرحبا بالعالم</Value>
+        <Style><FontFamily>Noto Sans Arabic</FontFamily><FontSize>20pt</FontSize></Style>
+      </TextRun></TextRuns><Style><TextAlign>Right</TextAlign></Style></Paragraph></Paragraphs>
+      <Top>1in</Top><Left>0in</Left><Height>0.7in</Height><Width>6in</Width><Style><Direction>RTL</Direction></Style>
+    </Textbox>
+    <Textbox Name="Hebrew">
+      <CanGrow>true</CanGrow>
+      <Paragraphs><Paragraph><TextRuns><TextRun><Value>שלום עולם</Value>
+        <Style><FontFamily>Noto Sans Hebrew</FontFamily><FontSize>20pt</FontSize></Style>
+      </TextRun></TextRuns><Style><TextAlign>Right</TextAlign></Style></Paragraph></Paragraphs>
+      <Top>2in</Top><Left>0in</Left><Height>0.7in</Height><Width>6in</Width><Style><Direction>RTL</Direction></Style>
+    </Textbox>
+    <Textbox Name="Mixed">
+      <CanGrow>true</CanGrow>
+      <Paragraphs><Paragraph><TextRuns><TextRun><Value>فاتورة INV-123: المبلغ 123.45 EUR</Value>
+        <Style><FontFamily>Noto Sans Arabic</FontFamily><FontSize>16pt</FontSize></Style>
+      </TextRun></TextRuns><Style><TextAlign>Right</TextAlign></Style></Paragraph></Paragraphs>
+      <Top>3in</Top><Left>0in</Left><Height>0.7in</Height><Width>6in</Width><Style><Direction>RTL</Direction></Style>
+    </Textbox>
+    <Textbox Name="Wrap">
+      <CanGrow>true</CanGrow>
+      <Paragraphs><Paragraph><TextRuns><TextRun><Value>Wrap 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 END</Value>
+        <Style><FontFamily>Liberation Sans</FontFamily><FontSize>14pt</FontSize></Style>
+      </TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+      <Top>5in</Top><Left>0in</Left><Height>0.2in</Height><Width>2in</Width><Style />
+    </Textbox>
+  </ReportItems><Height>7.5in</Height><Style /></Body><Width>6in</Width>
+    <Page><PageHeight>11in</PageHeight><PageWidth>8.5in</PageWidth><LeftMargin>1in</LeftMargin><RightMargin>1in</RightMargin><TopMargin>1in</TopMargin><BottomMargin>1in</BottomMargin><Style /></Page>
+  </ReportSection></ReportSections>
+  <Language>en-US</Language>
+</Report>

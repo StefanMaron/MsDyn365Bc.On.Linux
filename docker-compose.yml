@@ -67,6 +67,12 @@ services:
     build:
       context: .
       dockerfile: src/Dockerfile
+      args:
+        # Opt-in Mono RDLC renderer (issue #73). 0 = today's image, unchanged.
+        # 1 adds Mono and the renderer (~350 MB) and is what BC_RDLC_RENDERER
+        # needs to do anything: BC_WITH_RDLC builds it, BC_RDLC_RENDERER turns
+        # it on. Rebuild the image after changing this.
+        BC_WITH_RDLC: ${BC_WITH_RDLC:-0}
     stdin_open: true
     depends_on:
       sql:
@@ -133,6 +139,22 @@ services:
       # fill. Set to 1 only if a TestPage scenario needs the dispatcher pump this image
       # doesn't implement and hangs with the default (Async=true, matching Windows).
       BC_TESTPAGE_ASYNC_PATCH: ${BC_TESTPAGE_ASYNC_PATCH:-}
+      # ---- Mono RDLC renderer (issue #73) -----------------------------------
+      # `mono` runs Microsoft's real reporting service under Mono with our
+      # Pango/HarfBuzz font and text bridge, so Report.SaveAs(Pdf) against an
+      # RDLC layout works. Needs an image built with BC_WITH_RDLC=1; without one
+      # the entrypoint says so and reporting behaves exactly as it does today.
+      BC_RDLC_RENDERER: ${BC_RDLC_RENDERER:-}
+      # Required acknowledgement. Mono is not a CAS sandbox, so an RDLC layout's
+      # embedded VB runs with the renderer process's privileges. Only set this
+      # where the layouts are trusted.
+      BC_RDLC_TRUST_LAYOUTS: ${BC_RDLC_TRUST_LAYOUTS:-}
+      # Loopback port for the reporting process. Only change it on a collision.
+      BC_RDLC_PORT: ${BC_RDLC_PORT:-5005}
+      # Diagnostic only — 1 runs the renderer under Mono's exception trace. Mono's
+      # StackTrace.AddFrames throws inside BC's exception telemetry and can turn a
+      # real render error into a bare gRPC "Unknown"; this recovers the original.
+      BC_RDLC_TRACE: ${BC_RDLC_TRACE:-0}
       # Diagnostic only — 1 logs every thrown exception (very noisy).
       BC_DEBUG_FIRSTCHANCE: ${BC_DEBUG_FIRSTCHANCE:-}
       # Diagnostic only — 1 logs every managed assembly the runtime fails to find

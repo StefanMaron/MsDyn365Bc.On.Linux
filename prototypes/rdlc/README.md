@@ -1,0 +1,509 @@
+# RDLC on Linux — the working prototype
+
+**Status: working, opt-in, on a branch.** `Report.SaveAs(Pdf)` against an RDLC
+layout returns a real PDF from inside the container when the image is built
+with `--build-arg BC_WITH_RDLC=1` and run with `BC_RDLC_RENDERER=mono` plus
+`BC_RDLC_TRUST_LAYOUTS=1`. Without those the image and its behaviour are
+exactly what they were: no Mono, no size change, `SaveAs(Pdf)` still returns
+`false`.
+
+Verified end to end on a cold boot of BC 28.4.53241.54387:
+
+```
+$ ./scripts/run-tests.sh --app extensions/rdlc-smoke-test/RdlcSmokeTest.app \
+      --codeunit-range 70101
+  [1/1] Codeunit 70101: SaveAsPdfReturnsDocument (1.7s)
+    PASS  SaveAsPdfReturnsDocument
+1 total, 1 passed, 0 failed
+```
+
+The PDF that call produces: 24,898 bytes, 4 US Letter pages, all 120 detail
+rows, the embedded VB expression evaluated, embedded subset Liberation Sans
+regular and bold. `extensions/rdlc-smoke-test` also exposes an API page that
+returns the PDF as base64, which is how it was inspected.
+
+This supersedes `docs/RDLC-ON-LINUX.md`, which opens by saying nothing in it is
+implemented and stops at a `TypeLoadException` it could not identify. What is
+still accurate there is the architecture (why RDLC is a separate process) and
+the CAS analysis.
+
+## What actually renders
+
+Microsoft's own `Microsoft.ReportViewer.Common.dll` — unmodified engine logic,
+no reimplementation, no fork of ReportViewerCore or RdlCore — running under
+Mono on Linux, with the Windows-only text and font stack replaced by an
+independently written Pango/HarfBuzz/FreeType/Fontconfig bridge.
+
+Rendered end to end, zero renderer warnings:
+
+| fixture | result |
+|---|---|
+| one textbox | 7,262-byte PDF, embedded subset CID TrueType |
+| 120-row invoice | 4 US Letter pages, all 120 rows, totals 7,260 / 9,075.00, embedded VB expression, PNG logo, embedded regular + bold |
+| filtered chart | 6 bars from 120 input rows, 1800×1200 at the original 300 DPI, 65,015 bytes |
+| Arabic / Hebrew RTL | renders with correct visual digit order — `123.45` stays `123.45`, `INV-123` stays `INV-123` |
+
+And through **Microsoft's real `Microsoft.BusinessCentral.Reporting.Service.exe`
+over its real gRPC `ConfigureService` + `Render` endpoints**, with datasets
+serialized by BC's own `NavDataSet.Serialize`: 3 rows → 9,099 bytes;
+10,000 rows compact+deduped+compressed (34,992 wire bytes) → 9,224 bytes;
+120-row invoice → 25,281 bytes.
+
+The original pagination, PDF writer, font embedding, dataset serializers,
+AppDomain handling and protobuf layer are all Microsoft's, retained.
+
+## What is not done
+
+- **Non-root.** Every render above ran as UID 0. ReportViewer's
+  `RevertImpersonationContext.Impersonate(IntPtr.Zero)` fails as a normal user;
+  there is no Windows impersonation to revert on Linux, but it has not been
+  patched.
+- **Unicode font fallback.** No font installed in the toolchain image covers
+  both Arabic and Latin, so a genuinely mixed Arabic/Latin run needs real
+  per-run fallback that keeps the `CachedFont` and PDF font identity in step.
+  The provider currently fails closed on a missing glyph, which is the right
+  behaviour and is not a fallback.
+- **Searchable RTL text.** See the `MapGlyphToUnicodeChar` note below.
+- **Printing.** Out of scope, deliberately. Only PDF was asked for and only
+  PDF was tried.
+- **Windows-equivalence.** Nothing here has been diffed against a Windows
+  container. "Renders correctly" above means the output was inspected and the
+  values are right, not that it matches Windows byte for byte or line-breaks
+  identically.
+- **Render errors reach the client as "an internal error while rendering the
+  report"** instead of the real message, which Windows does surface. See the
+  section above — this is the highest-value remaining fix.
+- **Still untested:** subreports, non-Latin text, concurrent renders, and
+  anything out of a real customer app.
+- **Any BC version but 28.4.** `src/tools/PatchRdlc/Program.cs` refuses a
+  ReportViewer whose MVID it does not know, which disables the renderer. A new
+  BC version needs those MVIDs re-pointed and the font tokens re-checked.
+
+## Real BC document layouts render
+
+Measured 2026-09-08 against BC 28.4 in this container. **Nothing below has been
+compared against a Windows container** — where a Windows result is needed to
+settle something, that is said explicitly.
+
+| report / layout | this container |
+|---|---|
+| 101 Customer - List | renders |
+| 1305 Standard Sales Order Confirmation (detailed, all fields) | renders |
+| 1305 Standard Sales Order Confirmation (simple) | renders, logo included |
+| 1305 Sales Order Confirmation for Subscription Billing | **fails** |
+
+Report 1305 on the detailed layout produces a complete order confirmation: both
+address blocks, the External Document No. / Bill-to / VAT registration grid,
+order number, document and due dates, payment terms, salesperson, bank details
+(Giro, IBAN, SWIFT), the line table, Subtotal / VAT Amount / bold-underlined
+`Total GBP Incl. VAT 13,600.50`, and a VAT Amount Specification table. The
+simple layout additionally renders the Cronus **logo image**. So images,
+multi-section layouts, footers and mixed font weights work on real Microsoft
+document layouts.
+
+### The one failing layout, and what is actually known about it
+
+It fails at report *compile*, before any data:
+
+```
+ReportPublishingException: The Value expression for the text box
+'GlobalLocationNumber_Lbl' refers to the field 'GlobalLocationNumber_Lbl'.
+Report item expressions can only refer to fields within the current dataset
+scope ...
+  -> DefinitionInvalidException -> LocalProcessingException
+```
+
+**This layout is the DEFAULT for report 1305**, so Print or Preview on any sales
+order hits it first and reports "The system encountered an internal error while
+rendering the report." Pick "Standard Sales Order Confirmation" in the Report
+Layout picker and it renders.
+
+What the shipped artifact contains, measured by unpacking
+`Microsoft_Subscription Billing_28.4.53241.54387.app`:
+
+| layout | fields declared | referenced but not declared |
+|---|---|---|
+| `SalesOrderConfForSubscriptionBilling.rdlc` (report 1305) | 250 | **`GlobalLocationNumber`, `GlobalLocationNumber_Lbl`** |
+| `SalesInvoiceForSubscriptionBilling.rdlc` (report 1306) | 317 | none |
+
+And `GlobalLocationNumber` exists nowhere in report 1305's dataset: it appears
+in Base Application only in the *posted* document reports and their tables
+(SalesInvoiceHeader, SalesShipmentHeader, ReturnReceiptHeader,
+StandardSalesInvoice/Shipment/ReturnRcpt), and **no report extension in the
+whole artifact adds it to 1305**. Subscription Billing is installed for tenant
+here, so this is not an uninstalled-extension effect.
+
+So Microsoft's shipped order-confirmation layout references two fields it does
+not declare and its report does not produce — while its own sibling invoice
+layout declares them correctly. It reads like a copy-paste from the invoice
+layout.
+
+**What is NOT known: whether this layout renders on a Windows container of the
+same country and version.** The reconciliation BC performs is described in the
+next section and runs in the NST, so it is the same code on both platforms —
+which points away from a Linux fault and towards the report metadata differing.
+An earlier version of this file asserted the layout fails on Windows; nobody had
+tested that, and it has been removed.
+
+### How BC actually binds a layout to a dataset
+
+Worth knowing before blaming the renderer for anything field-related.
+`Microsoft.Dynamics.Nav.Runtime.XmlMetadata.ReportRdlcHelper.PatchRdlcWithNewDataSetAsync`
+runs in the NST before the layout is sent:
+
+```csharp
+report = NavGlobal.MetadataProvider.GetReportMetadata(reportId);  // base + report extensions
+xml    = CreateXmlDataSetAsync(report);      // <Field Name=X><DataField>X</DataField> per column
+doc    = ReportXmlHelper.ApplyReportDataSet(reportLayout, xml);   // REPLACES the layout's <DataSets>
+         ReportXmlHelper.ApplyReportParameters(doc, report.Labels.Select(l => l.Name));
+```
+
+Two consequences:
+
+- **A layout's own `<Fields>` block is discarded.** Whether the shipped RDLC
+  declares a field is irrelevant; what matters is whether the *merged report
+  metadata* (base report plus every installed report extension) has a column of
+  that name. This is exactly the report-extension model — an extension adds
+  columns and ships a layout using base plus extension fields — and it is why
+  that model works.
+- **Labels become report Parameters**, not dataset fields.
+
+So `Fields!X.Value` where X is in no report column fails at compile with
+`ReportPublishingException`, on any platform. That is the failure seen on the
+Subscription Billing order-confirmation layout here: in the **W1** artifact,
+neither report 1305 nor its only report extension (Subscription Billing's own
+8010 `Contract Sales Order Conf.`, which adds eleven `ServiceCommitment*`
+columns) defines `GlobalLocationNumber`. `GlobalLocationNumber` exists in Base
+Application only on the *posted* document reports and tables.
+
+**Confirmed on Windows: the same layout fails there identically.** Tested
+2026-09-08 on a Windows US 28.4 sandbox (platform 28.0.53938.0, application
+28.4.53241.54183) — same report, same layout, same `ReportPublishingException`
+naming `GlobalLocationNumber_Lbl`. So this is a defect in the layout Microsoft
+ships, not a platform difference, and there is nothing here to fix.
+
+That matches the artifact: US Base Application's `StandardSalesOrderConf.Report.al`
+has **zero** occurrences of `GlobalLocationNumber`; all 127 non-language US apps
+contain exactly one report extension on `Standard Sales - Order Conf.`
+(Subscription Billing's own, adding only eleven `ServiceCommitment*` columns);
+and the US copy of `SalesOrderConfForSubscriptionBilling.rdlc` carries the same
+250-declared / 2-undeclared defect as W1. `PatchRdlcWithNewDataSetAsync` builds
+`<Fields>` from that metadata, so the reference cannot resolve anywhere.
+
+### The real gap this exposed: we lose the error message
+
+Windows reported the actual cause to the user:
+
+> Rendering output for the report failed and the following error occurred: Der
+> Value-Ausdruck für das Textfeld-Objekt "GlobalLocationNumber_Lbl" verweist auf
+> das Feld "GlobalLocationNumber_Lbl" ...
+
+This container reported only:
+
+> The system encountered an internal error while rendering the report.
+
+Same failure, but the root message never reaches the client. That is a genuine
+defect on this side and it is what made the investigation above take as long as
+it did — every diagnosis had to come from `/run/bc-rdlc/service.log` with Mono's
+exception trace on, instead of from the error BC already had.
+
+`prototypes/rdlc/service/README.md` records the likely cause: Mono's
+`StackTrace.AddFrames` throws a `NullReferenceException` inside BC's exception
+telemetry while it is packing the `ServerException`, so the real message is lost
+and the gRPC status degrades to `Unknown`. Fixing that — so
+`ReportingServiceGrpcServer`'s exception path survives on Mono — would give
+Linux the same diagnostics Windows has, and is the highest-value remaining task
+in this tree.
+
+### Two ways to misread this log, both of which cost a wrong diagnosis
+
+- **`BC_RDLC_TRACE=1` uses Mono's `--trace=E:all`, which logs CAUGHT exceptions
+  too.** `ReportProcessingException_FieldError: There is no data for the field
+  at position 102` is handled and non-fatal — the detailed layout renders in
+  full while emitting it. Likewise `System.IO.FileNotFoundException: Invalid
+  Image` is `Assembly.LoadFrom` probing for satellite **resource** assemblies,
+  not report images. A real fatal render ends in `LocalProcessingException` or
+  `DefinitionInvalidException`.
+- **The log is opened append-only and survives a service restart.** Truncate it
+  (`: > /run/bc-rdlc/service.log`, not `rm` — deleting it detaches the open fd
+  and the process keeps writing to nothing) before each attempt, or you will
+  read the previous layout's errors and attribute them to this one.
+
+And when driving the web client: a report that renders opens in the **viewer**,
+it does not download. "No download" is not "no render" — take a screenshot.
+
+## Corpus result: 31 Microsoft RDLC tests fixed, 0 regressed
+
+Measured on BC 28.4 W1, same image both times, only `BC_RDLC_RENDERER`
+differing. The test app is Microsoft's **Tests-Report** (`Microsoft_Tests-Report.app`
+from the artifact), codeunits **134607 "Test Report SaveAs"** and
+**132600 "Report Layout"**.
+
+| | total | passed | failed |
+|---|---|---|---|
+| renderer off | 60 | 20 | 40 |
+| renderer on | 60 | **51** | **9** |
+
+**31 fixed, 0 regressed.** Among them:
+
+- `134607 TestRdlcSaveAsPDF` — runs an RDLC report through the Job Queue
+  dispatcher and verifies the Report Outbox actually contains output. This is
+  the "does a PDF stream come back" case.
+- `134607 TestRdlcSaveAsPDFClassic` — `REPORT.SaveAsPdf(...)` to a file.
+- 29 real Microsoft reports in `132600 Report Layout`: Account Schedule, Trial
+  Balance by Period, Consolidated Trial Balance, Customer/Vendor Balance to
+  Date, Customer Statement, Summary Aging, Check, Price List, VAT VIES
+  Declaration, Inventory Availability Plan, Item Age Composition, Post Inventory
+  Cost to G/L, Sales/Purchase Reservation Availability, and more.
+
+The 9 that still fail are not rendering faults except two:
+
+- **7 are missing demo data** — "The Cost Center table is empty", "The G/L
+  Budget Name table is empty", "The Analysis Line Template table is empty",
+  "There is no Item Analysis View within the filter", "The Accounting Period
+  does not exist", a Production BOM validation error. These fail identically
+  with the renderer off.
+- **2 are Word and Excel output** — `TestRdlcSaveAsWord` and
+  `TestRdlcSaveAsExcel`. See below.
+
+### The AL Runner corpus test stays green both ways
+
+`BusinessCentral.AL.Runner` codeunit **60774**
+`Report_SaveAs_Pdf_ReturnValueAgreesWithTheBytesInTheStream` is the corpus test
+that issue #70 is about. It does not assert that `SaveAs(Pdf)` returns false; it
+asserts the return value agrees with the stream:
+
+- returned true -> the blob is non-empty and starts with `%PDF-`
+- returned false -> the blob is empty
+
+Measured on BC 28.4 W1, same image, only `BC_RDLC_RENDERER` differing:
+
+| | result | branch taken |
+|---|---|---|
+| renderer off | **PASS** | false: SaveAs false, empty blob |
+| renderer on | **PASS** | true: SaveAs true, `%PDF-` bytes |
+
+So the test needs no platform or configuration guard — it already expresses both
+behaviours and is satisfied by each. Note that the test named in #70 itself
+(codeunit 60878, `SaveAsPdf_RdlcLayout_ReturnsFalseWithLastErrorTextOnLinux`)
+was deleted from the corpus by its PR #250 and superseded by 60774; the flat
+"must return false" assertion no longer exists.
+
+### Intermittent NST segfault, unexplained
+
+One renderer-on boot out of roughly six in one session died with SIGSEGV
+(container exit 139) while the entrypoint was publishing the test framework
+apps, right after `System Application Test Library` loaded its text data. The
+publishes that followed returned HTTP 000 because the NST was already gone.
+
+An immediate retry of the identical configuration booted clean, and the other
+boots were clean, so it is not deterministic. It has not been attributed to the
+renderer and it has not been shown unrelated either — no core dump was analysed.
+Worth reproducing under `BC_RDLC_RENDERER` on and off before anyone relies on
+this in CI.
+
+### Excel and Word output do not work, and that is a separate problem
+
+`Report.SaveAsExcel` and `SaveAsWord` fail under Mono inside
+`System.IO.Packaging`, which ReportViewer uses to build the OPC package:
+
+```
+System.Exception: Could not open unzip archive
+  at zipsharp.NativeUnzip.OpenArchive64
+  at System.IO.Packaging.ZipPackage.LoadParts
+```
+
+This matters for reading the corpus. The nine Tests-ERM codeunits whose failures
+are labelled "RDLC report rendering is not implemented" (134008, 134325-134330,
+134377, 134386) are **all `SaveAsExcel`** — 18 of the 19 whose bodies resolve.
+Running them proves nothing about this work: 737 tests, 669 passed, 68 failed,
+with the renderer both off and on. The "not implemented" message disappears
+because the renderer is engaged, and then they fail in the Excel writer instead.
+
+Do not use those ERM codeunits to judge PDF rendering. Use Tests-Report 134607
+and 132600.
+
+### The error-propagation bug, confirmed with a stack
+
+```
+System.NullReferenceException
+  at System.Diagnostics.StackTrace.AddFrames
+  at System.Diagnostics.StackTrace.ToString
+  at NavDiagnostics.ComposeExceptionTelemetryMessages
+  at NavDiagnostics.SendExceptionTag
+  at Microsoft.BusinessCentral.Reporting.Server.LocalReportHandle.Render
+```
+
+`LocalReportHandle.Render` catches a render failure, hands it to BC's telemetry,
+Mono throws inside `StackTrace.AddFrames`, and the original message is lost — so
+the client sees only "The system encountered an internal error while rendering
+the report". Fixing this is worth doing before the Excel work, because without
+it the Excel failures cannot be diagnosed either.
+
+## Layout
+
+| path | what |
+|---|---|
+| `src/RdlcNative/Bridge.cs` | managed text bridge — Uniscribe (`ScriptItemize`, `ScriptShape`, `ScriptPlace`, `ScriptLayout`, …) reimplemented over Pango/HarfBuzz |
+| `src/RdlcNative/DrawingBridge.cs` | `System.Drawing` measurement calls, and the libgdiplus DPI correction |
+| `src/RdlcNative/native/text.c` | the native half: Pango itemization with full bidi levels, HarfBuzz shaping, Unicode L2 reordering |
+| `src/RdlcNative/font/` | the font provider — Fontconfig matching, FreeType metrics, HarfBuzz subsetting, PDF font embedding. `INTEGRATION.md` is the contract between it and the text bridge, and is the most detailed document in this tree |
+| `src/tools/PatchRdlc/` | the Cecil patcher that rewrites `Microsoft.ReportViewer.Common.dll` and `Microsoft.ReportViewer.DataVisualization.dll` |
+| `src/StartupHook/NativeRdlcService.cs` | supervisor for the Mono renderer process, gated on `BC_RDLC_RENDERER=mono`. Written, never called |
+| `extensions/rdlc-smoke-test/` | AL app that calls `Report.SaveAs(Pdf)` — the end-to-end test that has not been run yet |
+| `tests/rdlc-native/` | bridge unit tests and the render driver |
+| `prototypes/rdlc/bridge/` | toolchain `Dockerfile`, `rebuild.sh` (patch both ReportViewer assemblies), `render.sh`, fixtures |
+| `prototypes/rdlc/service/` | making Microsoft's real reporting service run and serve gRPC on Linux — plus `NST-WIRING.md` |
+| `prototypes/rdlc/vb-runtime/` | a working `Microsoft.VisualBasic.dll` for RDLC expressions |
+| `prototypes/rdlc/rdlcore-evaluation/` | the alternative that was evaluated and rejected |
+
+## Things that will cost you a day if you rediscover them
+
+- **Cecil P/Invoke conversion has an ordering trap.** Clear `PInvokeInfo`
+  *first*, then set `IsPInvokeImpl = false`. Doing it the other way round, the
+  `PInvokeInfo` setter turns the flag back on and the method still binds to the
+  missing native entry point.
+- **ReportViewer's script caches are per font, and the engine legitimately
+  reuses earlier glyph arrays.** Caching only the last positions per font looks
+  fine on small fixtures and produces wrong output on the invoice. It was
+  caught by the 120-row fixture, not by the unit tests.
+- **libgdiplus measures point-size fonts identically at 96 and 300 DPI.** This
+  is a real libgdiplus bug, and it is why charts came out at the wrong font
+  size. `DrawingBridge` plus the patched `DataVisualization.dll` correct it;
+  don't "fix" it by downsampling a raster.
+- **RTL text extracts as garbage, and that is Microsoft's code, not the
+  bridge.** `PDFWriter.MapGlyphToUnicodeChar` (token `06006958`) only assigns a
+  Unicode character when `fLayoutRTL` and `fRTL` are both zero and the
+  text/glyph/cluster counts match 1:1. So the `ToUnicode` CMap for an RTL run
+  is empty by design. The glyphs on the page are correct; Poppler has nothing
+  to extract from. Don't go looking for a subsetting bug.
+- **The invoice fixture had a split-row duplication that was not a pagination
+  bug.** Mixed `CanGrow` settings on the detail cells cause it, identically on
+  the other renderer that was evaluated. `fixtures/invoice.rdlc` sets
+  `CanGrow=true` on all three detail cells.
+- **`docs/RDLC-ON-LINUX.md` says a full Cecil `Write` of
+  `Microsoft.ReportViewer.Common.dll` is not possible without a .NET Framework
+  GAC.** That was true at the time and is no longer the constraint: a full
+  rewrite works once real Mono 4.5 framework assemblies are on the resolver's
+  search path, which is what `rebuild.sh` sets up. The byte-patch approach
+  described there still works and is still simpler for the two CAS getters.
+- **A missing native dependency makes the renderer abort with no PDF**, rather
+  than emit a PDF with wrong filter results. That is deliberate, and it is
+  worth keeping.
+
+## How to run it
+
+```bash
+BC_WITH_RDLC=1 docker compose build bc
+BC_RDLC_RENDERER=mono BC_RDLC_TRUST_LAYOUTS=1 docker compose up -d --wait
+```
+
+`BC_WITH_RDLC` builds the renderer into the image; `BC_RDLC_RENDERER` turns it
+on. Both are needed. If the image was built without it, or the ReportViewer in
+that BC build is not one the patcher recognises, the entrypoint says so and
+reporting behaves exactly as it does today — an opt-in feature must not be able
+to fail a boot.
+
+### With the web client, to click through it yourself
+
+The web client PoC (`docs/WEBCLIENT-POC.md`) and the renderer work together:
+
+```bash
+BC_WITH_RDLC=1 docker compose build bc
+BC_WEBCLIENT=1 BC_RDLC_RENDERER=mono BC_RDLC_TRUST_LAYOUTS=1 \
+    docker compose up -d --wait
+# publish extensions/rdlc-smoke-test, then browse to
+#   http://localhost:8080/?report=70100      (BCRUNNER / Admin123!)
+```
+
+Running report 70100 downloads a four-page PDF whose Producer is
+`Microsoft Reporting Services PDF Rendering Extension 15.0.0.0` — ReportViewer's
+own output. Verified in headless Chromium on BC 28.4: sign in, role center with
+live CRONUS data, report runs, 120 rows across 4 pages.
+
+Note the two PDF producers you will see. Through the web client the file is
+ReportViewer's raw output; through `Report.SaveAs(Pdf)` from AL, BC
+post-processes it with Aspose.PDF, so the Producer differs and the byte count
+is slightly different. Both are the same rendered document.
+
+Testing it on a NON-default instance has a trap. `scripts/run-tests.sh` derives
+`WS_HOST` and `ODATA_HOST` from `--base-url`'s host but hardcodes `:7085` and
+`:7052`, so on a port-shifted instance `--base-url`/`--dev-url` alone still send
+the websocket and OData steps to whatever is on the default ports — which, on a
+machine already running a bc-linux stack, is somebody else's container. Address
+the container on the docker network instead:
+
+```bash
+IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <project>-bc-1)
+./scripts/run-tests.sh --base-url "http://$IP:7048/BC" --dev-url "http://$IP:7049/BC/dev" \
+    --app extensions/rdlc-smoke-test/RdlcSmokeTest.app --codeunit-range 70101
+```
+
+When a render fails, read `/run/bc-rdlc/service.log` inside the container. BC
+maps every render failure to "an internal error while rendering the report",
+so that log is the only place the real cause appears. `BC_RDLC_TRACE=1` adds
+Mono's exception trace to it.
+
+## Licensing, and one thing to decide
+
+Everything under `src/RdlcNative/` and `prototypes/` is written from scratch
+for this project. No ReportViewerCore or RdlCore source was copied — that fork
+was evaluated (`rdlcore-evaluation/`) and rejected for want of established
+redistribution rights, and separately because it silently reordered `123.45`
+into `54.321` in mixed Arabic/Latin text.
+
+The VB runtime is built from MIT sources: mono/mono-basic at
+`bdb5276f7d85100e8e9ddd7e5ba2360a792644a9`, plus Microsoft's own MIT
+referencesource `StringType`, plus the .NET 8.0.30 native ICU implementation
+for collation. Licenses and pinned hashes are in
+`prototypes/rdlc/vb-runtime/`.
+
+**Open question for a human:** the resulting assembly carries the identity
+`Microsoft.VisualBasic, Version=10.0.0.0, PublicKeyToken=b03f5f7f11d50a3a` and
+is delay-signed, not Microsoft-signed. The sources are MIT; the assembly
+identity is a separate question and has not been answered.
+
+## The scripts here do not run from a fresh checkout
+
+They are the real scripts, not sketches, but half of what they consume is
+Microsoft's and is not in this repo by design — the same rule that keeps BC's
+service tier out of the image.
+
+- `bridge/rebuild.sh` needs a pristine `Microsoft.ReportViewer.Common.dll` and
+  `Microsoft.ReportViewer.DataVisualization.dll` (argument 1 and its sibling), a
+  `run/` directory holding the rest of the ReportViewer assemblies plus
+  `Microsoft.SqlServer.Types.dll` and `Microsoft.VisualBasic.dll`, and a
+  `framework/` directory of real Mono 4.5 assemblies — that last one is what
+  makes the full Cecil `Write` resolve.
+- `bridge/render.sh` needs the `run/` that `rebuild.sh` produces.
+- `service/stage.sh` needs all of the above plus the side-service assemblies
+  from a BC artifact and the Linux `libgrpc_csharp_ext.x64.so` from
+  `Grpc.Core` 2.46.6.
+- `vb-runtime/prepare-dependencies.sh` and `prepare-icu.sh` are the exception:
+  they bootstrap themselves, cloning mono-basic at a pinned revision and
+  downloading pinned NuGet packages with `sha256sum --check`. Those two run
+  from a fresh checkout.
+
+The archive below has all of it already assembled, in the layout the scripts
+expect. Restoring `files/original-native-bridge/` and
+`files/rdlc-service-integration/` from it, then copying this branch's sources
+over the top, is the shortest path back to a working render.
+
+## The full evidence, including the binaries
+
+Only source, scripts and documentation are committed here. The rendered PDFs,
+page rasters, patched assemblies, build logs, the mono-basic checkout and the
+complete session transcript are ~1.5 GB and live outside the repo, on the
+machine this was built on:
+
+```
+~/Documents/rdlc-prototype-archive/session-21b74105/     # files/, events.jsonl
+~/Documents/rdlc-prototype-archive/bc-rdlc-native-probe-21b74105.tar.gz
+```
+
+That tarball is the toolchain image (Ubuntu noble, Mono 6.8, gcc,
+pango/fontconfig/freetype/harfbuzz with subsetting, libgdiplus, Liberation and
+Noto fonts); `prototypes/rdlc/bridge/Dockerfile` rebuilds it.
+
+Tracking issue: [#73](https://github.com/StefanMaron/MsDyn365Bc.On.Linux/issues/73),
+originally raised as [#70](https://github.com/StefanMaron/MsDyn365Bc.On.Linux/issues/70).

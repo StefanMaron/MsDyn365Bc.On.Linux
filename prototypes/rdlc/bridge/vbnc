@@ -1,0 +1,18 @@
+#!/bin/sh
+# Mono's legacy VB CodeDOM provider shells out to `vbnc` to compile the report
+# expression assembly. Mono's own vbnc cannot compile what ReportViewer emits,
+# so this redirects to Roslyn's net472 vbc.exe against our VB runtime.
+#
+# /nowarn:40000 is load-bearing: Roslyn emits an assembly-level CAS-obsolete
+# warning that Mono's CodeDOM misreads as an error, which surfaces as a report
+# that fails to compile for no stated reason.
+#
+# Resolves relative to itself so it works wherever the renderer is staged.
+set -e
+DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+RDLC=$(dirname "$DIR")
+exec mono "$DIR/tasks/net472/vbc.exe" /noconfig /nowarn:40000 \
+    /sdkpath:/usr/lib/mono/4.5-api \
+    /vbruntime:"$RDLC/Microsoft.VisualBasic.dll" \
+    '/define:_MYTYPE="Empty"' \
+    /reference:/usr/lib/mono/4.5/Facades/netstandard.dll "$@"
