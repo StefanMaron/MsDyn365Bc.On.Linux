@@ -70,9 +70,9 @@ AppDomain handling and protobuf layer are all Microsoft's, retained.
   container. "Renders correctly" above means the output was inspected and the
   values are right, not that it matches Windows byte for byte or line-breaks
   identically.
-- **The Subscription Billing layout for report 1305** — fails here, and it is
-  report 1305's default layout. Whether it renders on Windows is untested and
-  decides whether this is ours. See the section above.
+- **Render errors reach the client as "an internal error while rendering the
+  report"** instead of the real message, which Windows does surface. See the
+  section above — this is the highest-value remaining fix.
 - **Still untested:** subreports, non-Latin text, concurrent renders, and
   anything out of a real customer app.
 - **Any BC version but 28.4.** `src/tools/PatchRdlc/Program.cs` refuses a
@@ -176,26 +176,44 @@ neither report 1305 nor its only report extension (Subscription Billing's own
 columns) defines `GlobalLocationNumber`. `GlobalLocationNumber` exists in Base
 Application only on the *posted* document reports and tables.
 
-**Checked against the US artifact too, and it is not a country difference.**
-Inspected `sandbox/28.4.53241.54183/us` directly (HTTP range reads over the
-artifact zip — no full download needed; see the method in this repo's history):
+**Confirmed on Windows: the same layout fails there identically.** Tested
+2026-09-08 on a Windows US 28.4 sandbox (platform 28.0.53938.0, application
+28.4.53241.54183) — same report, same layout, same `ReportPublishingException`
+naming `GlobalLocationNumber_Lbl`. So this is a defect in the layout Microsoft
+ships, not a platform difference, and there is nothing here to fix.
 
-- US Base Application's `StandardSalesOrderConf.Report.al`: **zero** occurrences
-  of `GlobalLocationNumber`.
-- Scanned **all 127 non-language US apps** for a report extension on
-  `Standard Sales - Order Conf.`: exactly one exists, Subscription Billing's own
-  `ContractSalesOrderConf.ReportExt.al`, and it adds only the eleven
-  `ServiceCommitment*` columns.
-- The US copy of `SalesOrderConfForSubscriptionBilling.rdlc` has the identical
-  defect: 250 fields declared, `GlobalLocationNumber` and
-  `GlobalLocationNumber_Lbl` referenced but never declared.
+That matches the artifact: US Base Application's `StandardSalesOrderConf.Report.al`
+has **zero** occurrences of `GlobalLocationNumber`; all 127 non-language US apps
+contain exactly one report extension on `Standard Sales - Order Conf.`
+(Subscription Billing's own, adding only eleven `ServiceCommitment*` columns);
+and the US copy of `SalesOrderConfForSubscriptionBilling.rdlc` carries the same
+250-declared / 2-undeclared defect as W1. `PatchRdlcWithNewDataSetAsync` builds
+`<Fields>` from that metadata, so the reference cannot resolve anywhere.
 
-Since `PatchRdlcWithNewDataSetAsync` builds `<Fields>` from that merged metadata,
-and the metadata has no such column on either W1 or US, **the prediction is that
-this layout fails identically on a Windows US 28.4 sandbox**. That is a
-prediction from the shipped artifact, not a Windows test — nobody has run it.
-If it does render on Windows, then something in this integration diverges after
-all and this section is wrong again; previewing that one layout settles it.
+### The real gap this exposed: we lose the error message
+
+Windows reported the actual cause to the user:
+
+> Rendering output for the report failed and the following error occurred: Der
+> Value-Ausdruck für das Textfeld-Objekt "GlobalLocationNumber_Lbl" verweist auf
+> das Feld "GlobalLocationNumber_Lbl" ...
+
+This container reported only:
+
+> The system encountered an internal error while rendering the report.
+
+Same failure, but the root message never reaches the client. That is a genuine
+defect on this side and it is what made the investigation above take as long as
+it did — every diagnosis had to come from `/run/bc-rdlc/service.log` with Mono's
+exception trace on, instead of from the error BC already had.
+
+`prototypes/rdlc/service/README.md` records the likely cause: Mono's
+`StackTrace.AddFrames` throws a `NullReferenceException` inside BC's exception
+telemetry while it is packing the `ServerException`, so the real message is lost
+and the gRPC status degrades to `Unknown`. Fixing that — so
+`ReportingServiceGrpcServer`'s exception path survives on Mono — would give
+Linux the same diagnostics Windows has, and is the highest-value remaining task
+in this tree.
 
 ### Two ways to misread this log, both of which cost a wrong diagnosis
 
