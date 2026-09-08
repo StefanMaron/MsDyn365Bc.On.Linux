@@ -8,9 +8,25 @@ using System.Linq;
 /// Patches TestPageClient.dll: changes CommunicationBroker.DefaultChannelOptions.Async
 /// from true to false in TestPageClientSession.Create().
 ///
-/// With Async=true, the test page client needs a dispatcher message pump to process
-/// server callbacks. On Linux the TestDispatcher doesn't implement a pump, causing
-/// deadlocks. With Async=false, calls are synchronous and no pump is needed.
+/// OPT-IN ONLY as of issue #78 (scripts/entrypoint.sh gates this behind
+/// BC_TESTPAGE_ASYNC_PATCH=1; the default no longer applies it). Async=true is what lets
+/// BC coalesce rapid-fire PropertyChanged/CurrentRowChanged notifications during a
+/// page/part fill — CommunicationChannel.EnsureQueueLength evicts messages past
+/// ChannelOptions.QueueLength, and BindingManagerConsumerPort.FillStarting pulls only one
+/// survivor per channel per fill. Forcing Async=false sends every notification inline
+/// instead, with nothing to evict — measured as an empty linked part's draft row raising
+/// OnNewRecord twice as often here as on a real BC sandbox tier (6 vs 3, confirmed
+/// against an online sandbox; same shape, one draft row re-notified, not extra rows).
+///
+/// The deadlock this patch was originally written to avoid (commit 29d2bdf) was never
+/// isolated from that commit's OTHER fix in the same change (ToUnicodeEx returning 0
+/// instead of 1, which independently caused an infinite loop in
+/// KeyboardMapper.ClearKeyboardBuffer during page form building) — and at the time
+/// TestPage couldn't run end-to-end anyway (NavSession.CreateNavTestService() still threw
+/// NotSupportedException). Re-tested with Async left at true against a RunObject action
+/// to a StandardDialog target answered by [ModalPageHandler] — the shape most likely to
+/// need a real pump: 7/7 pass, no hang. Kept as an escape hatch, not removed, in case some
+/// TestPage scenario not yet exercised does need it.
 /// </summary>
 static class PatchTestPageClient
 {
