@@ -266,6 +266,42 @@ The 9 that still fail are not rendering faults except two:
 - **2 are Word and Excel output** — `TestRdlcSaveAsWord` and
   `TestRdlcSaveAsExcel`. See below.
 
+### The AL Runner corpus test stays green both ways
+
+`BusinessCentral.AL.Runner` codeunit **60774**
+`Report_SaveAs_Pdf_ReturnValueAgreesWithTheBytesInTheStream` is the corpus test
+that issue #70 is about. It does not assert that `SaveAs(Pdf)` returns false; it
+asserts the return value agrees with the stream:
+
+- returned true -> the blob is non-empty and starts with `%PDF-`
+- returned false -> the blob is empty
+
+Measured on BC 28.4 W1, same image, only `BC_RDLC_RENDERER` differing:
+
+| | result | branch taken |
+|---|---|---|
+| renderer off | **PASS** | false: SaveAs false, empty blob |
+| renderer on | **PASS** | true: SaveAs true, `%PDF-` bytes |
+
+So the test needs no platform or configuration guard — it already expresses both
+behaviours and is satisfied by each. Note that the test named in #70 itself
+(codeunit 60878, `SaveAsPdf_RdlcLayout_ReturnsFalseWithLastErrorTextOnLinux`)
+was deleted from the corpus by its PR #250 and superseded by 60774; the flat
+"must return false" assertion no longer exists.
+
+### Intermittent NST segfault, unexplained
+
+One renderer-on boot out of roughly six in one session died with SIGSEGV
+(container exit 139) while the entrypoint was publishing the test framework
+apps, right after `System Application Test Library` loaded its text data. The
+publishes that followed returned HTTP 000 because the NST was already gone.
+
+An immediate retry of the identical configuration booted clean, and the other
+boots were clean, so it is not deterministic. It has not been attributed to the
+renderer and it has not been shown unrelated either — no core dump was analysed.
+Worth reproducing under `BC_RDLC_RENDERER` on and off before anyone relies on
+this in CI.
+
 ### Excel and Word output do not work, and that is a separate problem
 
 `Report.SaveAsExcel` and `SaveAsWord` fail under Mono inside
