@@ -70,60 +70,64 @@ AppDomain handling and protobuf layer are all Microsoft's, retained.
   container. "Renders correctly" above means the output was inspected and the
   values are right, not that it matches Windows byte for byte or line-breaks
   identically.
-- **Wide document layouts.** Report 101 renders correctly; report 1305 does
-  not, on any of its six layouts — see the section above. Simple and
-  medium-complexity reports work; real document layouts do not yet.
+- **Report 1305 on 4 of its 6 layouts** — a layout/dataset field mismatch in
+  BC itself, not a rendering fault. See the section above, including the one
+  check that would move it back into our column.
 - **Still untested:** subreports, non-Latin text, concurrent renders, and
   anything out of a real customer app.
 - **Any BC version but 28.4.** `src/tools/PatchRdlc/Program.cs` refuses a
   ReportViewer whose MVID it does not know, which disables the renderer. A new
   BC version needs those MVIDs re-pointed and the font tokens re-checked.
 
-## The next bug: wide document layouts lose their trailing dataset columns
+## Real BC document layouts render. Report 1305 is a layout/dataset mismatch.
 
-Found 2026-09-08 by running real Microsoft reports through the web client on
-BC 28.4. This is the thing to fix next, and it is a real defect in this
-integration, not a layout problem.
+Investigated 2026-09-08 by running real Microsoft reports through the web
+client on BC 28.4. **An earlier version of this section blamed the dataset
+transfer for dropping trailing label columns. That was wrong** — it is recorded
+here because it is the obvious wrong answer and someone else will reach for it.
 
-**Report 101 (Customer - List) renders correctly.** Header, column captions,
-grouped detail row with a bold company name, footer total, page number — all
-correct against a Windows rendering of the same report, once you account for
-the demo database differing (CRONUS International vs CRONUS USA gives different
-addresses, currency captions, number formats and dates).
+What renders correctly:
 
-**Report 1305 (Sales - Confirmation) fails on every layout**, with two symptoms
-that share one cause:
+- **Report 101 (Customer - List)** — header, column captions, grouped detail
+  row, footer total, page number.
+- **Report 1305 (Sales - Confirmation)** on its "Simple" layout — a complete
+  order confirmation: the Cronus **logo image**, both address blocks,
+  salesperson, the line table, Subtotal / VAT / bold-underlined
+  `Total GBP Incl. VAT 13,600.50`, and a four-column footer carrying VAT
+  registration, IBAN, SWIFT and Giro. Zero exceptions in the service log.
 
-| layout | error from `/run/bc-rdlc/service.log` |
+So images, multi-section layouts, footers, and mixed font weights all work.
+
+**What fails, and why it is not a rendering bug.** Four of report 1305's six
+layouts fail, with two different errors that turn out to be the same thing:
+
+| error | where |
 |---|---|
-| Sales Order Confirmation for Subscription Billing | `ReportPublishingException: The Value expression for the text box 'GlobalLocationNumber_Lbl' refers to the field 'GlobalLocationNumber_Lbl'` |
-| Standard Sales Order Confirmation (all fields) | `ReportProcessingException_FieldError: There is no data for the field at position 102` (and 103) |
+| `ReportPublishingException: The Value expression for the text box 'GlobalLocationNumber_Lbl' refers to the field 'GlobalLocationNumber_Lbl'` | report compile |
+| `ReportProcessingException_FieldError: There is no data for the field at position 102` (and 103) | data bind |
 
-The second is the honest one: the row the reporting service hands ReportViewer
-has fewer columns than the layout declares. The first is the same shortfall
-caught earlier, at compile time, on a label column.
+`StandardSalesOrderConf.rdlc` declares 241 dataset fields; fields 101 and 102
+are `GlobalLocationNumber` and `GlobalLocationNumber_Lbl` — exactly the
+positions ReportViewer names. And report 1305's dataset does not contain them:
 
-Trailing columns in a BC RDLC dataset are where the **labels** live — the
-`*_Lbl` captions BC appends after the data columns. `NST-WIRING.md` lists "BC
-report parameters/labels from a real AL report" as never demonstrated, and this
-is that gap arriving.
+- `Report.SaveAs(1305, ..., ReportFormat::Xml, ...)`, which the NST produces
+  itself with the reporting service uninvolved, emits 202 columns including 72
+  `*_Lbl` labels. **Labels transfer fine.** `GlobalLocationNumber` is not among
+  them, and empty-valued columns *are* emitted, so this is a real absence.
+- `src/Sales/Document/StandardSalesOrderConf.Report.al` in Base Application
+  28.4.53241.54387 contains **zero** occurrences of `GlobalLocationNumber`.
 
-Where to look, in order:
+So Microsoft's own layout declares a field Microsoft's own report does not
+produce, in the same shipped version. Nothing in that involves Mono, the
+bridge, or the gRPC transport — the report never reaches layout.
 
-1. Compare the column count the NST puts into `NavDataSet.Serialize` against
-   what the service reconstructs from `HybridDataStore`. Both are Microsoft
-   code, so a divergence points at the settings they were given, not at them.
-2. `ReportingServiceSettings` — particularly `EnableCompactSerialization` and
-   the per-`RenderingContext` compression/deduplication flags. `NativeRdlcService`
-   configures the process through BC's own
-   `ReportingProcessStartup.InitializeReportingServiceConfiguration`, which is
-   the right thing to do, but the result has never been diffed against what the
-   NST actually serializes with.
-3. Whether the failure position tracks the dataset width. Report 101 is narrow
-   and works; 1305 is ~100 columns and loses the last two.
-
-Do not chase this in the font or text bridge. Nothing above involves rendering
-— the report never reaches layout.
+**The one thing still worth checking on Windows.** Render report 1305 on a
+Windows BC 28.4 W1 container with the "Standard Sales Order Confirmation
+(detailed)" layout. If it fails there too, this is a Microsoft layout bug and
+there is nothing to do. If it renders, then the NST reconciles declared-but-
+absent layout fields into the dataset somewhere, and that reconciliation is
+what this integration is missing — which would make it ours after all. Until
+someone runs that, do not assume either way.
 
 ## Layout
 
