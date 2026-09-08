@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2010/01/reportdefinition">
+  <DataSources><DataSource Name="Local"><ConnectionProperties>
+    <DataProvider>System.Data.DataSet</DataProvider><ConnectString />
+  </ConnectionProperties></DataSource></DataSources>
+  <DataSets><DataSet Name="DataSet_Result">
+    <Query><DataSourceName>Local</DataSourceName><CommandText /></Query>
+    <Fields>
+      <Field Name="Description"><DataField>Description</DataField></Field>
+      <Field Name="Quantity"><DataField>Quantity</DataField></Field>
+      <Field Name="UnitPrice"><DataField>UnitPrice</DataField></Field>
+    </Fields>
+    <Filters><Filter><FilterExpression>=Fields!Quantity.Value</FilterExpression>
+      <Operator>LessThanOrEqual</Operator><FilterValues><FilterValue>=4</FilterValue></FilterValues>
+    </Filter><Filter>
+      <FilterExpression>=IIF(Fields!Quantity.Value = 1, "I", IIF(Fields!Quantity.Value = 2, "&#305;", IIF(Fields!Quantity.Value = 3, "i", "&#304;")))</FilterExpression>
+      <Operator>Like</Operator><FilterValues><FilterValue>*&#305;*</FilterValue></FilterValues>
+    </Filter></Filters>
+  </DataSet></DataSets>
+  <ReportSections><ReportSection><Body><ReportItems>
+    <Textbox Name="Result"><CanGrow>true</CanGrow><KeepTogether>true</KeepTogether>
+      <Paragraphs><Paragraph><TextRuns><TextRun>
+        <Value>="ROWS=" &amp; CountRows("DataSet_Result") &amp; "; SUM=" &amp; Sum(Fields!Quantity.Value, "DataSet_Result") &amp; "; AMOUNT=" &amp; Sum(Fields!Quantity.Value * Fields!UnitPrice.Value, "DataSet_Result")</Value>
+        <Style><FontFamily>Liberation Sans</FontFamily><FontSize>14pt</FontSize></Style>
+      </TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+      <Top>0in</Top><Left>0in</Left><Height>1in</Height><Width>6in</Width><Style />
+    </Textbox>
+  </ReportItems><Height>2in</Height><Style /></Body><Width>6in</Width>
+    <Page><PageHeight>11in</PageHeight><PageWidth>8.5in</PageWidth>
+      <LeftMargin>1in</LeftMargin><RightMargin>1in</RightMargin><TopMargin>1in</TopMargin><BottomMargin>1in</BottomMargin><Style />
+    </Page>
+  </ReportSection></ReportSections>
+  <Language>tr-TR</Language>
+</Report>

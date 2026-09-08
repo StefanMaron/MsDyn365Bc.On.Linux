@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2010/01/reportdefinition">
+  <DataSources><DataSource Name="Local"><ConnectionProperties>
+    <DataProvider>System.Data.DataSet</DataProvider><ConnectString />
+  </ConnectionProperties></DataSource></DataSources>
+  <DataSets><DataSet Name="DataSet_Result">
+    <Query><DataSourceName>Local</DataSourceName><CommandText /></Query>
+    <Fields>
+      <Field Name="Description"><DataField>Description</DataField></Field>
+      <Field Name="Quantity"><DataField>Quantity</DataField></Field>
+    </Fields>
+    <Filters><Filter><FilterExpression>=Fields!Quantity.Value</FilterExpression>
+      <Operator>LessThanOrEqual</Operator><FilterValues><FilterValue>=6</FilterValue></FilterValues>
+    </Filter></Filters>
+  </DataSet></DataSets>
+  <ReportSections><ReportSection><Body><ReportItems>
+    <Chart Name="Quantities">
+      <ChartCategoryHierarchy><ChartMembers><ChartMember>
+        <Group Name="Categories"><GroupExpressions><GroupExpression>=Fields!Description.Value</GroupExpression></GroupExpressions></Group>
+        <Label>=Fields!Description.Value</Label>
+      </ChartMember></ChartMembers></ChartCategoryHierarchy>
+      <ChartSeriesHierarchy><ChartMembers><ChartMember><Label>Quantity</Label></ChartMember></ChartMembers></ChartSeriesHierarchy>
+      <ChartData><ChartSeriesCollection><ChartSeries Name="Quantity">
+        <ChartDataPoints><ChartDataPoint>
+          <ChartDataPointValues><Y>=Sum(Fields!Quantity.Value)</Y></ChartDataPointValues>
+          <ChartDataLabel><Visible>true</Visible><Style><FontFamily>Liberation Sans</FontFamily></Style></ChartDataLabel>
+          <Style><Color>SteelBlue</Color></Style>
+        </ChartDataPoint></ChartDataPoints>
+        <Type>Column</Type><Subtype>Plain</Subtype>
+      </ChartSeries></ChartSeriesCollection></ChartData>
+      <ChartAreas><ChartArea Name="Default">
+        <ChartCategoryAxes><ChartAxis Name="Primary">
+          <Style><FontFamily>Liberation Sans</FontFamily><FontSize>8pt</FontSize></Style>
+          <ChartAxisTitle><Caption>Invoice line</Caption><Style /></ChartAxisTitle>
+          <ChartMajorGridLines><Enabled>False</Enabled><Style /></ChartMajorGridLines>
+        </ChartAxis></ChartCategoryAxes>
+        <ChartValueAxes><ChartAxis Name="Primary">
+          <Style><FontFamily>Liberation Sans</FontFamily></Style>
+          <ChartAxisTitle><Caption>Quantity</Caption><Style /></ChartAxisTitle>
+          <ChartMajorGridLines><Enabled>True</Enabled><Style><Color>LightGray</Color></Style></ChartMajorGridLines>
+          <Minimum>0</Minimum><Maximum>7</Maximum>
+        </ChartAxis></ChartValueAxes>
+        <Style><BackgroundColor>White</BackgroundColor></Style>
+      </ChartArea></ChartAreas>
+      <ChartTitles><ChartTitle Name="Title"><Caption>Native chart: quantities 1 to 6</Caption>
+        <Style><FontFamily>Liberation Sans</FontFamily><FontSize>16pt</FontSize><FontWeight>Bold</FontWeight></Style>
+      </ChartTitle></ChartTitles>
+      <DataSetName>DataSet_Result</DataSetName>
+      <Top>0in</Top><Left>0in</Left><Height>4in</Height><Width>6in</Width>
+      <Style><BackgroundColor>White</BackgroundColor></Style>
+    </Chart>
+  </ReportItems><Height>5in</Height><Style /></Body><Width>6in</Width>
+    <Page><PageHeight>11in</PageHeight><PageWidth>8.5in</PageWidth>
+      <LeftMargin>1in</LeftMargin><RightMargin>1in</RightMargin><TopMargin>1in</TopMargin><BottomMargin>1in</BottomMargin><Style />
+    </Page>
+  </ReportSection></ReportSections>
+  <Language>en-US</Language>
+</Report>

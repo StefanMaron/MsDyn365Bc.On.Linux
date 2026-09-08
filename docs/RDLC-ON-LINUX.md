@@ -1,8 +1,22 @@
 # RDLC rendering on Linux — where the investigation got to
 
-Parked, not abandoned. Nothing in this document is implemented; the image still
-returns `false` from `Report.SaveAs(Pdf)` against an RDLC layout. Written down so
-the next person starts from the blocker rather than from the beginning.
+> **Superseded on the `feat/native-rdlc-pdf` branch.** This document ends at a
+> `TypeLoadException` it could not identify, and says nothing here is
+> implemented. Both statements were true when it was written and are no longer.
+> The engine now renders — invoices, charts and RTL text — through Microsoft's
+> own ReportViewer under Mono with a native Pango/HarfBuzz font and text bridge,
+> and through Microsoft's real reporting service over its real gRPC endpoints.
+> See `prototypes/rdlc/README.md` on that branch. What is still accurate below
+> is the architecture (why RDLC is a separate process, and why no config flag
+> changes that) and the CAS analysis. What is stale is "Where it stops",
+> "If it does turn out to work", and the claim that a full Cecil `Write` of
+> `Microsoft.ReportViewer.Common.dll` is not possible.
+>
+> It is still true that a container built from `master` returns `false` from
+> `Report.SaveAs(Pdf)`. The prototype is not wired into the image.
+
+Parked, not abandoned. Written down so the next person starts from the blocker
+rather than from the beginning.
 
 Tracking issue: [#73](https://github.com/StefanMaron/MsDyn365Bc.On.Linux/issues/73).
 Measured 2026-09-07 against BC 28.4.

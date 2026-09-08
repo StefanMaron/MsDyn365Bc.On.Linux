@@ -1,0 +1,25 @@
+{
+  "id": "0598c6e4-ec81-4380-8d2d-0b3aa032105e",
+  "name": "BC Linux RDLC Smoke Test",
+  "publisher": "BCLinux",
+  "version": "1.0.0.0",
+  "brief": "Opt-in native RDLC rendering probe, including an API for inspecting the actual PDF returned by BC.",
+  "runtime": "14.0",
+  "platform": "26.0.0.0",
+  "application": "26.0.0.0",
+  "target": "OnPrem",
+  "dependencies": [
+    {
+      "id": "dd0be2ea-f733-4d65-bb34-a28f4624fb14",
+      "name": "Library Assert",
+      "publisher": "Microsoft",
+      "version": "1.0.0.0"
+    }
+  ],
+  "idRanges": [
+    {
+      "from": 70100,
+      "to": 70103
+    }
+  ]
+}
