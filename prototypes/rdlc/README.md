@@ -138,13 +138,49 @@ not declare and its report does not produce — while its own sibling invoice
 layout declares them correctly. It reads like a copy-paste from the invoice
 layout.
 
-**What is NOT known: whether this layout renders on Windows.** If it does, BC on
-Windows reconciles a layout's undeclared field references somewhere before
-ReportViewer compiles, and that reconciliation is what this integration is
-missing — which would make it ours. If it fails there too, it is a product bug.
-Running report 1305 with that layout on a Windows BC 28.4 W1 container is the
-only thing that settles it. Do not assume either way — an earlier version of
-this file asserted it failed on Windows, which nobody had tested.
+**What is NOT known: whether this layout renders on a Windows container of the
+same country and version.** The reconciliation BC performs is described in the
+next section and runs in the NST, so it is the same code on both platforms —
+which points away from a Linux fault and towards the report metadata differing.
+An earlier version of this file asserted the layout fails on Windows; nobody had
+tested that, and it has been removed.
+
+### How BC actually binds a layout to a dataset
+
+Worth knowing before blaming the renderer for anything field-related.
+`Microsoft.Dynamics.Nav.Runtime.XmlMetadata.ReportRdlcHelper.PatchRdlcWithNewDataSetAsync`
+runs in the NST before the layout is sent:
+
+```csharp
+report = NavGlobal.MetadataProvider.GetReportMetadata(reportId);  // base + report extensions
+xml    = CreateXmlDataSetAsync(report);      // <Field Name=X><DataField>X</DataField> per column
+doc    = ReportXmlHelper.ApplyReportDataSet(reportLayout, xml);   // REPLACES the layout's <DataSets>
+         ReportXmlHelper.ApplyReportParameters(doc, report.Labels.Select(l => l.Name));
+```
+
+Two consequences:
+
+- **A layout's own `<Fields>` block is discarded.** Whether the shipped RDLC
+  declares a field is irrelevant; what matters is whether the *merged report
+  metadata* (base report plus every installed report extension) has a column of
+  that name. This is exactly the report-extension model — an extension adds
+  columns and ships a layout using base plus extension fields — and it is why
+  that model works.
+- **Labels become report Parameters**, not dataset fields.
+
+So `Fields!X.Value` where X is in no report column fails at compile with
+`ReportPublishingException`, on any platform. That is the failure seen on the
+Subscription Billing order-confirmation layout here: in the **W1** artifact,
+neither report 1305 nor its only report extension (Subscription Billing's own
+8010 `Contract Sales Order Conf.`, which adds eleven `ServiceCommitment*`
+columns) defines `GlobalLocationNumber`. `GlobalLocationNumber` exists in Base
+Application only on the *posted* document reports and tables.
+
+**The most likely explanation is a country difference, not a platform one.**
+This container is `sandbox/28.4/w1`. A localization app for another country can
+add that column to report 1305 via its own report extension, in which case the
+layout resolves there and fails on W1. Before treating this as a Linux fault,
+check whether the working Windows container is the same country and version.
 
 ### Two ways to misread this log, both of which cost a wrong diagnosis
 
