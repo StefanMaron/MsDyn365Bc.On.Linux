@@ -99,6 +99,12 @@ Specification table. The simple layout additionally renders the Cronus **logo
 image**. So images, multi-section layouts, footers and mixed font weights all
 work on real Microsoft document layouts.
 
+**The broken layout is the DEFAULT for report 1305**, so Print or Preview on any
+sales order hits it first and reports "The system encountered an internal error
+while rendering the report." Choose "Standard Sales Order Confirmation" in the
+Report Layout picker and it renders. This is worth knowing before concluding
+that sales documents do not work on Linux — they do.
+
 **The Subscription Billing layout fails on Windows too**, with the same
 `GlobalLocationNumber_Lbl` complaint. `GlobalLocationNumber` appears nowhere in
 report 1305's AL source in Base Application 28.4 — only in the *posted* document
