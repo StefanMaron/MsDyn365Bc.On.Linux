@@ -592,6 +592,96 @@ log_step "Step 2b (patched assemblies): $(($(date +%s) - STEP2B_START))s"
 
 
 # =============================================================================
+# Step 2c: Mono RDLC renderer (opt-in, issue #73)
+# =============================================================================
+# BC renders RDLC in a separate .NET Framework process because the ReportViewer
+# assemblies are net4.6 and the NST is .NET 8 — see docs/RDLC-ON-LINUX.md. That
+# process is a Windows PE, so this image normally replaces it with a sleep stub
+# and no-ops the client (Patches #18/#19/#20).
+#
+# With BC_RDLC_RENDERER=mono we instead run Microsoft's real reporting service
+# under Mono, having replaced its Windows-only text and font stack with our
+# Pango/HarfBuzz/FreeType bridge. Everything here is idempotent and re-run on
+# every boot: the setting is not part of the service-dir stamp, so toggling it
+# has to take effect on a plain restart.
+#
+# Anything unexpected DISABLES the renderer and leaves the tier exactly as it
+# would have been. This is an opt-in feature; it must not be able to fail a boot.
+RDLC_ENABLED=0
+if [ "${BC_RDLC_RENDERER:-}" = "mono" ]; then
+    STEP2C_START=$(date +%s)
+    SIDE_DIR="$SERVICE_DIR/SideServices"
+    rdlc_disable() {
+        echo "[entrypoint] RDLC: $1" >&2
+        echo "[entrypoint] RDLC: renderer disabled; reporting behaves as it does without BC_RDLC_RENDERER" >&2
+        RDLC_ENABLED=0
+    }
+    if [ ! -f /bc/rdlc/librdlc_native.so ]; then
+        rdlc_disable "this image was built without the renderer (rebuild with --build-arg BC_WITH_RDLC=1)"
+    elif ! command -v mono >/dev/null 2>&1; then
+        rdlc_disable "mono is not installed in this image"
+    elif [ ! -f "$SIDE_DIR/Microsoft.ReportViewer.Common.dll" ]; then
+        rdlc_disable "no ReportViewer assemblies in $SIDE_DIR"
+    else
+        # Keep pristine copies. Re-patching must always start from Microsoft's
+        # originals — patching an already-patched assembly is not idempotent.
+        for asm in Microsoft.ReportViewer.Common.dll Microsoft.ReportViewer.DataVisualization.dll \
+                   Microsoft.BusinessCentral.Reporting.Server.dll \
+                   Microsoft.BusinessCentral.Telemetry.OpenTelemetry.dll; do
+            [ -f "$SIDE_DIR/$asm.rdlc-orig" ] || cp "$SIDE_DIR/$asm" "$SIDE_DIR/$asm.rdlc-orig"
+        done
+
+        # The ReportViewer patches are keyed to specific assembly MVIDs, so an
+        # unrecognised BC build is refused rather than half-patched.
+        RDLC_LOG=/tmp/rdlc-patch.log
+        if /bc/rdlc/PatchRdlc/PatchRdlc \
+                "$SIDE_DIR/Microsoft.ReportViewer.Common.dll.rdlc-orig" \
+                "$SIDE_DIR/Microsoft.ReportViewer.Common.dll" \
+                /bc/rdlc/RdlcNativeBridge.dll /usr/lib/mono/4.5 \
+                060066D0,060066B9,06006855,0600685B,06006A31,06006A64,06006A65,06006A66,06006875,0600687B \
+                > "$RDLC_LOG" 2>&1 \
+           && /bc/rdlc/PatchRdlc/PatchRdlc \
+                "$SIDE_DIR/Microsoft.ReportViewer.DataVisualization.dll.rdlc-orig" \
+                "$SIDE_DIR/Microsoft.ReportViewer.DataVisualization.dll" \
+                /bc/rdlc/RdlcNativeBridge.dll /usr/lib/mono/4.5 \
+                >> "$RDLC_LOG" 2>&1; then
+            # Mono compatibility for the service itself: Windows ETW exporters,
+            # printer-dependent PageSettings getters, AppDomain counters Mono
+            # lacks, and CultureInfo rehydration across the reporting AppDomain.
+            if (cd /bc/rdlc && mono PatchServiceCompat.exe \
+                    "$SIDE_DIR/Microsoft.BusinessCentral.Telemetry.OpenTelemetry.dll.rdlc-orig" \
+                    "$SIDE_DIR/Microsoft.BusinessCentral.Telemetry.OpenTelemetry.dll" \
+                    "$SIDE_DIR/Microsoft.BusinessCentral.Reporting.Server.dll.rdlc-orig" \
+                    "$SIDE_DIR/Microsoft.BusinessCentral.Reporting.Server.dll" \
+                    >> "$RDLC_LOG" 2>&1); then
+                cp /bc/rdlc/RdlcNativeBridge.dll /bc/rdlc/librdlc_native.so \
+                   /bc/rdlc/Microsoft.VisualBasic.dll \
+                   /bc/rdlc/libBCRdlc.IcuBridge.so /bc/rdlc/libSystem.Globalization.Native.so \
+                   "$SIDE_DIR/"
+                # The artifact ships only the Windows gRPC native.
+                cp /bc/rdlc/libgrpc_csharp_ext.x64.so "$SIDE_DIR/"
+                RDLC_ENABLED=1
+                log_step "Step 2c (RDLC renderer staged): $(($(date +%s) - STEP2C_START))s"
+            else
+                rdlc_disable "the side-service compatibility patch failed (see $RDLC_LOG)"
+            fi
+        else
+            rdlc_disable "ReportViewer in this BC build is not one this renderer knows (see $RDLC_LOG)"
+        fi
+        # A refused patch must not leave a partly-written assembly behind.
+        if [ "$RDLC_ENABLED" = "0" ]; then
+            for asm in Microsoft.ReportViewer.Common.dll Microsoft.ReportViewer.DataVisualization.dll \
+                       Microsoft.BusinessCentral.Reporting.Server.dll \
+                       Microsoft.BusinessCentral.Telemetry.OpenTelemetry.dll; do
+                [ -f "$SIDE_DIR/$asm.rdlc-orig" ] && cp "$SIDE_DIR/$asm.rdlc-orig" "$SIDE_DIR/$asm"
+            done
+        fi
+    fi
+fi
+export BC_RDLC_ACTIVE=$RDLC_ENABLED
+
+
+# =============================================================================
 # Step 3: Wait for SQL Server and set up database
 # =============================================================================
 export PATH="$PATH:/opt/mssql-tools18/bin"
@@ -1353,7 +1443,9 @@ exec 3>/tmp/bc-stdin
     # Replace Reporting Service .exe with sleep stub NOW (after BC startup probed the assembly).
     # The SideServiceWatchdog will call Process.Start on this path and see a live process.
     REPORT_EXE="$SERVICE_DIR/SideServices/Microsoft.BusinessCentral.Reporting.Service.exe"
-    if [ -f "$REPORT_EXE" ] && [ ! -f "${REPORT_EXE}.win" ]; then
+    if [ "${BC_RDLC_ACTIVE:-0}" = "1" ]; then
+        echo "[entrypoint] Keeping the real Reporting Service .exe (Mono RDLC renderer active)"
+    elif [ -f "$REPORT_EXE" ] && [ ! -f "${REPORT_EXE}.win" ]; then
         mv "$REPORT_EXE" "${REPORT_EXE}.win"
         printf '#!/bin/sh\nexec sleep infinity\n' > "$REPORT_EXE"
         chmod +x "$REPORT_EXE"

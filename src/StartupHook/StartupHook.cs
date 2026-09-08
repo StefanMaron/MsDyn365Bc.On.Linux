@@ -492,6 +492,31 @@ internal class StartupHook
         if (name == "Microsoft.Dynamics.Nav.Ncl")
         {
             PatchALDatabaseALSid(args.LoadedAssembly);
+            // Patch #19a: with the Mono RDLC renderer staged (BC_RDLC_RENDERER=mono
+            //   and the entrypoint's Step 2c reporting success), install BC's own
+            //   gRPC client against a reporting process we supervise, instead of
+            //   the no-op below. Patch #18 stays applied either way — we start the
+            //   process ourselves rather than letting the Windows lifecycle do it.
+            //   Any failure here falls back to the no-op client: reports then fail
+            //   the way they do without the renderer, which beats failing boot.
+            bool rdlcStarted = false;
+            if (NativeRdlcService.Enabled)
+            {
+                try
+                {
+                    NativeRdlcService.Start(args.LoadedAssembly);
+                    rdlcStarted = true;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[StartupHook] Patch #19a: native RDLC not started ({ex.Message}); using the no-op client");
+                }
+            }
+            if (rdlcStarted)
+            {
+                Console.WriteLine("[StartupHook] Patch #19a: native RDLC renderer active");
+            }
+            else
             // Patch #19: Set CustomReportingServiceClient to no-op factory.
             //   BC's Reporting Service is a Windows PE binary that can't run on Linux.
             //   When test code triggers RDLC rendering, BC tries to connect to the

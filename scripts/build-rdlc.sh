@@ -144,7 +144,11 @@ mcs -out:"$OUT/PatchServiceCompat.exe" \
     -r:"$OUT/HeadlessPageSettings.dll" -r:"$CECIL" "$SVC/PatchServiceCompat.cs"
 cp "$CECIL" "$OUT/"
 
-cp -a "$WORK/compiler/tasks/net472" "$OUT/compiler"
+# Roslyn's net472 VB compiler, plus the `vbnc` shim Mono's CodeDOM provider
+# actually invokes. Put $OUT/compiler on PATH for the renderer process.
+mkdir -p "$OUT/compiler/tasks"
+cp -a "$WORK/compiler/tasks/net472" "$OUT/compiler/tasks/net472"
+install -m 755 "$SRC/prototypes/rdlc/bridge/vbnc" "$OUT/compiler/vbnc"
 
 log "done:"
 ls -la "$OUT" >&2

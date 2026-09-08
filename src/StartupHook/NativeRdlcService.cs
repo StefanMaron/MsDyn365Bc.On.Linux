@@ -25,8 +25,15 @@ internal static class NativeRdlcService
     private static int port;
     private static string lastError = "The reporting service is starting.";
 
+    // BC_RDLC_ACTIVE is written by scripts/entrypoint.sh Step 2c and is 1 only
+    // when the ReportViewer patches actually applied to THIS BC build. Asking
+    // for the renderer is not the same as having one.
     internal static bool Enabled =>
-        Environment.GetEnvironmentVariable("BC_RDLC_RENDERER") == "mono";
+        Environment.GetEnvironmentVariable("BC_RDLC_RENDERER") == "mono" &&
+        Environment.GetEnvironmentVariable("BC_RDLC_ACTIVE") == "1";
+
+    private static string ServiceDirectory =>
+        Environment.GetEnvironmentVariable("BC_RDLC_SERVICE_DIR") ?? "/bc/service/SideServices";
 
     internal static void Start(Assembly ncl)
     {
@@ -185,7 +192,7 @@ internal static class NativeRdlcService
         var info = new ProcessStartInfo("/bc/scripts/start-rdlc-service.sh")
         {
             UseShellExecute = false,
-            WorkingDirectory = "/bc/rdlc/service"
+            WorkingDirectory = ServiceDirectory
         };
         // Report code must not inherit the NST's SQL credentials or startup hook.
         info.Environment.Clear();
@@ -193,6 +200,7 @@ internal static class NativeRdlcService
         info.Environment["LANG"] = Environment.GetEnvironmentVariable("LANG") ?? "en_US.UTF-8";
         info.Environment["LC_ALL"] = info.Environment["LANG"];
         info.Environment["BC_RDLC_PORT"] = port.ToString(CultureInfo.InvariantCulture);
+        info.Environment["BC_RDLC_SERVICE_DIR"] = ServiceDirectory;
         info.Environment["RDLC_TRACE"] = Environment.GetEnvironmentVariable("BC_RDLC_TRACE") ?? "0";
         return info;
     }
