@@ -144,6 +144,28 @@ that BC build is not one the patcher recognises, the entrypoint says so and
 reporting behaves exactly as it does today — an opt-in feature must not be able
 to fail a boot.
 
+### With the web client, to click through it yourself
+
+The web client PoC (`docs/WEBCLIENT-POC.md`) and the renderer work together:
+
+```bash
+BC_WITH_RDLC=1 docker compose build bc
+BC_WEBCLIENT=1 BC_RDLC_RENDERER=mono BC_RDLC_TRUST_LAYOUTS=1 \
+    docker compose up -d --wait
+# publish extensions/rdlc-smoke-test, then browse to
+#   http://localhost:8080/?report=70100      (BCRUNNER / Admin123!)
+```
+
+Running report 70100 downloads a four-page PDF whose Producer is
+`Microsoft Reporting Services PDF Rendering Extension 15.0.0.0` — ReportViewer's
+own output. Verified in headless Chromium on BC 28.4: sign in, role center with
+live CRONUS data, report runs, 120 rows across 4 pages.
+
+Note the two PDF producers you will see. Through the web client the file is
+ReportViewer's raw output; through `Report.SaveAs(Pdf)` from AL, BC
+post-processes it with Aspose.PDF, so the Producer differs and the byte count
+is slightly different. Both are the same rendered document.
+
 Testing it on a NON-default instance has a trap. `scripts/run-tests.sh` derives
 `WS_HOST` and `ODATA_HOST` from `--base-url`'s host but hardcodes `:7085` and
 `:7052`, so on a port-shifted instance `--base-url`/`--dev-url` alone still send
