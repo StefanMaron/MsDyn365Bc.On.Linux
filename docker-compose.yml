@@ -124,6 +124,15 @@ services:
       # Diagnostic only — comma-separated patch IDs to skip (e.g. "14,15,15a,15b,checkfile").
       # Used to bisect Cecil patches that may cause AL→C# emission drift. Empty = production.
       BC_DISABLE_PATCHES: ${BC_DISABLE_PATCHES:-}
+      # Opt-in only (default unset = OFF). Forces TestPageClient.dll's communication
+      # channels back to synchronous (CommunicationBroker Async=true -> false), which is
+      # what this image did unconditionally until issue #78: it made an empty linked
+      # part's draft row raise OnNewRecord twice as often as a real BC tier, because
+      # forcing every notification synchronous bypasses the queue that lets BC coalesce
+      # rapid-fire PropertyChanged/CurrentRowChanged notifications during a page/part
+      # fill. Set to 1 only if a TestPage scenario needs the dispatcher pump this image
+      # doesn't implement and hangs with the default (Async=true, matching Windows).
+      BC_TESTPAGE_ASYNC_PATCH: ${BC_TESTPAGE_ASYNC_PATCH:-}
       # Diagnostic only — 1 logs every thrown exception (very noisy).
       BC_DEBUG_FIRSTCHANCE: ${BC_DEBUG_FIRSTCHANCE:-}
       # Diagnostic only — 1 logs every managed assembly the runtime fails to find

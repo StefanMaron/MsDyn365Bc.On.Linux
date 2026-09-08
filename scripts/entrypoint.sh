@@ -461,16 +461,41 @@ if [ -f /bc/patched/Mono.Cecil.dll ]; then
     log_step "Applied patched Mono.Cecil.dll (CheckFileName empty path fix)"
 fi
 
-# Patch TestPage support: fix assembly loading and async deadlock
+# Patch TestPage support: fix assembly loading (and, opt-in only, force the
+# communication channels synchronous).
 # Nav.Ncl.dll: Assembly.Load (version-qualified) → Assembly.LoadFrom (file path)
-# TestPageClient.dll: CommunicationBroker Async=true → false (prevents dispatcher deadlock)
+# Nav.Types.dll: TestClientProxy Assembly.Load (version-qualified) → LoadFrom
 if [ -f /bc/tools/patcher/PatchNclTestPage.dll ]; then
     PATCHER="dotnet /bc/tools/patcher/PatchNclTestPage.dll"
     if $PATCHER ncl "$SERVICE_DIR/Microsoft.Dynamics.Nav.Ncl.dll" 2>&1 | tail -1; then
         log_step "Patched Nav.Ncl.dll (TestPage Assembly.Load → LoadFrom)"
     fi
-    if $PATCHER client "$SERVICE_DIR/Microsoft.Dynamics.Nav.Client.TestPageClient.dll" 2>&1 | tail -1; then
-        log_step "Patched TestPageClient.dll (Async=true → false)"
+    # TestPageClient.dll: CommunicationBroker Async=true → false.
+    #
+    # Default is OFF (leave Async=true, matching a real BC tier). issue #78 traced why this
+    # matters beyond "correct in principle": Async=true is what makes BC coalesce rapid-fire
+    # PropertyChanged/CurrentRowChanged notifications during a page/part fill — the queue in
+    # CommunicationChannel evicts messages past ChannelOptions.QueueLength
+    # (EnsureQueueLength), and BindingManagerConsumerPort.FillStarting only pulls one survivor
+    # per channel per fill. With Async=false every notification is sent inline instead, so an
+    # empty linked part's draft row got notified via OnNewRecord twice as often here as on a
+    # real Windows sandbox tier (6 vs 3, exact ratio, confirmed against an online sandbox) —
+    # not a viewport-rendering difference, the SAME single draft row re-fired extra times.
+    #
+    # The deadlock this patch was written against (commit 29d2bdf) was never isolated from
+    # that commit's OTHER fix in the same change (ToUnicodeEx returning 0 instead of 1, which
+    # on its own caused an infinite loop in KeyboardMapper.ClearKeyboardBuffer during page form
+    # building) — and at the time TestPage couldn't run end-to-end anyway
+    # (NavSession.CreateNavTestService() still threw NotSupportedException). Re-tested against
+    # a RunObject → StandardDialog target answered by [ModalPageHandler] (the shape most likely
+    # to need a real pump) with Async left at true: 7/7 pass, no hang.
+    #
+    # BC_TESTPAGE_ASYNC_PATCH=1 restores the old forced-synchronous behavior, in case a TestPage
+    # scenario this hasn't been exercised against does need the pump that doesn't exist here.
+    if [ "${BC_TESTPAGE_ASYNC_PATCH:-0}" = "1" ]; then
+        if $PATCHER client "$SERVICE_DIR/Microsoft.Dynamics.Nav.Client.TestPageClient.dll" 2>&1 | tail -1; then
+            log_step "Patched TestPageClient.dll (Async=true → false, BC_TESTPAGE_ASYNC_PATCH=1)"
+        fi
     fi
     if $PATCHER types "$SERVICE_DIR/Microsoft.Dynamics.Nav.Types.dll" 2>&1 | tail -1; then
         log_step "Patched Nav.Types.dll (TestClientProxy Assembly.Load → LoadFrom)"

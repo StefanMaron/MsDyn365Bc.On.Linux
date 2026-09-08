@@ -104,7 +104,7 @@ docker compose build bc && docker compose up -d --wait
 3. **`scripts/entrypoint.sh`** — the long-running orchestration. Steps:
    - **Step 1**: Download BC artifacts (or wait for them if `BC_ARTIFACT_URL=skip`). Cached in the `bc-artifacts` volume.
    - **Step 2**: Copy service tier into `/bc/service/`, replace the Windows Reporting Service PE binary with our Linux .NET stub (`stubs/reporting-service-stub`), symlink `kernel32.dll`/`user32.dll`/etc. → `libwin32_stubs.so`.
-   - **Step 2b**: Apply on-disk binary patches (`CodeAnalysis.dll`, `Mono.Cecil.dll`, `Nav.Ncl.dll` `Assembly.Load`→`LoadFrom`, `TestPageClient.dll` Async fix), copy refasm DLLs, rename `Add-ins` → `Add-Ins` (case-sensitivity fix).
+   - **Step 2b**: Apply on-disk binary patches (`CodeAnalysis.dll`, `Mono.Cecil.dll`, `Nav.Ncl.dll` `Assembly.Load`→`LoadFrom`, `TestPageClient.dll` async fix — opt-in only via `BC_TESTPAGE_ASYNC_PATCH=1` as of issue #78, see `KNOWN-LIMITATIONS.md`), copy refasm DLLs, rename `Add-ins` → `Add-Ins` (case-sensitivity fix).
    - **Step 3**: Wait for SQL, restore the demo DB, create BC SQL login.
    - **Step 4**: Start BC, publish the TestRunnerExtension and any apps in `BC_TEST_APPS`, then write `/tmp/bc-ready` (which the healthcheck looks for) and `wait`.
 
