@@ -107,7 +107,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         mono-devel pkg-config git patch \
         libpango1.0-dev libfontconfig1-dev libfreetype-dev libharfbuzz-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
-COPY scripts/ scripts/
+# Only the renderer build inputs, so editing entrypoint.sh does not invalidate
+# this layer and re-run the whole renderer build.
+COPY scripts/build-rdlc.sh scripts/
 COPY prototypes/ prototypes/
 # Cecil patcher for the ReportViewer assemblies. Runs at container start against
 # the BC artifact, so it ships as a tool rather than being applied here.
@@ -159,7 +161,7 @@ ARG BC_WITH_RDLC=0
 RUN if [ "$BC_WITH_RDLC" = "1" ]; then \
         apt-get update && apt-get install -y --no-install-recommends \
             mono-devel libgdiplus libpango-1.0-0 libpangocairo-1.0-0 \
-            libharfbuzz0b libfontconfig1 libfreetype6 \
+            libharfbuzz0b libharfbuzz-subset0 libfontconfig1 libfreetype6 \
             fonts-noto-core fonts-droid-fallback && \
         apt-get clean && rm -rf /var/lib/apt/lists/*; \
     fi

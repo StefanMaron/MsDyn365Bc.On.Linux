@@ -648,18 +648,28 @@ if [ "${BC_RDLC_RENDERER:-}" = "mono" ]; then
             # Mono compatibility for the service itself: Windows ETW exporters,
             # printer-dependent PageSettings getters, AppDomain counters Mono
             # lacks, and CultureInfo rehydration across the reporting AppDomain.
-            if (cd /bc/rdlc && mono PatchServiceCompat.exe \
-                    "$SIDE_DIR/Microsoft.BusinessCentral.Telemetry.OpenTelemetry.dll.rdlc-orig" \
-                    "$SIDE_DIR/Microsoft.BusinessCentral.Telemetry.OpenTelemetry.dll" \
-                    "$SIDE_DIR/Microsoft.BusinessCentral.Reporting.Server.dll.rdlc-orig" \
-                    "$SIDE_DIR/Microsoft.BusinessCentral.Reporting.Server.dll" \
+            # Run FROM the side-service directory: Cecil's resolver searches the
+            # working directory, and writing these assemblies needs to resolve
+            # their siblings (Telemetry.Abstractions among them). Mono still
+            # finds the patcher's own dependencies via its app base in /bc/rdlc.
+            if (cd "$SIDE_DIR" && mono /bc/rdlc/PatchServiceCompat.exe \
+                    Microsoft.BusinessCentral.Telemetry.OpenTelemetry.dll.rdlc-orig \
+                    Microsoft.BusinessCentral.Telemetry.OpenTelemetry.dll \
+                    Microsoft.BusinessCentral.Reporting.Server.dll.rdlc-orig \
+                    Microsoft.BusinessCentral.Reporting.Server.dll \
                     >> "$RDLC_LOG" 2>&1); then
+                # HeadlessPageSettings.dll is not optional: the patched
+                # Reporting.Server.dll holds real calls into it.
                 cp /bc/rdlc/RdlcNativeBridge.dll /bc/rdlc/librdlc_native.so \
-                   /bc/rdlc/Microsoft.VisualBasic.dll \
+                   /bc/rdlc/Microsoft.VisualBasic.dll /bc/rdlc/HeadlessPageSettings.dll \
                    /bc/rdlc/libBCRdlc.IcuBridge.so /bc/rdlc/libSystem.Globalization.Native.so \
                    "$SIDE_DIR/"
-                # The artifact ships only the Windows gRPC native.
+                # The artifact ships only the Windows gRPC native. BOTH processes
+                # need the Linux one: the reporting service is the gRPC server,
+                # and the NST is the client — Grpc.Core looks for it next to the
+                # base directory of whichever process loaded it.
                 cp /bc/rdlc/libgrpc_csharp_ext.x64.so "$SIDE_DIR/"
+                cp /bc/rdlc/libgrpc_csharp_ext.x64.so "$SERVICE_DIR/"
                 RDLC_ENABLED=1
                 log_step "Step 2c (RDLC renderer staged): $(($(date +%s) - STEP2C_START))s"
             else
