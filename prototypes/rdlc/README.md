@@ -70,15 +70,60 @@ AppDomain handling and protobuf layer are all Microsoft's, retained.
   container. "Renders correctly" above means the output was inspected and the
   values are right, not that it matches Windows byte for byte or line-breaks
   identically.
-- **Anything beyond the smoke test.** What has been rendered from AL is one
-  120-row, single-dataitem layout in Liberation Sans. Untested from AL: real BC
-  layouts with headers, footers, images and subreports; report parameters and
-  labels; non-Latin text; concurrent renders; and any layout out of a real
-  customer app. The path is proven wired and correct for that layout — that is
-  not the same as "RDLC works".
+- **Wide document layouts.** Report 101 renders correctly; report 1305 does
+  not, on any of its six layouts — see the section above. Simple and
+  medium-complexity reports work; real document layouts do not yet.
+- **Still untested:** subreports, non-Latin text, concurrent renders, and
+  anything out of a real customer app.
 - **Any BC version but 28.4.** `src/tools/PatchRdlc/Program.cs` refuses a
   ReportViewer whose MVID it does not know, which disables the renderer. A new
   BC version needs those MVIDs re-pointed and the font tokens re-checked.
+
+## The next bug: wide document layouts lose their trailing dataset columns
+
+Found 2026-09-08 by running real Microsoft reports through the web client on
+BC 28.4. This is the thing to fix next, and it is a real defect in this
+integration, not a layout problem.
+
+**Report 101 (Customer - List) renders correctly.** Header, column captions,
+grouped detail row with a bold company name, footer total, page number — all
+correct against a Windows rendering of the same report, once you account for
+the demo database differing (CRONUS International vs CRONUS USA gives different
+addresses, currency captions, number formats and dates).
+
+**Report 1305 (Sales - Confirmation) fails on every layout**, with two symptoms
+that share one cause:
+
+| layout | error from `/run/bc-rdlc/service.log` |
+|---|---|
+| Sales Order Confirmation for Subscription Billing | `ReportPublishingException: The Value expression for the text box 'GlobalLocationNumber_Lbl' refers to the field 'GlobalLocationNumber_Lbl'` |
+| Standard Sales Order Confirmation (all fields) | `ReportProcessingException_FieldError: There is no data for the field at position 102` (and 103) |
+
+The second is the honest one: the row the reporting service hands ReportViewer
+has fewer columns than the layout declares. The first is the same shortfall
+caught earlier, at compile time, on a label column.
+
+Trailing columns in a BC RDLC dataset are where the **labels** live — the
+`*_Lbl` captions BC appends after the data columns. `NST-WIRING.md` lists "BC
+report parameters/labels from a real AL report" as never demonstrated, and this
+is that gap arriving.
+
+Where to look, in order:
+
+1. Compare the column count the NST puts into `NavDataSet.Serialize` against
+   what the service reconstructs from `HybridDataStore`. Both are Microsoft
+   code, so a divergence points at the settings they were given, not at them.
+2. `ReportingServiceSettings` — particularly `EnableCompactSerialization` and
+   the per-`RenderingContext` compression/deduplication flags. `NativeRdlcService`
+   configures the process through BC's own
+   `ReportingProcessStartup.InitializeReportingServiceConfiguration`, which is
+   the right thing to do, but the result has never been diffed against what the
+   NST actually serializes with.
+3. Whether the failure position tracks the dataset width. Report 101 is narrow
+   and works; 1305 is ~100 columns and loses the last two.
+
+Do not chase this in the font or text bridge. Nothing above involves rendering
+— the report never reaches layout.
 
 ## Layout
 
