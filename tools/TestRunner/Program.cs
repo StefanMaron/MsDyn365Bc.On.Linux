@@ -79,6 +79,9 @@ int odataResultsSeen = 0;
 // Cached across calls — avoid re-resolving company ID and recreating HttpClient
 HttpClient? cachedHttp = null;
 string? cachedCompanyId = null;
+// How many times OpenForm returned a JSON null and a reconnect recovered it (issue #56).
+// Printed at the end of the run, unconditionally, so the rate stays visible.
+int openFormNullRetries = 0;
 // Per-method result records, populated by PrintLiveResults as tests complete.
 // Used to emit JUnit XML at the end of the run when --junit-output is set.
 var recordedResults = new List<RecordedResult>();
@@ -224,9 +227,9 @@ async Task<int> RunTests()
     }
 
     // Initial connection — used only for ClearTestResults before the loop.
-    var (rpc, ws, _) = await Connect(authBytes, tokenCapture, cts.Token);
-    var formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
-    if (formState == null) return 1;
+    var initialSession = await OpenSessionWithRetry(authBytes, tokenCapture, company, cts.Token);
+    if (initialSession == null) return 1;
+    var (rpc, ws, _, formState) = initialSession.Value;
 
     // ClearTestResults once, before the loop.
     Log("Clearing previous results...");
@@ -289,16 +292,15 @@ async Task<int> RunTests()
     {
         if (!haveSession)
         {
-            CancellationTokenSource sessionEndedCts;
             try
             {
-                (rpc, ws, sessionEndedCts) = await Connect(authBytes, tokenCapture, cts.Token);
-                formState = await OpenTestPage(rpc, tokenCapture, company, cts.Token);
-                if (formState == null)
+                var session = await OpenSessionWithRetry(authBytes, tokenCapture, company, cts.Token);
+                if (session == null)
                 {
                     Log("Could not open test page after reconnect");
                     break;
                 }
+                (rpc, ws, _, formState) = session.Value;
                 haveSession = true;
             }
             catch (Exception ex)
@@ -408,6 +410,8 @@ async Task<int> RunTests()
 
     Console.WriteLine($"\n=== Results ({elapsed.TotalSeconds:F0}s) ===");
     Console.WriteLine($"{total} total, {livePassed} passed, {liveFailed} failed, {liveSkipped} skipped");
+    if (openFormNullRetries > 0)
+        Console.Error.WriteLine($"[testrunner] OpenForm returned a null result {openFormNullRetries} time(s) during this run; a reconnect recovered each one (see issue #56).");
     return ComputeExitCode(runCompleted, codeunitsRun, numCodeunits, liveFailed, livePassed);
 }
 
@@ -631,6 +635,40 @@ async Task<JToken?> OpenTestPage(JsonRpc rpc, MetadataTokenCapture tc, string co
     Log($"Page opened ({state?["ServerFormHandle"]})");
     try { var pg = await rpc.InvokeWithCancellationAsync<JToken>("GetPage", new object[] { new { PageSize = 50, IncludeMoreDataInformation = true, IncludeNonRowData = true }, state! }, ct); if (pg?["State"] != null) state = pg["State"]; } catch { }
     return state;
+}
+
+// Opens a fresh WebSocket connection and the test page on it, retrying with a brand
+// new connection when OpenForm comes back null (issue #56). OpenForm returning a JSON
+// null is a JSON-RPC success whose result is null — it never throws, so the caller had
+// no exception to catch and, before this, nothing to retry either. A null result can mean
+// the connection itself is in a bad state, so each attempt opens its own connection
+// rather than retrying OpenForm on the one that just failed.
+//
+// This only retries a null OpenForm result. If Connect() itself throws (the WebSocket
+// handshake or OpenConnection call fails), that exception propagates immediately —
+// no attempts are consumed retrying it. That matches issue #56's scope, which is about
+// the null result specifically; a throwing Connect() is unrelated and already surfaces
+// as an exception the caller can see.
+async Task<(JsonRpc rpc, ClientWebSocket ws, CancellationTokenSource sessionEndedCts, JToken formState)?> OpenSessionWithRetry(
+    byte[] authBytes, MetadataTokenCapture tc, string company, CancellationToken ct, int maxAttempts = 3)
+{
+    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+    {
+        var (rpc, ws, sessionEndedCts) = await Connect(authBytes, tc, ct);
+        var formState = await OpenTestPage(rpc, tc, company, ct);
+        // The returned session's sessionEndedCts is owned by the caller from here,
+        // same as it always was at the two call sites this replaces — only a
+        // discarded (failed) attempt's CTS is disposed below.
+        if (formState != null) return (rpc, ws, sessionEndedCts, formState);
+
+        openFormNullRetries++;
+        Log($"OpenForm returned null on attempt {attempt}/{maxAttempts}; reconnecting.");
+        try { rpc.Dispose(); } catch { }
+        try { ws.Dispose(); } catch { }
+        try { sessionEndedCts.Dispose(); } catch { }
+        if (attempt < maxAttempts) await Task.Delay(TimeSpan.FromSeconds(2), ct);
+    }
+    return null;
 }
 
 class Callbacks
