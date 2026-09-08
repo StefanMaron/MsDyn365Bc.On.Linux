@@ -70,6 +70,15 @@ AppDomain handling and protobuf layer are all Microsoft's, retained.
   container. "Renders correctly" above means the output was inspected and the
   values are right, not that it matches Windows byte for byte or line-breaks
   identically.
+- **Anything beyond the smoke test.** What has been rendered from AL is one
+  120-row, single-dataitem layout in Liberation Sans. Untested from AL: real BC
+  layouts with headers, footers, images and subreports; report parameters and
+  labels; non-Latin text; concurrent renders; and any layout out of a real
+  customer app. The path is proven wired and correct for that layout — that is
+  not the same as "RDLC works".
+- **Any BC version but 28.4.** `src/tools/PatchRdlc/Program.cs` refuses a
+  ReportViewer whose MVID it does not know, which disables the renderer. A new
+  BC version needs those MVIDs re-pointed and the font tokens re-checked.
 
 ## Layout
 
@@ -134,6 +143,19 @@ on. Both are needed. If the image was built without it, or the ReportViewer in
 that BC build is not one the patcher recognises, the entrypoint says so and
 reporting behaves exactly as it does today — an opt-in feature must not be able
 to fail a boot.
+
+Testing it on a NON-default instance has a trap. `scripts/run-tests.sh` derives
+`WS_HOST` and `ODATA_HOST` from `--base-url`'s host but hardcodes `:7085` and
+`:7052`, so on a port-shifted instance `--base-url`/`--dev-url` alone still send
+the websocket and OData steps to whatever is on the default ports — which, on a
+machine already running a bc-linux stack, is somebody else's container. Address
+the container on the docker network instead:
+
+```bash
+IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <project>-bc-1)
+./scripts/run-tests.sh --base-url "http://$IP:7048/BC" --dev-url "http://$IP:7049/BC/dev" \
+    --app extensions/rdlc-smoke-test/RdlcSmokeTest.app --codeunit-range 70101
+```
 
 When a render fails, read `/run/bc-rdlc/service.log` inside the container. BC
 maps every render failure to "an internal error while rendering the report",
