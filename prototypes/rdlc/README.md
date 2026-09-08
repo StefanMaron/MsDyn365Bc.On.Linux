@@ -70,8 +70,9 @@ AppDomain handling and protobuf layer are all Microsoft's, retained.
   container. "Renders correctly" above means the output was inspected and the
   values are right, not that it matches Windows byte for byte or line-breaks
   identically.
-- **The Subscription Billing layout for report 1305** — fails on Windows too,
-  so not a Linux fault. See the section above.
+- **The Subscription Billing layout for report 1305** — fails here, and it is
+  report 1305's default layout. Whether it renders on Windows is untested and
+  decides whether this is ours. See the section above.
 - **Still untested:** subreports, non-Latin text, concurrent renders, and
   anything out of a real customer app.
 - **Any BC version but 28.4.** `src/tools/PatchRdlc/Program.cs` refuses a
@@ -80,46 +81,79 @@ AppDomain handling and protobuf layer are all Microsoft's, retained.
 
 ## Real BC document layouts render
 
-Verified 2026-09-08 against BC 28.4 through the web client, and cross-checked
-against a Windows container for the one case that failed.
+Measured 2026-09-08 against BC 28.4 in this container. **Nothing below has been
+compared against a Windows container** — where a Windows result is needed to
+settle something, that is said explicitly.
 
-| report / layout | Linux | Windows |
+| report / layout | this container |
+|---|---|
+| 101 Customer - List | renders |
+| 1305 Standard Sales Order Confirmation (detailed, all fields) | renders |
+| 1305 Standard Sales Order Confirmation (simple) | renders, logo included |
+| 1305 Sales Order Confirmation for Subscription Billing | **fails** |
+
+Report 1305 on the detailed layout produces a complete order confirmation: both
+address blocks, the External Document No. / Bill-to / VAT registration grid,
+order number, document and due dates, payment terms, salesperson, bank details
+(Giro, IBAN, SWIFT), the line table, Subtotal / VAT Amount / bold-underlined
+`Total GBP Incl. VAT 13,600.50`, and a VAT Amount Specification table. The
+simple layout additionally renders the Cronus **logo image**. So images,
+multi-section layouts, footers and mixed font weights work on real Microsoft
+document layouts.
+
+### The one failing layout, and what is actually known about it
+
+It fails at report *compile*, before any data:
+
+```
+ReportPublishingException: The Value expression for the text box
+'GlobalLocationNumber_Lbl' refers to the field 'GlobalLocationNumber_Lbl'.
+Report item expressions can only refer to fields within the current dataset
+scope ...
+  -> DefinitionInvalidException -> LocalProcessingException
+```
+
+**This layout is the DEFAULT for report 1305**, so Print or Preview on any sales
+order hits it first and reports "The system encountered an internal error while
+rendering the report." Pick "Standard Sales Order Confirmation" in the Report
+Layout picker and it renders.
+
+What the shipped artifact contains, measured by unpacking
+`Microsoft_Subscription Billing_28.4.53241.54387.app`:
+
+| layout | fields declared | referenced but not declared |
 |---|---|---|
-| 101 Customer - List | renders | renders |
-| 1305 Standard Sales Order Confirmation (detailed, all fields) | **renders** | renders |
-| 1305 Standard Sales Order Confirmation (simple) | **renders** | — |
-| 1305 Sales Order Confirmation for Subscription Billing | fails | **fails** |
+| `SalesOrderConfForSubscriptionBilling.rdlc` (report 1305) | 250 | **`GlobalLocationNumber`, `GlobalLocationNumber_Lbl`** |
+| `SalesInvoiceForSubscriptionBilling.rdlc` (report 1306) | 317 | none |
 
-Report 1305 on the detailed layout produces a complete order confirmation:
-both address blocks, the External Document No. / Bill-to / VAT registration
-grid, order number, document and due dates, payment terms, salesperson, bank
-details (Giro, IBAN, SWIFT), the line table, Subtotal / VAT Amount /
-bold-underlined `Total GBP Incl. VAT 13,600.50`, and a VAT Amount
-Specification table. The simple layout additionally renders the Cronus **logo
-image**. So images, multi-section layouts, footers and mixed font weights all
-work on real Microsoft document layouts.
+And `GlobalLocationNumber` exists nowhere in report 1305's dataset: it appears
+in Base Application only in the *posted* document reports and their tables
+(SalesInvoiceHeader, SalesShipmentHeader, ReturnReceiptHeader,
+StandardSalesInvoice/Shipment/ReturnRcpt), and **no report extension in the
+whole artifact adds it to 1305**. Subscription Billing is installed for tenant
+here, so this is not an uninstalled-extension effect.
 
-**The broken layout is the DEFAULT for report 1305**, so Print or Preview on any
-sales order hits it first and reports "The system encountered an internal error
-while rendering the report." Choose "Standard Sales Order Confirmation" in the
-Report Layout picker and it renders. This is worth knowing before concluding
-that sales documents do not work on Linux — they do.
+So Microsoft's shipped order-confirmation layout references two fields it does
+not declare and its report does not produce — while its own sibling invoice
+layout declares them correctly. It reads like a copy-paste from the invoice
+layout.
 
-**The Subscription Billing layout fails on Windows too**, with the same
-`GlobalLocationNumber_Lbl` complaint. `GlobalLocationNumber` appears nowhere in
-report 1305's AL source in Base Application 28.4 — only in the *posted* document
-reports (StandardSalesInvoice / Shipment / ReturnRcpt). That layout is
-mismatched with its report in the shipped product. Nothing to fix here.
+**What is NOT known: whether this layout renders on Windows.** If it does, BC on
+Windows reconciles a layout's undeclared field references somewhere before
+ReportViewer compiles, and that reconciliation is what this integration is
+missing — which would make it ours. If it fails there too, it is a product bug.
+Running report 1305 with that layout on a Windows BC 28.4 W1 container is the
+only thing that settles it. Do not assume either way — an earlier version of
+this file asserted it failed on Windows, which nobody had tested.
 
-### Two ways to misread this log, both of which cost me a wrong diagnosis
+### Two ways to misread this log, both of which cost a wrong diagnosis
 
 - **`BC_RDLC_TRACE=1` uses Mono's `--trace=E:all`, which logs CAUGHT exceptions
   too.** `ReportProcessingException_FieldError: There is no data for the field
-  at position 102` is handled and non-fatal — ReportViewer tolerates a layout
-  field the dataset lacks, on Linux exactly as on Windows. It is not the
-  failure. Likewise the twelve `System.IO.FileNotFoundException: Invalid Image`
-  are `Assembly.LoadFrom` probing for satellite **resource** assemblies, not
-  report images. A real fatal render ends in `LocalProcessingException` or
+  at position 102` is handled and non-fatal — the detailed layout renders in
+  full while emitting it. Likewise `System.IO.FileNotFoundException: Invalid
+  Image` is `Assembly.LoadFrom` probing for satellite **resource** assemblies,
+  not report images. A real fatal render ends in `LocalProcessingException` or
   `DefinitionInvalidException`.
 - **The log is opened append-only and survives a service restart.** Truncate it
   (`: > /run/bc-rdlc/service.log`, not `rm` — deleting it detaches the open fd
