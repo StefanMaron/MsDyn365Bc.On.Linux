@@ -70,64 +70,58 @@ AppDomain handling and protobuf layer are all Microsoft's, retained.
   container. "Renders correctly" above means the output was inspected and the
   values are right, not that it matches Windows byte for byte or line-breaks
   identically.
-- **Report 1305 on 4 of its 6 layouts** — a layout/dataset field mismatch in
-  BC itself, not a rendering fault. See the section above, including the one
-  check that would move it back into our column.
+- **The Subscription Billing layout for report 1305** — fails on Windows too,
+  so not a Linux fault. See the section above.
 - **Still untested:** subreports, non-Latin text, concurrent renders, and
   anything out of a real customer app.
 - **Any BC version but 28.4.** `src/tools/PatchRdlc/Program.cs` refuses a
   ReportViewer whose MVID it does not know, which disables the renderer. A new
   BC version needs those MVIDs re-pointed and the font tokens re-checked.
 
-## Real BC document layouts render. Report 1305 is a layout/dataset mismatch.
+## Real BC document layouts render
 
-Investigated 2026-09-08 by running real Microsoft reports through the web
-client on BC 28.4. **An earlier version of this section blamed the dataset
-transfer for dropping trailing label columns. That was wrong** — it is recorded
-here because it is the obvious wrong answer and someone else will reach for it.
+Verified 2026-09-08 against BC 28.4 through the web client, and cross-checked
+against a Windows container for the one case that failed.
 
-What renders correctly:
+| report / layout | Linux | Windows |
+|---|---|---|
+| 101 Customer - List | renders | renders |
+| 1305 Standard Sales Order Confirmation (detailed, all fields) | **renders** | renders |
+| 1305 Standard Sales Order Confirmation (simple) | **renders** | — |
+| 1305 Sales Order Confirmation for Subscription Billing | fails | **fails** |
 
-- **Report 101 (Customer - List)** — header, column captions, grouped detail
-  row, footer total, page number.
-- **Report 1305 (Sales - Confirmation)** on its "Simple" layout — a complete
-  order confirmation: the Cronus **logo image**, both address blocks,
-  salesperson, the line table, Subtotal / VAT / bold-underlined
-  `Total GBP Incl. VAT 13,600.50`, and a four-column footer carrying VAT
-  registration, IBAN, SWIFT and Giro. Zero exceptions in the service log.
+Report 1305 on the detailed layout produces a complete order confirmation:
+both address blocks, the External Document No. / Bill-to / VAT registration
+grid, order number, document and due dates, payment terms, salesperson, bank
+details (Giro, IBAN, SWIFT), the line table, Subtotal / VAT Amount /
+bold-underlined `Total GBP Incl. VAT 13,600.50`, and a VAT Amount
+Specification table. The simple layout additionally renders the Cronus **logo
+image**. So images, multi-section layouts, footers and mixed font weights all
+work on real Microsoft document layouts.
 
-So images, multi-section layouts, footers, and mixed font weights all work.
+**The Subscription Billing layout fails on Windows too**, with the same
+`GlobalLocationNumber_Lbl` complaint. `GlobalLocationNumber` appears nowhere in
+report 1305's AL source in Base Application 28.4 — only in the *posted* document
+reports (StandardSalesInvoice / Shipment / ReturnRcpt). That layout is
+mismatched with its report in the shipped product. Nothing to fix here.
 
-**What fails, and why it is not a rendering bug.** Four of report 1305's six
-layouts fail, with two different errors that turn out to be the same thing:
+### Two ways to misread this log, both of which cost me a wrong diagnosis
 
-| error | where |
-|---|---|
-| `ReportPublishingException: The Value expression for the text box 'GlobalLocationNumber_Lbl' refers to the field 'GlobalLocationNumber_Lbl'` | report compile |
-| `ReportProcessingException_FieldError: There is no data for the field at position 102` (and 103) | data bind |
+- **`BC_RDLC_TRACE=1` uses Mono's `--trace=E:all`, which logs CAUGHT exceptions
+  too.** `ReportProcessingException_FieldError: There is no data for the field
+  at position 102` is handled and non-fatal — ReportViewer tolerates a layout
+  field the dataset lacks, on Linux exactly as on Windows. It is not the
+  failure. Likewise the twelve `System.IO.FileNotFoundException: Invalid Image`
+  are `Assembly.LoadFrom` probing for satellite **resource** assemblies, not
+  report images. A real fatal render ends in `LocalProcessingException` or
+  `DefinitionInvalidException`.
+- **The log is opened append-only and survives a service restart.** Truncate it
+  (`: > /run/bc-rdlc/service.log`, not `rm` — deleting it detaches the open fd
+  and the process keeps writing to nothing) before each attempt, or you will
+  read the previous layout's errors and attribute them to this one.
 
-`StandardSalesOrderConf.rdlc` declares 241 dataset fields; fields 101 and 102
-are `GlobalLocationNumber` and `GlobalLocationNumber_Lbl` — exactly the
-positions ReportViewer names. And report 1305's dataset does not contain them:
-
-- `Report.SaveAs(1305, ..., ReportFormat::Xml, ...)`, which the NST produces
-  itself with the reporting service uninvolved, emits 202 columns including 72
-  `*_Lbl` labels. **Labels transfer fine.** `GlobalLocationNumber` is not among
-  them, and empty-valued columns *are* emitted, so this is a real absence.
-- `src/Sales/Document/StandardSalesOrderConf.Report.al` in Base Application
-  28.4.53241.54387 contains **zero** occurrences of `GlobalLocationNumber`.
-
-So Microsoft's own layout declares a field Microsoft's own report does not
-produce, in the same shipped version. Nothing in that involves Mono, the
-bridge, or the gRPC transport — the report never reaches layout.
-
-**The one thing still worth checking on Windows.** Render report 1305 on a
-Windows BC 28.4 W1 container with the "Standard Sales Order Confirmation
-(detailed)" layout. If it fails there too, this is a Microsoft layout bug and
-there is nothing to do. If it renders, then the NST reconciles declared-but-
-absent layout fields into the dataset somewhere, and that reconciliation is
-what this integration is missing — which would make it ours after all. Until
-someone runs that, do not assume either way.
+And when driving the web client: a report that renders opens in the **viewer**,
+it does not download. "No download" is not "no render" — take a screenshot.
 
 ## Layout
 
