@@ -1045,6 +1045,55 @@ every `AssemblyLoadContext.Default.Resolving` and
 `AppDomain.AssemblyResolve` miss with the requesting assembly. Much cheaper
 than `BC_DEBUG_FIRSTCHANCE=1`. Both are docker-compose pass-throughs.
 
+## RDLC rendering (opt-in, `feat/native-rdlc-pdf`)
+
+RDLC works on Linux. It is off by default and costs nothing when off.
+
+```bash
+BC_WITH_RDLC=1 docker compose build bc
+BC_RDLC_RENDERER=mono BC_RDLC_TRUST_LAYOUTS=1 docker compose up -d --wait
+```
+
+Microsoft's own `Microsoft.ReportViewer.Common.dll` runs under Mono with its
+Windows text and font stack (Uniscribe, GDI metrics) replaced by a
+Pango/HarfBuzz/FreeType bridge injected with Cecil, and Microsoft's own
+`Reporting.Service.exe` serves the NST over its real gRPC endpoints. Nothing is
+reimplemented and no third-party renderer is used. `prototypes/rdlc/README.md`
+is the map; `docs/RDLC-ON-LINUX.md` is the older investigation it supersedes.
+
+Things to know before touching it:
+
+- **`BC_WITH_RDLC` builds it, `BC_RDLC_RENDERER` turns it on.** Two switches on
+  purpose: the build arg costs ~350 MB of Mono and fonts in the image, so the
+  default image stays exactly what it was. Setting the runtime var without the
+  build arg logs a clear message and changes nothing.
+- **The ReportViewer patches are pinned to assembly MVIDs.** A BC build whose
+  ReportViewer the patcher does not recognise disables the renderer and leaves
+  the tier as it would have been. That fallback is deliberate — this is opt-in
+  and must never be able to fail a boot. It also means a new BC version needs
+  `src/tools/PatchRdlc/Program.cs` re-pointed before RDLC works there.
+- **Patch #18 stays applied.** We supervise the reporting process ourselves
+  (`NativeRdlcService` + `scripts/start-rdlc-service.sh`); BC's Windows
+  side-service lifecycle stays disabled. Patch #19's no-op client is replaced
+  by #19a, which hands BC its own real gRPC client.
+- **`libgrpc_csharp_ext.x64.so` is needed by BOTH processes** — the reporting
+  service is the gRPC server and the NST is the client, and Grpc.Core looks for
+  the native next to each process's base directory. Staging it only into
+  SideServices produces a retry loop in the NST.
+- **`/run/bc-rdlc/service.log` is where render failures actually say what
+  happened.** BC maps all of them to "an internal error while rendering the
+  report", and Mono's `StackTrace.AddFrames` throws inside BC's exception
+  telemetry. `BC_RDLC_TRACE=1` adds Mono's exception trace.
+- **It runs as root, and Mono is not a CAS sandbox.** `BC_RDLC_TRUST_LAYOUTS=1`
+  is a required acknowledgement that an RDLC layout's embedded VB runs with the
+  renderer process's privileges. Do not remove that interlock.
+
+Not done: non-root operation (ReportViewer's
+`RevertImpersonationContext.Impersonate` fails as a normal user), per-run
+Unicode font fallback for mixed Arabic/Latin, and searchable RTL text — that
+last one is Microsoft's own `PDFWriter.MapGlyphToUnicodeChar`, which excludes
+RTL runs by design, not a bridge defect. Printing is out of scope.
+
 ## Relationship to `PipelinePerformanceComparison`
 
 The sibling repo `../PipelinePerformanceComparison` is the **primary consumer** of this project and the reason most of the recent patches exist. It is *not* a dependency of bc-linux — the relationship goes the other way:

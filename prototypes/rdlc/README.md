@@ -1,21 +1,31 @@
 # RDLC on Linux — the working prototype
 
-**Status: prototype, on a branch, wired into nothing.** No file here is
-referenced by `src/Dockerfile`, `scripts/entrypoint.sh`, `docker-compose.yml`
-or any workflow. Checking this branch out and building the image gives you the
-same image master gives you, with one exception noted under "Before you build"
-below. `Report.SaveAs(Pdf)` against an RDLC layout still returns `false` on a
-container built from this branch.
+**Status: working, opt-in, on a branch.** `Report.SaveAs(Pdf)` against an RDLC
+layout returns a real PDF from inside the container when the image is built
+with `--build-arg BC_WITH_RDLC=1` and run with `BC_RDLC_RENDERER=mono` plus
+`BC_RDLC_TRUST_LAYOUTS=1`. Without those the image and its behaviour are
+exactly what they were: no Mono, no size change, `SaveAs(Pdf)` still returns
+`false`.
 
-What changed is that the thing `docs/RDLC-ON-LINUX.md` said was unknown is now
-known. That document opens with "Nothing in this document is implemented" and
-stops at a `TypeLoadException` whose cause it could not identify. It is
-superseded by this directory; the parts of it that are still accurate are the
-architecture (why RDLC is a separate process) and the CAS analysis.
+Verified end to end on a cold boot of BC 28.4.53241.54387:
 
-This work came out of one long session on 2026-09-08 that ran out of quota
-partway through the NST wiring. It is recorded here so the next person starts
-from a working renderer rather than from the blocker.
+```
+$ ./scripts/run-tests.sh --app extensions/rdlc-smoke-test/RdlcSmokeTest.app \
+      --codeunit-range 70101
+  [1/1] Codeunit 70101: SaveAsPdfReturnsDocument (1.7s)
+    PASS  SaveAsPdfReturnsDocument
+1 total, 1 passed, 0 failed
+```
+
+The PDF that call produces: 24,898 bytes, 4 US Letter pages, all 120 detail
+rows, the embedded VB expression evaluated, embedded subset Liberation Sans
+regular and bold. `extensions/rdlc-smoke-test` also exposes an API page that
+returns the PDF as base64, which is how it was inspected.
+
+This supersedes `docs/RDLC-ON-LINUX.md`, which opens by saying nothing in it is
+implemented and stops at a `TypeLoadException` it could not identify. What is
+still accurate there is the architecture (why RDLC is a separate process) and
+the CAS analysis.
 
 ## What actually renders
 
@@ -44,10 +54,6 @@ AppDomain handling and protobuf layer are all Microsoft's, retained.
 
 ## What is not done
 
-- **NST wiring.** `src/StartupHook/NativeRdlcService.cs` exists and is not
-  called from anywhere. `prototypes/rdlc/service/NST-WIRING.md` has the exact
-  client constructor and `CustomReportingServiceClient` delegate contract to
-  finish it against.
 - **Non-root.** Every render above ran as UID 0. ReportViewer's
   `RevertImpersonationContext.Impersonate(IntPtr.Zero)` fails as a normal user;
   there is no Windows impersonation to revert on Linux, but it has not been
@@ -116,13 +122,23 @@ AppDomain handling and protobuf layer are all Microsoft's, retained.
   than emit a PDF with wrong filter results. That is deliberate, and it is
   worth keeping.
 
-## Before you build this branch
+## How to run it
 
-`src/StartupHook/StartupHook.csproj` has no `<Compile Include>` list, so it
-globs every `.cs` beside it — which now includes `NativeRdlcService.cs`. That
-file has never been compiled as part of `StartupHook`, and `docker compose
-build bc` on this branch will try to. If it does not compile, either fix it or
-exclude it; do not conclude the branch is broken elsewhere.
+```bash
+BC_WITH_RDLC=1 docker compose build bc
+BC_RDLC_RENDERER=mono BC_RDLC_TRUST_LAYOUTS=1 docker compose up -d --wait
+```
+
+`BC_WITH_RDLC` builds the renderer into the image; `BC_RDLC_RENDERER` turns it
+on. Both are needed. If the image was built without it, or the ReportViewer in
+that BC build is not one the patcher recognises, the entrypoint says so and
+reporting behaves exactly as it does today — an opt-in feature must not be able
+to fail a boot.
+
+When a render fails, read `/run/bc-rdlc/service.log` inside the container. BC
+maps every render failure to "an internal error while rendering the report",
+so that log is the only place the real cause appears. `BC_RDLC_TRACE=1` adds
+Mono's exception trace to it.
 
 ## Licensing, and one thing to decide
 

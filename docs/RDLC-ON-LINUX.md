@@ -12,8 +12,10 @@
 > "If it does turn out to work", and the claim that a full Cecil `Write` of
 > `Microsoft.ReportViewer.Common.dll` is not possible.
 >
-> It is still true that a container built from `master` returns `false` from
-> `Report.SaveAs(Pdf)`. The prototype is not wired into the image.
+> `Report.SaveAs(Pdf)` now works: built with `BC_WITH_RDLC=1` and run with
+> `BC_RDLC_RENDERER=mono`, an RDLC layout returns a real four-page PDF, and
+> `extensions/rdlc-smoke-test` passes under the normal test runner. The default
+> image is unchanged and still returns `false`.
 
 Parked, not abandoned. Written down so the next person starts from the blocker
 rather than from the beginning.
