@@ -236,6 +236,64 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
     log_step "Found service tier at: $SRC"
     cp -r "$SRC/." "$SERVICE_DIR/"
 
+    # --- DataSources/DataSources.json: the Xrm proxy manifest the artifact omits ---
+    #
+    # BC's NavEnvironment ctor calls
+    #   ExternalDataServiceManager.InitializeExternalDataServiceProviders("Xrm",
+    #                                                XrmServiceProvider.RegisterXrmService)
+    # which reads <service>/DataSources/DataSources.json. The artifact ships the proxy
+    # assemblies (Microsoft.Dynamics.Nav.Xrm.V*.dll) but NOT that manifest, so
+    # ExternalDataServiceConfiguration.LoadDataSourceConfiguration logs
+    # "DataSource configuration file does not exists" and returns null -- swallowed.
+    # XrmServiceProvider.registeredDll then stays empty, CrmHelper.GetProxyIdList()
+    # returns nothing, and CDS/CRM Connection Setup (pages 5330/7200) fail on first open
+    # with "The TempStack table is empty." three frames below OnOpenPage.
+    #
+    # Schema read from Microsoft.Dynamics.Nav.ExternalData.dll (27.0.38460.53934), not guessed:
+    #   DataSources[] { Type:string, Default:int, Proxy[] { Version:int, Folder, Assembly } }
+    # Newtonsoft, no property attributes -> case-insensitive binding.
+    # Type is matched with .Equals("Xrm") -- case-SENSITIVE, so it must read exactly "Xrm".
+    # The load path is Path.Combine(GetDataSourceDirectory(), Folder, Assembly), and
+    # GetDataSourceDirectory() resolves relative to the executing assembly, i.e.
+    # <service>/DataSources -- so Folder ".." points back at <service> where the DLLs are.
+    # Default>0 picks the version; 0 means "first valid wins" and BC logs a warning.
+    #
+    # Generated from the V-DLLs actually present, so a version Microsoft adds or drops is
+    # reflected automatically rather than hardcoded here.
+    write_datasources_manifest() {
+        local ds_dir="$SERVICE_DIR/DataSources"
+        local entries="" v n
+        for f in "$SERVICE_DIR"/Microsoft.Dynamics.Nav.Xrm.V*.dll; do
+            [ -f "$f" ] || continue
+            n=$(basename "$f")
+            # Microsoft.Dynamics.Nav.Xrm.V100.dll -> 100
+            v=$(printf '%s' "$n" | sed -n 's/.*\.Xrm\.V\([0-9][0-9]*\)\.dll$/\1/p')
+            [ -n "$v" ] || continue
+            [ -n "$entries" ] && entries="$entries,"
+            entries="$entries
+        { \"Version\": $v, \"Folder\": \"..\", \"Assembly\": \"$n\" }"
+        done
+        if [ -z "$entries" ]; then
+            log_step "WARNING: no Microsoft.Dynamics.Nav.Xrm.V*.dll in service dir; skipping DataSources.json"
+            return 0
+        fi
+        mkdir -p "$ds_dir"
+        cat > "$ds_dir/DataSources.json" <<DSEOF
+{
+  "DataSources": [
+    {
+      "Type": "Xrm",
+      "Default": 0,
+      "Proxy": [$entries
+      ]
+    }
+  ]
+}
+DSEOF
+        log_step "Wrote $ds_dir/DataSources.json ($(printf '%s' "$entries" | grep -c Version) Xrm proxy version(s))"
+    }
+    write_datasources_manifest
+
     # Replace Reporting Service Windows PE with a Linux .NET stub.
     # The original is a Windows-only self-contained .NET app. Without a stub, BC gets
     # "Exec format error" which crashes test codeunits that use reports, causing hundreds
