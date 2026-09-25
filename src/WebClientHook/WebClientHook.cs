@@ -523,43 +523,177 @@ internal class StartupHook
 
     private static void ApplyJmpHook(MethodBase original, MethodInfo replacement, string name)
     {
+        // Never re-apply a JMP hook: PrepareMethod against an entry point that already
+        // holds our stub segfaults inside libcoreclr on .NET 10 with no managed frames
+        // (same class of failure the NST's StartupHook.ApplyJmpHook was hardened for).
+        if (IsAlreadyJmpHooked(original, name)) return;
+
+        ValidateJmpHookAbi(original, replacement, name);
+
         RuntimeHelpers.PrepareMethod(original.MethodHandle);
         RuntimeHelpers.PrepareMethod(replacement.MethodHandle);
 
         IntPtr origFp = original.MethodHandle.GetFunctionPointer();
         IntPtr replFp = replacement.MethodHandle.GetFunctionPointer();
 
-        // Locate the compiled code behind the precode so direct calls are also hooked.
+        // Read precode bytes BEFORE overwriting to find the compiled code address.
         IntPtr compiledCode = IntPtr.Zero;
         try
         {
             byte[] precode = new byte[24];
             Marshal.Copy(origFp, precode, 0, 24);
+            Console.Error.WriteLine($"[WebClientHook]   {name} precode: {BitConverter.ToString(precode)}");
 
-            // .NET 8 x64 FixupPrecode: 49 BA [MethodDesc] FF 25 [disp32]
+            // .NET 8 x64 FixupPrecode: 49 BA [8-byte MethodDesc] FF 25 [4-byte disp32]
             if (precode[10] == 0xFF && precode[11] == 0x25)
             {
                 int disp32 = BitConverter.ToInt32(precode, 12);
                 compiledCode = Marshal.ReadIntPtr(origFp + 16 + disp32);
+                Console.Error.WriteLine($"[WebClientHook]   {name} compiled code via precode JMP: 0x{compiledCode:X}");
             }
-            else if (precode[0] == 0xFF && precode[1] == 0x25) // StubPrecode
+
+            // StubPrecode: jmp [rip+disp32] (FF 25) at offset 0
+            if (compiledCode == IntPtr.Zero && precode[0] == 0xFF && precode[1] == 0x25)
             {
                 int disp32 = BitConverter.ToInt32(precode, 2);
                 compiledCode = Marshal.ReadIntPtr(origFp + 6 + disp32);
+                Console.Error.WriteLine($"[WebClientHook]   {name} compiled code via StubPrecode: 0x{compiledCode:X}");
             }
-            else if (precode[0] == 0xE9) // relative JMP
+
+            // E9 (relative JMP) at offset 0
+            if (compiledCode == IntPtr.Zero && precode[0] == 0xE9)
             {
                 int disp32 = BitConverter.ToInt32(precode, 1);
                 compiledCode = origFp + 5 + disp32;
+                Console.Error.WriteLine($"[WebClientHook]   {name} compiled code via E9 JMP: 0x{compiledCode:X}");
+            }
+
+            // On .NET 10 the precode's target slot can hold a pointer back into the
+            // precode itself (observed on BC 29's web client: resolved to origFp+6,
+            // which then collided with the precode patch and left the original body
+            // reachable). A real method body never lives inside the precode chunk, so
+            // treat near-entry reads as "not found" and read the MethodDesc's code
+            // slot instead. Interface dispatch on .NET 10 resolves the body directly,
+            // so the body patch is the one that must land.
+            bool selfReferential = compiledCode != IntPtr.Zero
+                && compiledCode >= origFp - 64 && compiledCode <= origFp + 64;
+            if (compiledCode == IntPtr.Zero || compiledCode == origFp || selfReferential)
+            {
+                IntPtr methodDesc = original.MethodHandle.Value;
+                IntPtr codeDataPtr = Marshal.ReadIntPtr(methodDesc, 8);
+                bool codeDataValid = codeDataPtr != IntPtr.Zero && codeDataPtr != origFp
+                    && !(codeDataPtr >= origFp - 64 && codeDataPtr <= origFp + 64);
+                Console.Error.WriteLine($"[WebClientHook]   {name} precode slot {(selfReferential ? "is self-referential" : "empty")} — MethodDesc+8: 0x{codeDataPtr:X}{(codeDataValid ? "" : " (unusable)")}");
+                compiledCode = codeDataValid ? codeDataPtr : IntPtr.Zero;
             }
         }
-        catch { /* best effort */ }
+        catch (Exception dbgEx)
+        {
+            Console.Error.WriteLine($"[WebClientHook]   precode read failed: {dbgEx.Message}");
+        }
 
+        // Patch the precode entry point
         WriteJmp(origFp, replFp, name);
+
+        // Also patch the compiled code so direct calls from JIT-compiled callers are intercepted
         if (compiledCode != IntPtr.Zero && compiledCode != origFp && compiledCode != replFp)
         {
             try { WriteJmp(compiledCode, replFp, name + " (code)"); }
             catch (Exception ex) { Console.Error.WriteLine($"[WebClientHook]   compiled code patch failed: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>
+    /// True if this method's entry point already holds a JMP we wrote. Reads the entry
+    /// point WITHOUT calling PrepareMethod first — PrepareMethod is itself what dies
+    /// on an already-patched method under .NET 10.
+    /// </summary>
+    private static bool IsAlreadyJmpHooked(MethodBase original, string name)
+    {
+        try
+        {
+            IntPtr fp = original.MethodHandle.GetFunctionPointer();
+            byte[] head = new byte[6];
+            Marshal.Copy(fp, head, 0, 6);
+            bool hooked = head[0] == 0xFF && head[1] == 0x25
+                && head[2] == 0 && head[3] == 0 && head[4] == 0 && head[5] == 0;
+            if (hooked)
+                Console.Error.WriteLine($"[WebClientHook] {name} already hooked — skipping re-apply");
+            return hooked;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>How a type is passed/returned on x64, coarse enough to catch a real mismatch.</summary>
+    private enum JmpAbiClass { Void, Integer, Float, Struct }
+
+    private static JmpAbiClass ClassifyForJmpAbi(Type t)
+    {
+        if (t == typeof(void)) return JmpAbiClass.Void;
+        if (!t.IsValueType) return JmpAbiClass.Integer;
+        if (t.IsEnum) return JmpAbiClass.Integer;
+        if (t == typeof(float) || t == typeof(double)) return JmpAbiClass.Float;
+        if (t.IsPrimitive || t == typeof(IntPtr) || t == typeof(UIntPtr)) return JmpAbiClass.Integer;
+        return JmpAbiClass.Struct;
+    }
+
+    /// <summary>
+    /// Compare the hooked method's signature with the replacement's and log any way the two
+    /// disagree at the ABI level. Never throws and never refuses the hook.
+    /// </summary>
+    private static void ValidateJmpHookAbi(MethodBase original, MethodInfo replacement, string name)
+    {
+        try
+        {
+            Type originalReturn = original is MethodInfo mi ? mi.ReturnType : typeof(void);
+            var originalReturnClass = ClassifyForJmpAbi(originalReturn);
+            var replacementReturnClass = ClassifyForJmpAbi(replacement.ReturnType);
+
+            bool returnMismatch = originalReturnClass != replacementReturnClass
+                || (originalReturnClass == JmpAbiClass.Struct && originalReturn != replacement.ReturnType);
+            if (returnMismatch)
+            {
+                Console.Error.WriteLine($"[WebClientHook] ERROR: JMP hook ABI mismatch on {name}: "
+                    + $"replaced method returns {originalReturn.Name} but the replacement returns "
+                    + $"{replacement.ReturnType.Name}. The caller will read an undefined return value.");
+            }
+
+            var originalParams = original.GetParameters();
+            var replacementParams = replacement.GetParameters();
+            int expected = originalParams.Length + (original.IsStatic ? 0 : 1);
+            if (replacementParams.Length != expected)
+            {
+                Console.Error.WriteLine($"[WebClientHook] WARNING: JMP hook arity on {name}: replacement takes "
+                    + $"{replacementParams.Length} parameter(s), the replaced "
+                    + $"{(original.IsStatic ? "static" : "instance")} method needs {expected}.");
+                return;
+            }
+
+            int offset = original.IsStatic ? 0 : 1;
+            if (offset == 1 && ClassifyForJmpAbi(replacementParams[0].ParameterType) != JmpAbiClass.Integer)
+            {
+                Console.Error.WriteLine($"[WebClientHook] WARNING: JMP hook ABI on {name}: the replacement's first "
+                    + $"parameter is {replacementParams[0].ParameterType.Name}, but it receives 'this'.");
+            }
+            for (int i = 0; i < originalParams.Length; i++)
+            {
+                Type a = originalParams[i].ParameterType;
+                Type b = replacementParams[i + offset].ParameterType;
+                var ca = ClassifyForJmpAbi(a);
+                var cb = ClassifyForJmpAbi(b);
+                if (ca != cb || (ca == JmpAbiClass.Struct && a != b))
+                {
+                    Console.Error.WriteLine($"[WebClientHook] WARNING: JMP hook ABI on {name}: parameter {i} is "
+                        + $"{a.Name} on the replaced method but {b.Name} on the replacement.");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WebClientHook] JMP hook ABI check failed for {name}: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
