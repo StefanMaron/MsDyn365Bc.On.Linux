@@ -566,10 +566,10 @@ internal class StartupHook
             PatchWatsonReporting(args.LoadedAssembly);
         }
 
-        // Patch #27: move the health API off the client services port.
+        // Patch #33: give colliding API endpoints their own ports.
         if (name == "Microsoft.Dynamics.Nav.Service.AspNetCore")
         {
-            PatchHealthApiPort(args.LoadedAssembly);
+            PatchApiHostPorts(args.LoadedAssembly);
         }
 
         // Patch #14: Fix Cecil type-forwarding crash in server-side AL compiler.
@@ -1911,31 +1911,36 @@ internal class StartupHook
     }
 
     // ========================================================================
-    // Patch #27: health API collides with client services on the client services port.
-    // BC hosts two API endpoints on ClientServicesPort, http://+:7085/BC/client and
-    // http://+:7085/BC/client/health. HTTP.SYS routes both by URL prefix on one port;
-    // Kestrel cannot bind a port twice, so the second Open() throws AddressInUseException
-    // and the whole NST service start fails, leaving no listener at all.
-    // Fix: hand the health endpoint its own port. It is an internal endpoint and nothing
-    // in this image publishes or probes it.
-    internal const int HealthApiPortOffset = 10000;
+    // Patch #33: BC hosts several API endpoints on one port, separated by URL path, for
+    // example http://+:7048/BC/ODataV4 and http://+:7048/BC/api/webhooks, or
+    // http://+:7085/BC/client and http://+:7085/BC/client/health. HTTP.SYS routes those by
+    // prefix on a single port. Kestrel cannot bind a port twice, so the second Open()
+    // throws AddressInUseException and the whole NST service start fails, leaving no
+    // listener at all. Observed on BC 30: no 7045, 7047, 7048, 7049 or 7085.
+    // Fix: hand every endpoint after the first on a given port its own port. The primary
+    // endpoints (client, dev, ODataV4) are created first and keep their configured ports;
+    // the auxiliary ones (health, webhooks) move. Each move is logged, so a wrong one is
+    // visible rather than silent. This mirrors what HttpSysStub already does for the hosts
+    // that go through UseHttpSys; these hosts use Kestrel directly and bypass it.
+    internal const int ApiPortOffset = 10000;
+    private static readonly Dictionary<string, int> _apiHostPorts = new Dictionary<string, int>();
+    private static readonly HashSet<int> _claimedApiPorts = new HashSet<int>();
 
-    private static void PatchHealthApiPort(Assembly aspNetCoreAsm)
+    private static void PatchApiHostPorts(Assembly aspNetCoreAsm)
     {
         try
         {
             var hostType = aspNetCoreAsm.GetType("Microsoft.Dynamics.Nav.Service.AspNetCore.AspNetCoreApiHost");
             if (hostType == null)
             {
-                Console.WriteLine("[StartupHook] Patch #27: AspNetCoreApiHost not found");
+                Console.WriteLine("[StartupHook] Patch #33: AspNetCoreApiHost not found");
                 return;
             }
 
-            var original = hostType.GetMethod("CreateBaseAddress",
-                BindingFlags.Public | BindingFlags.Static);
+            var original = hostType.GetMethod("CreateBaseAddress", BindingFlags.Public | BindingFlags.Static);
             if (original == null)
             {
-                Console.WriteLine("[StartupHook] Patch #27: CreateBaseAddress not found");
+                Console.WriteLine("[StartupHook] Patch #33: CreateBaseAddress not found");
                 return;
             }
 
@@ -1945,18 +1950,34 @@ internal class StartupHook
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[StartupHook] Patch #27 failed: {ex.GetType().Name}: {ex.Message}");
+            Console.WriteLine($"[StartupHook] Patch #33 failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
     private static Uri CreateBaseAddressReplacement(bool useSsl, string machineName, int portNumber,
         string serverInstance, string name)
     {
-        if (name != null && name.EndsWith("health", StringComparison.OrdinalIgnoreCase))
+        // Open() and Resume() both call this for the same host, so the assignment has to be
+        // stable: look it up by endpoint before allocating anything.
+        string key = serverInstance + "/" + name;
+        lock (_apiHostPorts)
         {
-            int moved = portNumber + HealthApiPortOffset;
-            Console.WriteLine($"[StartupHook] Patch #27: health API {portNumber} -> {moved} (avoids the client services port)");
-            portNumber = moved;
+            int assigned;
+            if (_apiHostPorts.TryGetValue(key, out assigned))
+            {
+                portNumber = assigned;
+            }
+            else
+            {
+                if (!_claimedApiPorts.Add(portNumber))
+                {
+                    int moved = portNumber + ApiPortOffset;
+                    while (!_claimedApiPorts.Add(moved)) moved++;
+                    Console.WriteLine($"[StartupHook] Patch #33: {key} moved {portNumber} -> {moved} (port already taken)");
+                    portNumber = moved;
+                }
+                _apiHostPorts[key] = portNumber;
+            }
         }
 
         string scheme = useSsl ? Uri.UriSchemeHttps : Uri.UriSchemeHttp;
@@ -3817,7 +3838,7 @@ internal class StartupHook
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[StartupHook] Patch #27 failed: {ex.GetType().Name}: {ex.Message}");
+            Console.WriteLine($"[StartupHook] Patch #33 failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
