@@ -566,6 +566,12 @@ internal class StartupHook
             PatchWatsonReporting(args.LoadedAssembly);
         }
 
+        // Patch #27: move the health API off the client services port.
+        if (name == "Microsoft.Dynamics.Nav.Service.AspNetCore")
+        {
+            PatchHealthApiPort(args.LoadedAssembly);
+        }
+
         // Patch #14: Fix Cecil type-forwarding crash in server-side AL compiler.
         // CecilDotNetTypeLoader.IsTypeForwardingCircular throws NullRef when
         // following type-forwarding chains in netstandard.dll on Linux.
@@ -1905,6 +1911,59 @@ internal class StartupHook
     }
 
     // ========================================================================
+    // Patch #27: health API collides with client services on the client services port.
+    // BC hosts two API endpoints on ClientServicesPort, http://+:7085/BC/client and
+    // http://+:7085/BC/client/health. HTTP.SYS routes both by URL prefix on one port;
+    // Kestrel cannot bind a port twice, so the second Open() throws AddressInUseException
+    // and the whole NST service start fails, leaving no listener at all.
+    // Fix: hand the health endpoint its own port. It is an internal endpoint and nothing
+    // in this image publishes or probes it.
+    internal const int HealthApiPortOffset = 10000;
+
+    private static void PatchHealthApiPort(Assembly aspNetCoreAsm)
+    {
+        try
+        {
+            var hostType = aspNetCoreAsm.GetType("Microsoft.Dynamics.Nav.Service.AspNetCore.AspNetCoreApiHost");
+            if (hostType == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #27: AspNetCoreApiHost not found");
+                return;
+            }
+
+            var original = hostType.GetMethod("CreateBaseAddress",
+                BindingFlags.Public | BindingFlags.Static);
+            if (original == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #27: CreateBaseAddress not found");
+                return;
+            }
+
+            var replacement = typeof(StartupHook).GetMethod(nameof(CreateBaseAddressReplacement),
+                BindingFlags.NonPublic | BindingFlags.Static);
+            ApplyJmpHook(original, replacement, "AspNetCoreApiHost.CreateBaseAddress");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #27 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static Uri CreateBaseAddressReplacement(bool useSsl, string machineName, int portNumber,
+        string serverInstance, string name)
+    {
+        if (name != null && name.EndsWith("health", StringComparison.OrdinalIgnoreCase))
+        {
+            int moved = portNumber + HealthApiPortOffset;
+            Console.WriteLine($"[StartupHook] Patch #27: health API {portNumber} -> {moved} (avoids the client services port)");
+            portNumber = moved;
+        }
+
+        string scheme = useSsl ? Uri.UriSchemeHttps : Uri.UriSchemeHttp;
+        return new Uri(FormattableString.Invariant(
+            $"{scheme}{Uri.SchemeDelimiter}{machineName}:{portNumber}/{serverInstance}/{name}").TrimEnd('/'));
+    }
+
     // Patch #18: SetupSideServices — skip Reporting Service startup on Linux.
     // The Reporting Service (.exe) is a Windows PE binary. Without this patch,
     // BC crashes with SideServiceProcessException on startup. Making it a no-op
