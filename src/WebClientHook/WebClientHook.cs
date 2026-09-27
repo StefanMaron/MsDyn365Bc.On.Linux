@@ -544,7 +544,15 @@ internal class StartupHook
             Marshal.Copy(origFp, precode, 0, 24);
             Console.Error.WriteLine($"[WebClientHook]   {name} precode: {BitConverter.ToString(precode)}");
 
-            // .NET 8 x64 FixupPrecode: 49 BA [8-byte MethodDesc] FF 25 [4-byte disp32]
+            // This probe looks for a layout carrying the MethodDesc as an immediate,
+            // 49 BA [imm64] FF 25 [disp32], so that byte 10 starts the jmp. Neither .NET
+            // 8.0.31 nor .NET 10.0.12 produces that shape on x64. Both emit:
+            //   offset 0   FF 25 <disp32>      jmp  [rip+disp32]   entry
+            //   offset 6   4C 8B 15 <disp32>   mov  r10, [rip+..]  MethodDesc
+            //   offset 13  FF 25 <disp32>      jmp  [rip+disp32]   fixup thunk
+            // which makes byte 10 part of a displacement (0x3F observed), not an opcode,
+            // so this never matches there and the StubPrecode probe below is what fires.
+            // Kept as a fallback for layouts not seen here; it costs two comparisons.
             if (precode[10] == 0xFF && precode[11] == 0x25)
             {
                 int disp32 = BitConverter.ToInt32(precode, 12);
