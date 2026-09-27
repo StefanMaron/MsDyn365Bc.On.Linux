@@ -251,6 +251,11 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
     mkdir -p "/usr/share/Microsoft/Microsoft Dynamics NAV/$NAV_DIR/Server"
 
     # Patch CustomSettings.config
+    # ManagementApiServicesEnabled is forced off too: on Linux its AspNetCoreApiHost
+    # calls File.Delete on a Unix socket path whose parent directory does not exist,
+    # which throws DirectoryNotFoundException rather than being ignored, and the NST
+    # reports "The service MicrosoftDynamicsNavServer failed to start". Observed on
+    # BC 30. Nothing this image needs uses the Admin API.
     # ManagementServicesEnabled is forced off: with it on, NST crashes at startup
     # (Microsoft.IdentityModel.S2S.Configuration.ConfigurationException: S2S40011 -
     # "At least one inbound policy should be provided") because the Admin API's AAD
@@ -272,6 +277,7 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
         -e "s|ManagementServicesPort\" value=\"[^\"]*\"|ManagementServicesPort\" value=\"7045\"|" \
         -e "s|ManagementApiServicesPort\" value=\"[^\"]*\"|ManagementApiServicesPort\" value=\"7086\"|" \
         -e "s|ManagementServicesEnabled\" value=\"[^\"]*\"|ManagementServicesEnabled\" value=\"false\"|" \
+        -e "s|ManagementApiServicesEnabled\" value=\"[^\"]*\"|ManagementApiServicesEnabled\" value=\"false\"|" \
         -e "s|DeveloperServicesPort\" value=\"[^\"]*\"|DeveloperServicesPort\" value=\"7049\"|" \
         -e "s|ServerInstance\" value=\"[^\"]*\"|ServerInstance\" value=\"BC\"|" \
         -e "s|ExtensionAllowedTargetLevel\" value=\"[^\"]*\"|ExtensionAllowedTargetLevel\" value=\"OnPrem\"|" \
