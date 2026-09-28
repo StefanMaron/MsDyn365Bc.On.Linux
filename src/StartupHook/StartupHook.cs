@@ -1923,6 +1923,8 @@ internal class StartupHook
     // visible rather than silent. This mirrors what HttpSysStub already does for the hosts
     // that go through UseHttpSys; these hosts use Kestrel directly and bypass it.
     internal const int ApiPortOffset = 10000;
+    // ODataServicesPort + 4 is where the REST API's host port is mapped.
+    internal const int ApiPortSpacing = 4;
     private static readonly Dictionary<string, int> _apiHostPorts = new Dictionary<string, int>();
     private static readonly HashSet<int> _claimedApiPorts = new HashSet<int>();
 
@@ -1971,7 +1973,14 @@ internal class StartupHook
             {
                 if (!_claimedApiPorts.Add(portNumber))
                 {
-                    int moved = portNumber + ApiPortOffset;
+                    // The REST API is a published endpoint: tooling maps a host port to
+                    // ODataServicesPort + 4 for it. Send it there rather than into the
+                    // spare range, or the mapping points at nothing. The auxiliary
+                    // endpoints (health, webhooks, mcp) have no published port, so any
+                    // free one will do.
+                    int moved = name != null && name.TrimEnd('/').EndsWith("api", StringComparison.OrdinalIgnoreCase)
+                        ? portNumber + ApiPortSpacing
+                        : portNumber + ApiPortOffset;
                     while (!_claimedApiPorts.Add(moved)) moved++;
                     Console.WriteLine($"[StartupHook] Patch #33: {key} moved {portNumber} -> {moved} (port already taken)");
                     portNumber = moved;
