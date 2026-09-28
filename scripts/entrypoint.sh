@@ -322,6 +322,19 @@ else
     log_step "Service tier already set up."
 fi
 
+# Reconcile the database name on every boot, not only on first setup. The block
+# above runs once per service tier, so without this an existing instance keeps
+# whichever database it was first configured with and changing BC_DATABASE
+# silently does nothing.
+NST_CONFIG="$SERVICE_DIR/CustomSettings.config"
+if [ -f "$NST_CONFIG" ]; then
+    CURRENT_DB=$(grep -o 'DatabaseName" value="[^"]*"' "$NST_CONFIG" | sed 's/.*value="\(.*\)"/\1/')
+    if [ -n "$CURRENT_DB" ] && [ "$CURRENT_DB" != "$BC_DATABASE" ]; then
+        log_step "Repointing service tier from database '$CURRENT_DB' to '$BC_DATABASE'"
+        sed -i "s|DatabaseName\" value=\"[^\"]*\"|DatabaseName\" value=\"$BC_DATABASE\"|" "$NST_CONFIG"
+    fi
+fi
+
 # Copy WebClient DLLs needed for TestPage (page testability in tests).
 # TestPageClient.dll depends on client framework DLLs that are only in WebClient.
 WC_DIR=$(find "$ARTIFACTS/platform/WebClient" -name "Microsoft.Dynamics.Nav.Client.Actions.dll" -printf "%h\n" 2>/dev/null | head -1)
