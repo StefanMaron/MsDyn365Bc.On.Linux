@@ -98,6 +98,8 @@ services:
       - "${BC_WEBCLIENT_PORT:-8080}:8080"
     environment:
       BC_VERSION: ${BC_VERSION:-28.4}
+      # Per-instance database, so several BC versions can share one SQL Server.
+      BC_DATABASE: ${BC_DATABASE:-CRONUS}
       BC_COUNTRY: ${BC_COUNTRY:-w1}
       BC_TYPE: ${BC_TYPE:-sandbox}
       SA_PASSWORD: ${SA_PASSWORD:-Passw0rd123!}

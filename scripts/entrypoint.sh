@@ -36,6 +36,11 @@ BC_VERSION="${BC_VERSION:-27.5.46862.48004}"
 BC_COUNTRY="${BC_COUNTRY:-w1}"
 SA_PASSWORD="${SA_PASSWORD:-Passw0rd123!}"
 BC_DB_PASSWORD="${BC_DB_PASSWORD:-Test1234}"
+# Database name. Defaults to CRONUS so existing setups are unchanged. Set it
+# per instance so several BC versions can share one SQL Server without the
+# next one attaching to the previous one's schema and dying with
+# "must be converted".
+BC_DATABASE="${BC_DATABASE:-CRONUS}"
 BC_DB_USER="${BC_DB_USER:-bctest}"
 SQL_SERVER="${SQL_SERVER:-sql}"
 ARTIFACTS="/bc/artifacts"
@@ -259,7 +264,7 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
     CONFIG="$SERVICE_DIR/CustomSettings.config"
     sed -i \
         -e "s|DatabaseServer\" value=\"[^\"]*\"|DatabaseServer\" value=\"$SQL_SERVER\"|" \
-        -e "s|DatabaseName\" value=\"[^\"]*\"|DatabaseName\" value=\"CRONUS\"|" \
+        -e "s|DatabaseName\" value=\"[^\"]*\"|DatabaseName\" value=\"$BC_DATABASE\"|" \
         -e "s|DatabaseUserName\" value=\"[^\"]*\"|DatabaseUserName\" value=\"$BC_DB_USER\"|" \
         -e "s|ProtectedDatabasePassword\" value=\"[^\"]*\"|ProtectedDatabasePassword\" value=\"$BC_DB_PASSWORD\"|" \
         -e "s|ClientServicesCredentialType\" value=\"[^\"]*\"|ClientServicesCredentialType\" value=\"NavUserPassword\"|" \
@@ -625,9 +630,9 @@ ALTER SERVER ROLE sysadmin ADD MEMBER [$BC_DB_USER];
 "
 
 # Restore database if needed
-DB_EXISTS=$($SQLCMD -h -1 -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.databases WHERE name='CRONUS'" 2>/dev/null | tr -d '[:space:]')
+DB_EXISTS=$($SQLCMD -h -1 -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.databases WHERE name='$BC_DATABASE'" 2>/dev/null | tr -d '[:space:]')
 if [ "$DB_EXISTS" != "1" ]; then
-    log_step "Restoring CRONUS database..."
+    log_step "Restoring $BC_DATABASE database..."
     BAK_PATH="$ARTIFACTS/app/$DB_FILE"
     if [ ! -f "$BAK_PATH" ]; then
         log_step "ERROR: Database backup not found at $BAK_PATH"
@@ -641,16 +646,16 @@ if [ "$DB_EXISTS" != "1" ]; then
     log_step "DB logical names: data='$DATA_NAME' log='$LOG_NAME'"
 
     $SQLCMD -Q "
-        RESTORE DATABASE [CRONUS] FROM DISK='$BAK_PATH'
-        WITH MOVE '$DATA_NAME' TO '/var/opt/mssql/data/CRONUS.mdf',
-             MOVE '$LOG_NAME' TO '/var/opt/mssql/data/CRONUS_log.ldf'
+        RESTORE DATABASE [$BC_DATABASE] FROM DISK='$BAK_PATH'
+        WITH MOVE '$DATA_NAME' TO '/var/opt/mssql/data/$BC_DATABASE.mdf',
+             MOVE '$LOG_NAME' TO '/var/opt/mssql/data/${BC_DATABASE}_log.ldf'
     "
-    log_step "CRONUS restored."
+    log_step "$BC_DATABASE restored."
 else
-    log_step "CRONUS already exists."
+    log_step "$BC_DATABASE already exists."
 fi
 
-SQLCMD_DB="sqlcmd -S $SQL_SERVER -U $BC_DB_USER -P $BC_DB_PASSWORD -d CRONUS -C -No"
+SQLCMD_DB="sqlcmd -S $SQL_SERVER -U $BC_DB_USER -P $BC_DB_PASSWORD -d $BC_DATABASE -C -No"
 
 # Encryption key
 $SQLCMD_DB -Q "
@@ -735,12 +740,12 @@ $SQLCMD_DB -Q "UPDATE [User Personalization] SET [Time Zone] = N'UTC' WHERE [Tim
 # SQL performance tuning for CI/CD — disable safety overhead not needed for test runs
 # ALTER DATABASE must run from master context, not from within the target database
 $SQLCMD -Q "
-ALTER DATABASE CRONUS SET QUERY_STORE = OFF;
-ALTER DATABASE CRONUS SET AUTO_UPDATE_STATISTICS OFF;
-ALTER DATABASE CRONUS SET AUTO_UPDATE_STATISTICS_ASYNC OFF;
-ALTER DATABASE CRONUS SET AUTO_CREATE_STATISTICS OFF;
-ALTER DATABASE CRONUS SET PAGE_VERIFY NONE;
-ALTER DATABASE CRONUS SET DELAYED_DURABILITY = FORCED;
+ALTER DATABASE [$BC_DATABASE] SET QUERY_STORE = OFF;
+ALTER DATABASE [$BC_DATABASE] SET AUTO_UPDATE_STATISTICS OFF;
+ALTER DATABASE [$BC_DATABASE] SET AUTO_UPDATE_STATISTICS_ASYNC OFF;
+ALTER DATABASE [$BC_DATABASE] SET AUTO_CREATE_STATISTICS OFF;
+ALTER DATABASE [$BC_DATABASE] SET PAGE_VERIFY NONE;
+ALTER DATABASE [$BC_DATABASE] SET DELAYED_DURABILITY = FORCED;
 " 2>/dev/null
 # Disable change tracking (must disable on tables first, from CRONUS context)
 $SQLCMD_DB -Q "
@@ -751,7 +756,7 @@ JOIN sys.tables t ON ct.object_id = t.object_id
 JOIN sys.schemas s ON t.schema_id = s.schema_id;
 IF LEN(@sql) > 0 EXEC sp_executesql @sql;
 " 2>/dev/null
-$SQLCMD -Q "ALTER DATABASE CRONUS SET CHANGE_TRACKING = OFF;" 2>/dev/null
+$SQLCMD -Q "ALTER DATABASE [$BC_DATABASE] SET CHANGE_TRACKING = OFF;" 2>/dev/null
 log_step "SQL tuned for CI/CD (query store, stats, page verify, change tracking OFF)"
 
 # Clear pre-installed apps before BC starts.
@@ -1054,12 +1059,12 @@ log_step "Database ready ($BC_SERVER_USERNAME). Step 3 (DB setup): $(($(date +%s
 cd "$SERVICE_DIR"
 # Verify SQL is still accessible before starting BC
 log_step "Verifying SQL connection..."
-if sqlcmd -S "$SQL_SERVER" -U "$BC_DB_USER" -P "$BC_DB_PASSWORD" -d CRONUS -C -No -Q "SELECT 1" &>/dev/null; then
+if sqlcmd -S "$SQL_SERVER" -U "$BC_DB_USER" -P "$BC_DB_PASSWORD" -d "$BC_DATABASE" -C -No -Q "SELECT 1" &>/dev/null; then
     log_step "SQL connection verified."
 else
     log_step "ERROR: SQL connection failed! Retrying..."
     sleep 5
-    sqlcmd -S "$SQL_SERVER" -U "$BC_DB_USER" -P "$BC_DB_PASSWORD" -d CRONUS -C -No -Q "SELECT 1" || {
+    sqlcmd -S "$SQL_SERVER" -U "$BC_DB_USER" -P "$BC_DB_PASSWORD" -d "$BC_DATABASE" -C -No -Q "SELECT 1" || {
         log_step "FATAL: Cannot connect to SQL"
         exit 1
     }
@@ -1166,7 +1171,7 @@ if [ -n "$PLATFORM_VER" ]; then
     # above) and have the seeder ALSO write each Merkle json under the
     # runtime-package-id name.
     R2R_PKGMAP="/tmp/r2r-pkgmap.csv"
-    $SQLCMD -d CRONUS -h -1 -W -Q "SET NOCOUNT ON; SELECT LOWER(CONVERT(varchar(36),[ID])) + ',' + UPPER(REPLACE(CONVERT(varchar(36),[Runtime Package ID]),'-','')) FROM [Published Application]" > "$R2R_PKGMAP" 2>/dev/null || : > "$R2R_PKGMAP"
+    $SQLCMD -d "$BC_DATABASE" -h -1 -W -Q "SET NOCOUNT ON; SELECT LOWER(CONVERT(varchar(36),[ID])) + ',' + UPPER(REPLACE(CONVERT(varchar(36),[Runtime Package ID]),'-','')) FROM [Published Application]" > "$R2R_PKGMAP" 2>/dev/null || : > "$R2R_PKGMAP"
     R2R_SEEDED=0
     R2R_FILTERED=0
     R2R_FAILED=0
