@@ -383,7 +383,10 @@ _sqlcmd() { docker compose exec -T sql /opt/mssql-tools18/bin/sqlcmd -b -S local
 # job keeps the backup path, and so does the first restore after any reboot.
 # Developer edition supports snapshots and is what this compose file gets by not
 # setting MSSQL_PID; Express does not, which is why every failure here is soft.
-DB_SNAP=CRONUS_bcsnap
+# Matches the entrypoint: the database name is configurable so several BC
+# versions can share one SQL Server.
+BC_DATABASE="${BC_DATABASE:-CRONUS}"
+DB_SNAP="${BC_DATABASE}_bcsnap"
 
 # Logged because the mapping count was the leading theory for what the restore
 # scales with, and measuring it is what killed the theory: it moves ~10% across
@@ -428,9 +431,9 @@ _create_db_snapshot() {
     -- (SC2140) and the next edit inside such a region would not be harmless.
     DECLARE @f nvarchar(max) = STUFF((
       SELECT ', (NAME = [' + name + '], FILENAME = ''/var/opt/mssql/data/' + name + '_bcsnap.ss'')'
-      FROM sys.master_files WHERE database_id = DB_ID('CRONUS') AND type_desc = 'ROWS'
+      FROM sys.master_files WHERE database_id = DB_ID('$BC_DATABASE') AND type_desc = 'ROWS'
       FOR XML PATH('')), 1, 2, '');
-    EXEC('CREATE DATABASE [$DB_SNAP] ON ' + @f + ' AS SNAPSHOT OF [CRONUS]');" 2>&1); then
+    EXEC('CREATE DATABASE [$DB_SNAP] ON ' + @f + ' AS SNAPSHOT OF [$BC_DATABASE]');" 2>&1); then
     log "  (no database snapshot: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140))"
     log "  restores will rebuild from the backup — correct, just slower"
     return 0
@@ -441,24 +444,24 @@ _create_db_snapshot() {
 # Non-zero means "no usable snapshot, do it the long way" — never fatal.
 _revert_db_snapshot() {
   [ "${BC_SNAPSHOT_DB_REVERT:-1}" = "1" ] || return 1
-  # Both must exist: the snapshot alone is meaningless if CRONUS was dropped,
+  # Both must exist: the snapshot alone is meaningless if the database was dropped,
   # and a container recreated since `create` has neither.
   _sqlcmd -h -1 -W -Q "SET NOCOUNT ON; SELECT CASE WHEN DB_ID('$DB_SNAP') IS NOT NULL
-    AND DB_ID('CRONUS') IS NOT NULL THEN 1 ELSE 0 END" 2>/dev/null | grep -q '^1' || return 1
+    AND DB_ID('$BC_DATABASE') IS NOT NULL THEN 1 ELSE 0 END" 2>/dev/null | grep -q '^1' || return 1
   local out
   # SINGLE_USER first: reverting needs exclusive access, and BC is stopped at
   # this point but its sessions may not have drained. MULTI_USER is restored on
   # both paths, or the database would be left unusable by the restored NST.
   if ! out=$(_sqlcmd -Q "
-    ALTER DATABASE [CRONUS] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    ALTER DATABASE [$BC_DATABASE] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
     BEGIN TRY
-      RESTORE DATABASE [CRONUS] FROM DATABASE_SNAPSHOT = '$DB_SNAP';
+      RESTORE DATABASE [$BC_DATABASE] FROM DATABASE_SNAPSHOT = '$DB_SNAP';
     END TRY
     BEGIN CATCH
-      ALTER DATABASE [CRONUS] SET MULTI_USER;
+      ALTER DATABASE [$BC_DATABASE] SET MULTI_USER;
       THROW;
     END CATCH;
-    ALTER DATABASE [CRONUS] SET MULTI_USER;" 2>&1); then
+    ALTER DATABASE [$BC_DATABASE] SET MULTI_USER;" 2>&1); then
     log "  database revert failed, rebuilding from the backup instead:"
     printf '%s\n' "$out" | tail -4 >&2
     return 1
@@ -797,7 +800,7 @@ create() {
   # throws away the only explanation of a failed backup. -b makes the exit code
   # meaningful; this makes the reason visible.
   local bkout
-  if ! bkout=$(_sqlcmd -Q "BACKUP DATABASE [CRONUS] TO DISK='/sqlsnap/cronus.bak' WITH COPY_ONLY, INIT, COMPRESSION" 2>&1); then
+  if ! bkout=$(_sqlcmd -Q "BACKUP DATABASE [$BC_DATABASE] TO DISK='/sqlsnap/$BC_DATABASE.bak' WITH COPY_ONLY, INIT, COMPRESSION" 2>&1); then
     log "BACKUP DATABASE failed:"; echo "$bkout" | tail -6 >&2
     die "could not back up the database"
   fi
@@ -932,9 +935,9 @@ restore() {
   fi
   local rsout
   if ! rsout=$(_sqlcmd -Q "
-    RESTORE DATABASE [CRONUS] FROM DISK='/sqlsnap/cronus.bak'
-    WITH MOVE '$d' TO '/var/opt/mssql/data/CRONUS.mdf',
-         MOVE '$l' TO '/var/opt/mssql/data/CRONUS_log.ldf', REPLACE" 2>&1); then
+    RESTORE DATABASE [$BC_DATABASE] FROM DISK='/sqlsnap/$BC_DATABASE.bak'
+    WITH MOVE '$d' TO '/var/opt/mssql/data/$BC_DATABASE.mdf',
+         MOVE '$l' TO '/var/opt/mssql/data/${BC_DATABASE}_log.ldf', REPLACE" 2>&1); then
     log "RESTORE DATABASE failed — cold boot:"; echo "$rsout" | tail -6 >&2
     return 1
   fi

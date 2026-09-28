@@ -76,7 +76,7 @@ EXPIRED_USER_BEFORE="${EXPIRED_USER}_BEFORE"
 sql() {
     "${COMPOSE[@]}" exec -T bc /opt/mssql-tools18/bin/sqlcmd \
         -S "${SQL_SERVER:-sql}" -U sa -P "${SA_PASSWORD:-Passw0rd123!}" \
-        -C -No -d CRONUS -b -Q "$1"
+        -C -No -d "${BC_DATABASE:-CRONUS}" -b -Q "$1"
 }
 
 cleanup() {
