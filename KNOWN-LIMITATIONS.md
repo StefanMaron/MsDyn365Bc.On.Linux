@@ -413,3 +413,51 @@ at most three finalizer-reclaimed wait events per NavDatabase.
 Both patches shape-check the fields they reasoned about and skip themselves
 with a log line if Microsoft changes the type, so a future BC that gives these
 types a real resource to release will not silently leak it.
+
+## ~~Extensions install with none of their control add-ins, permission sets, web services, report layouts, or profiles registered~~ (FIXED — Patch #33)
+
+**Symptom**: a control add-in used on a page either fails with "The page
+contains a control add-in that is not permitted. Contact your system
+administrator." or renders as plain text (the control's name) instead of
+the actual control. Found while getting a custom control add-in working in
+the web client PoC, but the same underlying gap silently drops an
+extension's XML permission sets, web services, report layouts, and
+profiles too — not just control add-ins, and not specific to the web
+client. It affects every extension installed on this platform, on every
+BC version.
+
+**Cause**: `NavAppPackageReader.ReadDirectoryFilePaths`
+(`Microsoft.Dynamics.Nav.CodeAnalysis.dll`) locates an extension's control
+add-ins, permission sets, web services, report layouts, and profiles
+inside the `.app` package by comparing each part's directory against a
+fixed name (e.g. `"addin"`):
+
+```csharp
+string.Equals(Path.GetDirectoryName(file)?.Trim('\\'), directory, OrdinalIgnoreCase)
+```
+
+Package part names start with a slash (`/addin/controladdins.dock`). On
+Windows, `GetDirectoryName` returns `\addin` and the trim leaves `addin`,
+so it matches. On Linux it returns `/addin` (forward slash), the
+backslash-only trim does nothing, and the comparison never matches
+anything — so `ReadDirectoryFilePaths` returns an empty list for every
+directory, on every extension, every time. Microsoft's own control
+add-ins only appear to work in this environment because their
+registration rows ship pre-populated in the demo database, which was
+built on Windows.
+
+**Patch #33** hooks `ReadDirectoryFilePaths` to do the same comparison
+after normalizing `/` to `\` first, producing exactly the Windows result.
+Only affects extensions installed or upgraded after the hook is active —
+anything installed before needs a reinstall to pick up its registrations.
+
+Verified with a minimal test extension (one page hosting one control
+add-in): `[NAV App Tenant Add-In]` had 0 rows for it before the patch and
+1 row (with a real resource blob) after a version-bumped reinstall, and
+the control add-in actually rendered in a real browser.
+
+Because this changes what gets registered on *every* extension install —
+not just control add-ins — a `PipelinePerformanceComparison`/BCApps sweep
+is worth running before treating it as fully validated at scale; it was
+verified narrowly (one control add-in, one extension), not against the
+full corpus this repo's CI matrix exercises.
