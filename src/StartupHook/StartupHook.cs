@@ -227,6 +227,16 @@ using System.Threading.Tasks;
 ///   = null` is redundant once the owner is going away.
 ///   Method body verified byte-identical on BC 27.0 and 28.0.
 ///
+/// Patch #33: NavAppPackageReader.ReadDirectoryFilePaths (Nav.CodeAnalysis.dll)
+///   Picks the package parts that sit directly in addin/, perm/, serv/, replay/ or profile/
+///   by comparing Path.GetDirectoryName(part).Trim('\\') with the folder name. Part names
+///   start with '/', so on Linux the result is "/addin" and nothing ever matches. Installing
+///   an extension therefore never registered its control add-ins in [NAV App Tenant Add-In]
+///   (web client: "control add-in that is not permitted", or the usercontrol's name drawn as
+///   plain text), nor its XML permission sets, web services, report layouts or profiles.
+///   Fix: normalise '/' to '\' before the same comparison — the Windows result exactly.
+///   Only affects apps installed after the hook is active; reinstall anything installed before.
+///
 /// JMP hooks work ONLY on BC methods (JIT-compiled). BCL methods are ReadyToRun pre-compiled
 /// and cannot be patched this way.
 ///
@@ -574,6 +584,9 @@ internal class StartupHook
         if (name == "Microsoft.Dynamics.Nav.CodeAnalysis")
         {
             PatchCecilTypeForwarding(args.LoadedAssembly);
+            // Patch #33: NavAppPackageReader's per-folder lookup only strips '\', so on
+            // Linux it finds nothing in addin/, perm/, serv/, replay/ or profile/.
+            PatchNavAppPackageReaderDirectoryPaths(args.LoadedAssembly);
         }
 
         // Patch Cecil's CheckFileName to not throw on empty paths.
@@ -4538,6 +4551,91 @@ internal class StartupHook
         {
             Console.WriteLine($"[StartupHook] Patch #29 failed: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    // ========================================================================
+    // Patch #33: NavAppPackageReader.ReadDirectoryFilePaths (Nav.CodeAnalysis.dll)
+    // ------------------------------------------------------------------------
+    // The .app package's table of contents lists parts as "/addin/controladdins.dock",
+    // "/perm/...", "/serv/...". ReadDirectoryFilePaths picks the parts that sit
+    // directly in one folder with:
+    //
+    //   string.Equals(Path.GetDirectoryName(file)?.Trim('\\'), directory, OrdinalIgnoreCase)
+    //
+    // On Windows GetDirectoryName("/addin/x.dock") is "\addin" and the Trim leaves
+    // "addin". On Linux it is "/addin", the Trim does nothing, and the comparison
+    // fails for every part. So every caller gets an empty list:
+    //
+    //   ReadControlAddinPaths      ("addin")   -> NavAppControlAddInManagement
+    //   ReadPermissionSetPaths     ("perm")    -> NavAppPermissionManagement
+    //   ReadWebServicePaths        ("serv")    -> NavAppWebServiceManagement
+    //   ReadCustomReportLayoutPaths("replay")  -> NavAppReportLayoutManagement
+    //   ReadProfilePaths           ("profile")
+    //
+    // The visible symptom is control add-ins. Installing an extension never writes
+    // its add-ins to [NAV App Tenant Add-In], so ControlAddInMetadataProvider finds
+    // no record, appends "The page contains a control add-in that is not permitted"
+    // to the control's add-in name, and the web client refuses the page. A
+    // hand-inserted [Add-in] row gets past that check but has no Resource blob, so
+    // there is no manifest and the web client draws the usercontrol's name as text.
+    // Microsoft's own add-ins work only because their rows ship in the demo database.
+    //
+    // Fix: the same comparison with '/' normalised to '\' first, which is exactly
+    // what GetDirectoryName produces on Windows. The result on Windows-shaped input
+    // is unchanged.
+    // ========================================================================
+    private static void PatchNavAppPackageReaderDirectoryPaths(Assembly codeAnalysisAsm)
+    {
+        if (IsPatchDisabled("33")) return;
+        try
+        {
+            var type = codeAnalysisAsm.GetType("Microsoft.Dynamics.Nav.CodeAnalysis.Packaging.NavAppPackageReader");
+            if (type == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #33: NavAppPackageReader not found — skipping");
+                return;
+            }
+
+            var target = type.GetMethod("ReadDirectoryFilePaths",
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null, types: new[] { typeof(string) }, modifiers: null);
+            if (target == null || target.ReturnType != typeof(List<string>))
+            {
+                Console.WriteLine("[StartupHook] Patch #33: ReadDirectoryFilePaths(string) shape changed — skipping");
+                return;
+            }
+            if (type.GetMethod("ReadSourceFilePaths", BindingFlags.Instance | BindingFlags.Public,
+                    binder: null, types: Type.EmptyTypes, modifiers: null) == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #33: ReadSourceFilePaths() not found — skipping");
+                return;
+            }
+
+            var replacement = typeof(StartupHook).GetMethod(
+                nameof(Replacement_ReadDirectoryFilePaths),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            ApplyJmpHook(target, replacement, "NavAppPackageReader.ReadDirectoryFilePaths (Patch #33)");
+            Console.WriteLine("[StartupHook] Patch #33: NavAppPackageReader.ReadDirectoryFilePaths accepts '/' (extension add-ins, permissions, web services, layouts, profiles)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #33 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static List<string> Replacement_ReadDirectoryFilePaths(object self, string directory)
+    {
+        var readSource = self.GetType().GetMethod("ReadSourceFilePaths",
+            BindingFlags.Instance | BindingFlags.Public, binder: null, types: Type.EmptyTypes, modifiers: null)!;
+        var files = (IEnumerable<string>)readSource.Invoke(self, null)!;
+        var result = new List<string>();
+        foreach (var file in files)
+        {
+            var dir = Path.GetDirectoryName(file)?.Replace('/', '\\').Trim('\\');
+            if (string.Equals(dir, directory, StringComparison.OrdinalIgnoreCase))
+                result.Add(file);
+        }
+        return result;
     }
 
     // ========================================================================

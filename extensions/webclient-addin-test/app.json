@@ -1,0 +1,12 @@
+{
+  "id": "bbbbbbbb-0000-0000-0000-000000000001",
+  "name": "WebClient AddIn Test",
+  "publisher": "bc-linux",
+  "version": "1.0.0.2",
+  "runtime": "13.0",
+  "platform": "24.0.0.0",
+  "target": "OnPrem",
+  "idRanges": [
+    { "from": 99850, "to": 99899 }
+  ]
+}
