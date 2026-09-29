@@ -100,6 +100,13 @@ internal class StartupHook
                 PatchFilePersistenceManager(asm);
                 PatchTimeZoneDetection(asm);
                 break;
+            case "Microsoft.Dynamics.Framework.UI":
+                PatchResourceImageLoading(asm);
+                PatchLogicalMediaThumbnailLoading(asm);
+                break;
+            case "Microsoft.Dynamics.Nav.Client.UI":
+                PatchNavResourceImageLoading(asm);
+                break;
         }
     }
 
@@ -260,6 +267,89 @@ internal class StartupHook
         string sign = offset < TimeSpan.Zero ? "-" : "+";
         string syntheticId = $"UTC{sign}{offset.Duration():hh\\:mm}";
         return TimeZoneInfo.CreateCustomTimeZone(syntheticId, offset, syntheticId, syntheticId);
+    }
+
+    // ------------------------------------------------------------------
+    // Patch #W7: ResourceImage.LoadResourceCore -> no-op
+    // System.Drawing.Common is unsupported on Linux in .NET 8+: the first
+    // GDI+ call anywhere (Image.FromStream, `new Bitmap(...)`, `new Icon(...)`)
+    // throws PlatformNotSupportedException out of Gdip's static constructor,
+    // and .NET then permanently marks that type as failed to initialize —
+    // every later touch of System.Drawing anywhere in this process throws
+    // TypeInitializationException too, decode or no decode.
+    // ResourceImage.LoadResourceCore (called via NavResourceImage's
+    // `base.LoadResourceCore(uiCulture)`) is reached while building a UI
+    // session's action-bar icons (SortingActionBuilder.BuildAsSessionAction),
+    // and unlike record/thumbnail images (which already degrade gracefully —
+    // see docs/WEBCLIENT-POC.md) nothing here catches the exception: it
+    // aborts the whole session open, turning every sign-in into "Something
+    // went wrong". No-op the method instead: the image is simply left
+    // unloaded (IsLoaded stays false), which ImageResourceCache.LoadImage
+    // already treats as an ordinary cache miss (falls back through parent
+    // cultures, then gives up) — same degraded-but-alive outcome as the
+    // record-image gap, just extended to action icons.
+    // ------------------------------------------------------------------
+    private static bool _loggedResourceImageSkip;
+
+    private static void PatchResourceImageLoading(Assembly asm)
+    {
+        var type = asm.GetType("Microsoft.Dynamics.Framework.UI.ResourceImage");
+        var original = type?.GetMethod("LoadResourceCore", BindingFlags.NonPublic | BindingFlags.Instance);
+        var replacement = typeof(StartupHook).GetMethod(nameof(ResourceImageLoadResourceCoreReplacement), BindingFlags.NonPublic | BindingFlags.Static);
+        if (type == null || original == null || replacement == null)
+        {
+            Console.Error.WriteLine("[WebClientHook] ResourceImage.LoadResourceCore hook setup failed");
+            return;
+        }
+        ApplyJmpHook(original, replacement!, "ResourceImage.LoadResourceCore");
+    }
+
+    // Mirrors: protected override void LoadResourceCore(CultureInfo uiCulture)
+    private static void ResourceImageLoadResourceCoreReplacement(object self, object uiCulture)
+    {
+        if (!_loggedResourceImageSkip)
+        {
+            _loggedResourceImageSkip = true;
+            Console.Error.WriteLine("[WebClientHook] ResourceImage.LoadResourceCore no-op'd (System.Drawing.Common unsupported on Linux) — some icons/images will not render; further occurrences not logged");
+        }
+    }
+
+    // LogicalMediaThumbnail.LoadResourceCore overrides ResourceImage.LoadResourceCore too
+    // (record/user-avatar thumbnails, e.g. the picture column on the Customer list) and, unlike
+    // NavResourceImage, does NOT call base.LoadResourceCore at all — it calls Image.FromStream
+    // directly, so the base-class hook above never sees it. No retry/fallback logic here, so a
+    // plain no-op (leave the thumbnail unloaded) is safe — same degraded-but-alive outcome.
+    private static void PatchLogicalMediaThumbnailLoading(Assembly asm)
+    {
+        var type = asm.GetType("Microsoft.Dynamics.Framework.UI.LogicalMediaThumbnail");
+        var original = type?.GetMethod("LoadResourceCore", BindingFlags.NonPublic | BindingFlags.Instance);
+        var replacement = typeof(StartupHook).GetMethod(nameof(ResourceImageLoadResourceCoreReplacement), BindingFlags.NonPublic | BindingFlags.Static);
+        if (type == null || original == null || replacement == null)
+        {
+            Console.Error.WriteLine("[WebClientHook] LogicalMediaThumbnail.LoadResourceCore hook setup failed");
+            return;
+        }
+        ApplyJmpHook(original, replacement!, "LogicalMediaThumbnail.LoadResourceCore");
+    }
+
+    // NavResourceImage.LoadResourceCore overrides ResourceImage.LoadResourceCore and, when the
+    // base call leaves the image unloaded, retries via an error-image fallback that calls back
+    // into Load() -> LoadResourceCore(). That's fine when the base call THROWS (the retry is
+    // never reached) or genuinely succeeds, but the no-op above means "unloaded" every time —
+    // so the fallback recurses forever and stack-overflows the process (SIGABRT, confirmed
+    // 2026-09-29). Hooking NavResourceImage.LoadResourceCore itself (skipping the base call AND
+    // the fallback) avoids ever reaching that retry path.
+    private static void PatchNavResourceImageLoading(Assembly asm)
+    {
+        var type = asm.GetType("Microsoft.Dynamics.Nav.Client.Actions.NavResourceImage");
+        var original = type?.GetMethod("LoadResourceCore", BindingFlags.NonPublic | BindingFlags.Instance);
+        var replacement = typeof(StartupHook).GetMethod(nameof(ResourceImageLoadResourceCoreReplacement), BindingFlags.NonPublic | BindingFlags.Static);
+        if (type == null || original == null || replacement == null)
+        {
+            Console.Error.WriteLine("[WebClientHook] NavResourceImage.LoadResourceCore hook setup failed");
+            return;
+        }
+        ApplyJmpHook(original, replacement!, "NavResourceImage.LoadResourceCore");
     }
 
     // ------------------------------------------------------------------

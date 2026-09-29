@@ -11,7 +11,8 @@ unmodified web server binary from the BC platform artifact, runtime-patched
 the same way the NST is.
 
 Verified on BC 28.1 (platform 28.0.51325.0) with headless Chromium via
-Playwright:
+Playwright (screenshots below predate the GDI+ crash fixes — see
+"GDI+ (System.Drawing.Common) crashes" further down):
 
 | Milestone | Screenshot |
 |---|---|
@@ -239,6 +240,52 @@ Note the web client comes up ~20–40s *after* the container reports healthy
 (the healthcheck gates only the NST, intentionally) — if `:8080` refuses
 connections right after `--wait` returns, give it a moment.
 
+## GDI+ (System.Drawing.Common) crashes — fixed 2026-09-29, verified on BC 24.0
+
+`System.Drawing.Common` throws `PlatformNotSupportedException` from the first
+GDI+ call on any non-Windows OS in .NET 8+ (`Gdip..cctor()`), and .NET then
+permanently marks that type as failed to initialize — every *later* touch of
+`System.Drawing` anywhere in the process throws `TypeInitializationException`
+too, regardless of whether that particular call would have needed to decode
+anything. Three distinct call sites in the web client reach GDI+, and none of
+them caught the resulting exception — each one aborted the request it was
+part of, which surfaces to the browser as the generic "Something went wrong"
+page:
+
+| Site | Reached from | Effect before fix |
+|---|---|---|
+| `ResourceImage.LoadResourceCore` | Generic logical-image loading | Would abort whichever operation loaded the image |
+| `NavResourceImage.LoadResourceCore` | `SortingActionBuilder`/`FilterByColumnActionBuilder.BuildAsSessionAction` — building a UI session's action-bar icons | **Every sign-in**, since session-action icons are built as part of opening the role center |
+| `LogicalMediaThumbnail.LoadResourceCore` | `LogicalMediaProvider.ProvideMediaThumbnail`, called while computing a list page's row changeset (e.g. the Customer list's picture column) | **Every list page with a picture/thumbnail column** |
+
+`WebClientHook.cs` now JMP-hooks all three to no-op (leave the image
+unloaded) instead of letting the exception propagate — `ImageResourceCache.LoadImage`
+already treats an unloaded image as an ordinary cache miss (tries the parent
+culture, then gives up), so this is the same degraded-but-alive outcome the
+"record images don't render" gap below already described, just extended to
+cover action icons and list-page thumbnails, where it was previously fatal
+rather than cosmetic.
+
+**`NavResourceImage` cannot simply delegate to the `ResourceImage` hook** —
+it overrides `LoadResourceCore` with `base.LoadResourceCore(uiCulture)`
+followed by an error-image retry (`if (!IsLoaded) { ...; Load(uiCulture); }`).
+That retry assumes the base call either loads successfully or throws; a
+silent "stays unloaded" return (the no-op's whole point) makes `IsLoaded`
+false forever, so the retry recurses into `Load()` → `LoadResourceCore()` →
+the same no-op → the same false → forever, and the process aborts with
+`SIGABRT` (stack overflow, no managed exception to catch it) instead of
+just failing that one icon. Confirmed by reproducing it. The fix hooks
+`NavResourceImage.LoadResourceCore` directly (skipping its body entirely,
+not just the base class part it calls) so the retry path is never reached.
+`LogicalMediaThumbnail.LoadResourceCore` has no such retry logic, so hooking
+it directly is safe with no equivalent caveat.
+
+Only tested against BC 24.0 in this session (see the version-mismatch note
+in "Known gaps" below) — the underlying `System.Drawing.Common` behavior is
+a .NET-on-Linux platform fact, not a BC-version fact, so these fixes should
+apply equally to any BC version running the web client PoC, but that hasn't
+been re-verified across versions.
+
 ## Known gaps / not validated
 
 - **AL debugger launch mode (F5) session binding is unreliable.** Opening a
@@ -251,21 +298,17 @@ connections right after `--wait` returns, give it a moment.
   working once, so the NST side is fine — the gap is in the web client's
   credential flow for debug-bound sessions. Attach mode (`breakOnNext`) is
   unaffected and fully working; see `docs/DEBUGGING.md`.
-- **Record images (Customer/Item/Contact pictures, user avatars) don't
-  render.** The picture control requests
-  `/img?sessionid=...&ts=<mediaGuid>_360x0.` and gets a 404; the
-  `Thumbnails` cache directory stays empty. The serving path
-  (`WebImageHelper.TryLoadMediaThumbnail` →
-  `LogicalMediaProvider.ProvideMediaThumbnail` →
-  `mediaProvider.LoadMediaThumbnail`, then
-  `WebImageHelper.TryGetWebCompatibleImage`) uses **System.Drawing.Common**
-  (`ImageControl.TryLoadImage`, `Image.FromStream`), which throws
-  `PlatformNotSupportedException` unconditionally on Linux in .NET 8 —
-  the web client ships the real Windows-only package. A likely fix is a
-  WebClientHook patch that replaces `TryGetWebCompatibleImage` /
-  `TryLoadImage` with magic-byte content-type sniffing (no actual GDI
-  decode is needed just to serve the bytes), but this is not done yet.
-  Static images (action icons, placeholders, brand assets) are unaffected.
+- **System.Drawing.Common (GDI+) is unsupported on Linux in .NET 8 —
+  confirmed FATAL for sign-in and list pages, not just cosmetic (found and
+  fixed 2026-09-29, on BC 24.0 — see "GDI+ crashes" above).** The claim
+  earlier in this doc that BC 28.1 sign-in/role-center/list/card all render
+  cleanly predates this fix and was not re-run against it in this session;
+  it's unclear whether 28.1's specific demo data/action set simply never
+  exercised the crashing paths, or whether this same fix is needed there
+  too. If you hit "Something went wrong" on a version other than 24.0,
+  check `/tmp/webclient.log` for `System.TypeInitializationException` /
+  `PlatformNotSupportedException` with `Source: System.Drawing.Common`
+  before assuming it's a new bug.
 - `GET /splashCheck` 404s (harmless; splash screen still renders).
 - A stray literal-backslash directory (`wwwroot/Reports\`) appears at
   startup — some path producer outside `FilePersistenceManager` still uses
