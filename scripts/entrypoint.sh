@@ -1408,6 +1408,13 @@ for _server_dir in /usr/share/Microsoft/"Microsoft Dynamics NAV"/*/Server; do
     log_step "Encryption keys directory linked to the service volume ($_keys_link -> $BC_KEYS_DIR)"
 done
 
+# Encryption state at the moment the tier starts (issue #103). The tier can die in
+# NavTenantCollection.ConfigureTenants with NavEncryptionNotCreatedException while
+# comparing its key with the one in the database, and the writes above are silenced,
+# so a bad boot left nothing to compare against a good one. One line, read-only.
+_enc_sql() { $SQLCMD_DB -h -1 -W -Q "SET NOCOUNT ON; $1" 2>&1 | head -1 | tr -d '\r'; }
+log_step "Encryption state before NST start: public-key rows=$(_enc_sql "SELECT COUNT(*) FROM [\$ndo\$publicencryptionkey]") tenant-key-file='$(_enc_sql "SELECT ISNULL(encryptionkeyfilename, N'') FROM [\$ndo\$tenantproperty]")' tenant-id='$(_enc_sql "SELECT ISNULL(tenantid, N'') FROM [\$ndo\$tenantproperty]")' keys-dir=[$(ls "$BC_KEYS_DIR" 2>/dev/null | tr '\n' ' ')]"
+
 log_step "Starting BC service tier..."
 # Start BC — use a FIFO to keep stdin open for /console mode
 mkfifo /tmp/bc-stdin 2>/dev/null || true
