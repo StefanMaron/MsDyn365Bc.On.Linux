@@ -57,6 +57,12 @@ jobs:
       - name: run-tests.sh runs every batch (end to end, fake BC)
         run: python3 scripts/test-run-tests-batching.py
 
+      # classify-handler-codeunits.py decides which runner a test codeunit
+      # gets. A codeunit sent to the altool hub that needed the websocket
+      # runner turns green on a failure the real tier would raise (issue #93).
+      - name: Test codeunits are routed to the right runner
+        run: python3 scripts/test-classify-handler-codeunits.py
+
       # ci-lock.sh runs on every pipeline in the repo and in every consumer
       # that copied an example, and nothing else lints it — the only other
       # shellcheck pass in CI is snapshot-scoped (test-snapshot.yml). A bug
