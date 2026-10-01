@@ -4465,12 +4465,11 @@ internal class StartupHook
         if (IsPatchDisabled("34")) return;
         try
         {
-            // Ncl references assemblies this image does not carry, so GetTypes() throws; the
-            // exception still hands back every type that did load.
-            Type?[] loaded;
-            try { loaded = navNcl.GetTypes(); }
-            catch (ReflectionTypeLoadException ex) { loaded = ex.Types; }
-            Type? runner = loaded.FirstOrDefault(t => t != null && t.Name == "DevTestRunnerCodeunit");
+            // A direct lookup, not GetTypes(): this runs inside Nav.Ncl's AssemblyLoad event, and
+            // enumerating every type there forces a large amount of type loading while the NST is
+            // still initializing (and throws, since Ncl references assemblies this image does not
+            // carry). The class is a plain type in this namespace, so the name is exact.
+            Type? runner = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.Testability.DevTestRunnerCodeunit");
             if (runner == null)
             {
                 Console.WriteLine("[StartupHook] Patch #34: DevTestRunnerCodeunit not found — skipping (no TestRunnerHub in this build)");
