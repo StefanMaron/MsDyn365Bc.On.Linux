@@ -1142,6 +1142,25 @@ Trigger `test-versions` manually with a `versions: "27.0,28.1"`
 input to test specific versions — that input short-circuits discovery
 entirely, including the preview legs.
 
+### Image and repository names are not hardcoded in the reusable workflows (issue #83)
+
+`bc-test-from-source.yml`, `bc-test-prebuilt.yml` and `bcapps-gate.yml` default
+their `runner_image` input to the empty string. The job passes
+`inputs.runner_image`, else `ghcr.io/<vars.IMAGE_NAMESPACE>/bc-runner:latest`,
+else nothing, and `docker-compose.yml`'s `${BC_RUNNER_IMAGE:-<default>}` supplies
+the literal (`:-` treats empty and unset alike, the same way `sql_image` already
+works). That compose default and the examples are the only places that carry the
+path. Both reusable workflows also read the checkout `repository:` from the
+`BC_LINUX_REPOSITORY` variable, falling back to `StefanMaron/MsDyn365Bc.On.Linux`.
+
+Two things to know. In a reusable workflow `vars` is the **caller's** repository
+variables, so a consumer sets `IMAGE_NAMESPACE` and `BC_LINUX_REPOSITORY` in its
+own repo, not here. And the fallback is deliberate: an earlier version of the
+issue asked the workflow to fail when the variable is unset, which would break
+every consumer (bc-copilot-blueprint, the corpus) until each one set it.
+`build-image.yml`'s `IMAGE_NAME` and `mirror-sql-image.yml`'s mirror paths are
+this repository's own publishing targets and still name the owner.
+
 ### The version matrix is discovered at run time, not hardcoded
 
 `scripts/discover-bc-versions.py` reads Microsoft's artifact indexes and
