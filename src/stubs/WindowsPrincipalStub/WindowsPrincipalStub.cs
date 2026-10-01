@@ -49,6 +49,25 @@ namespace System.Security.Principal
         {
             return func();
         }
+
+        // The web client's CallbackService.InvokeWithImpersonation<T> awaits this on the
+        // OpenSession path. It is missing here, so the async state machine throws
+        // MissingMethodException the first time it runs, OpenSession never answers over
+        // /csh, and the browser sits on "Getting ready..." until it gives up. Same
+        // no-op semantics as RunImpersonated above.
+        public static global::System.Threading.Tasks.Task<T> RunImpersonatedAsync<T>(
+            Microsoft.Win32.SafeHandles.SafeAccessTokenHandle safeAccessTokenHandle,
+            Func<global::System.Threading.Tasks.Task<T>> func)
+        {
+            return func();
+        }
+
+        public static global::System.Threading.Tasks.Task RunImpersonatedAsync(
+            Microsoft.Win32.SafeHandles.SafeAccessTokenHandle safeAccessTokenHandle,
+            Func<global::System.Threading.Tasks.Task> func)
+        {
+            return func();
+        }
     }
 
     public class WindowsImpersonationContext : IDisposable
