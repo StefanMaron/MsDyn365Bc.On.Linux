@@ -227,6 +227,20 @@ using System.Threading.Tasks;
 ///   = null` is redundant once the owner is going away.
 ///   Method body verified byte-identical on BC 27.0 and 28.0.
 ///
+/// Patch #34: DevTestRunnerCodeunit.OnBeforeTestRunAsync (Nav.Ncl.dll) — issue #97
+///   The altool/TestRunnerHub runner drives tests through this C# test runner, not an AL Test
+///   Runner codeunit, so the "Test Runner - Mgt" events never fire and Microsoft's
+///   ALTestRunnerResetEnvironment (130453) never runs. Its OnBeforeTestMethodRun calls
+///   ClearLastError() before every test method; on the hub nothing does, so the last error a
+///   test trapped is still there when the next method in the same codeunit starts
+///   (GetLastErrorText returns it). Measured on BC 28.4: A traps Error('X'), B asserts
+///   GetLastErrorText() = '' — passes on the websocket runner, fails on the hub.
+///   Fix: re-implement the real body (it only filters on TestsToRun and raises
+///   OnBeforeTestRunEvent) and call NavSession.ClearLastError() first. Applied only to the hub's
+///   runner class, so the websocket runner and a real tier are untouched.
+///   NOT covered: the rest of 130453 (application areas, WorkDate, codeunits 130301/130302/
+///   132553) is also skipped on the hub; the last error is the only part measured.
+///
 /// JMP hooks work ONLY on BC methods (JIT-compiled). BCL methods are ReadyToRun pre-compiled
 /// and cannot be patched this way.
 ///
@@ -662,6 +676,13 @@ internal class StartupHook
         {
             PatchNavLicenseDispose(args.LoadedAssembly);
             PatchNavDatabaseSecurityAndLicenseDispose(args.LoadedAssembly);
+        }
+
+        // Patch #34: the hub's test runner never clears the last error between test methods
+        // (issue #97). Applied on every version; the class only exists where the hub does.
+        if (name == "Microsoft.Dynamics.Nav.Ncl")
+        {
+            PatchDevTestRunnerOnBeforeTestRun(args.LoadedAssembly);
         }
 
         // Patch #21: NavOpenTaskPageAction.ShowForm used to crash the whole test session on
@@ -4414,6 +4435,105 @@ internal class StartupHook
         {
             Console.WriteLine($"[StartupHook] Patch #32 failed: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    // ========================================================================
+    // Patch #34: DevTestRunnerCodeunit.OnBeforeTestRunAsync — clear the last error per method
+    // ------------------------------------------------------------------------
+    //   public override ValueTask<bool> OnBeforeTestRunAsync(int codeUnitId, NavText codeUnitName,
+    //       NavText functionName, NavTestPermissions testPermissions) {
+    //       if (!string.IsNullOrEmpty(functionName) && !"OnRun".Equals(functionName.Value, ...)
+    //           && TestsToRun != null && TestsToRun.Count != 0 && !TestsToRun.Contains(functionName.Value))
+    //           return ValueTask.FromResult(false);
+    //       OnBeforeTestRunEvent?.Invoke(this, new TestInfo { CodeunitId = ..., MethodName = ... });
+    //       return ValueTask.FromResult(true);
+    //   }
+    //
+    // The same body plus Session.ClearLastError() first. See the header comment for why.
+    // The signature is mirrored with `int` for the NavTestPermissions enum (same register) and
+    // `object` for the NavText references; the return type is the real ValueTask<bool>, so the
+    // hidden return-buffer convention matches the original exactly.
+    // ========================================================================
+    private static FieldInfo? _devRunnerBeforeEventField;
+    private static PropertyInfo? _devRunnerTestsToRunProp;
+    private static PropertyInfo? _devRunnerSessionProp;
+    private static MethodInfo? _sessionClearLastError;
+    private static Type? _devRunnerTestInfoType;
+
+    private static void PatchDevTestRunnerOnBeforeTestRun(Assembly navNcl)
+    {
+        if (IsPatchDisabled("34")) return;
+        try
+        {
+            // Ncl references assemblies this image does not carry, so GetTypes() throws; the
+            // exception still hands back every type that did load.
+            Type?[] loaded;
+            try { loaded = navNcl.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { loaded = ex.Types; }
+            Type? runner = loaded.FirstOrDefault(t => t != null && t.Name == "DevTestRunnerCodeunit");
+            if (runner == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #34: DevTestRunnerCodeunit not found — skipping (no TestRunnerHub in this build)");
+                return;
+            }
+
+            const BindingFlags all = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var original = runner.GetMethods(all | BindingFlags.DeclaredOnly)
+                .FirstOrDefault(m => m.Name == "OnBeforeTestRunAsync" && m.GetParameters().Length == 4);
+            _devRunnerBeforeEventField = runner.GetField("OnBeforeTestRunEvent", all);
+            _devRunnerTestsToRunProp = runner.GetProperty("TestsToRun", all);
+            _devRunnerSessionProp = runner.GetProperty("Session", all | BindingFlags.FlattenHierarchy);
+            _devRunnerTestInfoType = _devRunnerBeforeEventField?.FieldType.GetGenericArguments().FirstOrDefault();
+            _sessionClearLastError = _devRunnerSessionProp?.PropertyType.GetMethod("ClearLastError", all, binder: null, types: Type.EmptyTypes, modifiers: null);
+
+            if (original == null || original.ReturnType != typeof(ValueTask<bool>)
+                || _devRunnerBeforeEventField == null || _devRunnerTestsToRunProp == null
+                || _devRunnerSessionProp == null || _sessionClearLastError == null || _devRunnerTestInfoType == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #34: DevTestRunnerCodeunit shape changed — skipping");
+                return;
+            }
+
+            var replacement = typeof(StartupHook).GetMethod(nameof(Replacement_DevOnBeforeTestRunAsync),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            ApplyJmpHook(original, replacement, "DevTestRunnerCodeunit.OnBeforeTestRunAsync (Patch #34)");
+            Console.WriteLine("[StartupHook] Patch #34: DevTestRunnerCodeunit.OnBeforeTestRunAsync hooked (last error cleared per test method)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #34 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static ValueTask<bool> Replacement_DevOnBeforeTestRunAsync(object self, int codeUnitId, object codeUnitName, object functionName, int testPermissions)
+    {
+        // What a real tier's OnBeforeTestMethodRun does first. Never let it block the run.
+        try
+        {
+            var session = _devRunnerSessionProp!.GetValue(self);
+            if (session != null) _sessionClearLastError!.Invoke(session, null);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #34: ClearLastError failed: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        string fn = ShowFormGetProperty(functionName, "Value") as string ?? string.Empty;
+        var toRun = _devRunnerTestsToRunProp!.GetValue(self) as HashSet<string>;
+        if (!string.IsNullOrEmpty(fn) && !"OnRun".Equals(fn, StringComparison.OrdinalIgnoreCase)
+            && toRun != null && toRun.Count != 0 && !toRun.Contains(fn))
+        {
+            return new ValueTask<bool>(false);
+        }
+
+        if (_devRunnerBeforeEventField!.GetValue(self) is Delegate handler)
+        {
+            object info = Activator.CreateInstance(_devRunnerTestInfoType!)!;
+            _devRunnerTestInfoType!.GetField("CodeunitId")!.SetValue(info, codeUnitId);
+            _devRunnerTestInfoType.GetField("MethodName")!.SetValue(info, fn);
+            handler.DynamicInvoke(self, info);
+        }
+        return new ValueTask<bool>(true);
     }
 
     // ========================================================================

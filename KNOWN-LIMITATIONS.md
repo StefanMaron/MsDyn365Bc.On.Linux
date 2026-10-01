@@ -52,6 +52,31 @@ tier:
   isolation" — was wrong: `TestIsolation = Codeunit` rolls back database changes
   and says nothing about the session.
 
+## The hub runner skips the Test Runner's per-test reset (issue #97)
+
+The altool/TestRunnerHub runner has no AL test runner codeunit (130450/130451), so
+the "Test Runner - Mgt" events never fire and Microsoft's
+`ALTestRunnerResetEnvironment` (130453) never runs. On a real tier its
+`OnBeforeTestMethodRun` calls `ClearLastError()` before every test method. On the hub
+nothing did, so the last error a test trapped was still there when the next method in
+the same codeunit started. Measured on BC 28.4 with a test that traps
+`Error('X')` followed by one that asserts `GetLastErrorText()` is empty: the websocket
+runner passes and the hub failed with `Actual:<X>`. The next codeunit was not
+affected, because each codeunit gets its own session.
+
+**Fixed for the last error: Patch #34** re-implements
+`DevTestRunnerCodeunit.OnBeforeTestRunAsync` (the hub's own C# runner, so the
+websocket runner and a real tier are untouched) and calls `ClearLastError()` first.
+`extensions/smoke-test` carries the guard (codeunit 70009).
+
+**Not fixed, and not measured:** the rest of 130453 is also skipped on the hub. From
+reading its source: `OnBeforeTestMethodRun` also resets the application areas and runs
+codeunits 130301, 130302 and 132553 when they are present, and `OnAfterCodeunitRun`
+restores WorkDate and the application areas. A test that depends on those carrying
+over, or being reset, between methods can still differ on the hub. Routing by AL source
+cannot find those tests, so the options are to raise the same events from the hub's
+runner or to accept the gap. Measure a case before choosing.
+
 ## Failure triage: bcapps-gate run 2026-08-06 (BC 28.1, hub runner, TC=0 legs)
 
 Full classification of the 787 Tests-Misc + 165 Tests-Workflow failures from

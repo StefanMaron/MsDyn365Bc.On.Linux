@@ -273,7 +273,7 @@ jobs:
       # the hosted runner so a regression in run-tests.sh's normalization shows
       # up here. Equivalent to the legacy "70000..70001" but covers the new
       # code path. See scripts/run-tests.sh CODEUNIT_RANGE handling.
-      codeunit_range: "70000|70001"
+      codeunit_range: "70000|70001|70009"
       # test_runner is left at its default ("auto"): each leg probes the
       # live server's dev endpoint and uses `al runtests` (the AL dotnet
       # tool's native runner driving the NST's /dev/TestRunnerHub) when
