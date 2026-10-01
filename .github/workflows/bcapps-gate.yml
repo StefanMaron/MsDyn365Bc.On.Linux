@@ -47,9 +47,14 @@ on:
         default: "28.1"
         type: string
       runner_image:
-        description: "bc-runner image to test"
+        description: >-
+          Override the bc-runner image. Blank (default) uses the repository variable
+          IMAGE_NAMESPACE as ghcr.io/<IMAGE_NAMESPACE>/bc-runner:latest when it is set,
+          and otherwise docker-compose's own default. Passing the empty string through
+          is what makes the compose default apply: `${BC_RUNNER_IMAGE:-<default>}`
+          treats empty and unset alike.
         required: false
-        default: "ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner:latest"
+        default: ""
         type: string
 
 jobs:
@@ -86,7 +91,7 @@ jobs:
       - name: Download BC artifacts + pull images (parallel)
         env:
           BC_VERSION: ${{ inputs.bc_version }}
-          BC_RUNNER_IMAGE: ${{ inputs.runner_image }}
+          BC_RUNNER_IMAGE: ${{ inputs.runner_image || (vars.IMAGE_NAMESPACE && format('ghcr.io/{0}/bc-runner:latest', vars.IMAGE_NAMESPACE)) || '' }}
         run: |
           ./scripts/download-artifacts.sh sandbox "$BC_VERSION" w1 "artifact-cache/$BC_VERSION" &
           DL_PID=$!
@@ -99,7 +104,7 @@ jobs:
       - name: Start BC (TieredCompilation=${{ matrix.tc }})
         env:
           BC_VERSION: ${{ inputs.bc_version }}
-          BC_RUNNER_IMAGE: ${{ inputs.runner_image }}
+          BC_RUNNER_IMAGE: ${{ inputs.runner_image || (vars.IMAGE_NAMESPACE && format('ghcr.io/{0}/bc-runner:latest', vars.IMAGE_NAMESPACE)) || '' }}
           BC_CLEAR_ALL_APPS: "false"
           DOTNET_TieredCompilation: ${{ matrix.tc }}
         run: |

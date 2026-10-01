@@ -125,10 +125,15 @@ on:
         required: true
         type: string
       runner_image:
-        description: "Override the bc-runner image (defaults to the public ghcr.io tag)"
+        description: >-
+          Override the bc-runner image. Blank (default) uses the repository variable
+          IMAGE_NAMESPACE as ghcr.io/<IMAGE_NAMESPACE>/bc-runner:latest when it is set,
+          and otherwise docker-compose's own default. Passing the empty string through
+          is what makes the compose default apply: `${BC_RUNNER_IMAGE:-<default>}`
+          treats empty and unset alike.
         required: false
         type: string
-        default: "ghcr.io/stefanmaron/msdyn365bc.on.linux/bc-runner:latest"
+        default: ""
       test_company:
         description: >-
           Company to run the tests in. Blank (default) auto-detects: the
@@ -187,7 +192,7 @@ jobs:
     runs-on: ${{ startsWith(inputs.runs_on, '[') && fromJSON(inputs.runs_on) || inputs.runs_on }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     env:
-      BC_RUNNER_IMAGE: ${{ inputs.runner_image }}
+      BC_RUNNER_IMAGE: ${{ inputs.runner_image || (vars.IMAGE_NAMESPACE && format('ghcr.io/{0}/bc-runner:latest', vars.IMAGE_NAMESPACE)) || '' }}
       # Blank passes through to docker-compose's `${BC_SQL_IMAGE:-<mirror>}`
       # default — `:-` treats empty and unset alike, so an unset input keeps
       # the mirror rather than resolving to an empty image name.
@@ -222,7 +227,7 @@ jobs:
       - name: Checkout MsDyn365Bc.On.Linux
         uses: actions/checkout@v4
         with:
-          repository: StefanMaron/MsDyn365Bc.On.Linux
+          repository: ${{ vars.BC_LINUX_REPOSITORY || 'StefanMaron/MsDyn365Bc.On.Linux' }}
           ref: ${{ inputs.bc_linux_ref }}
           path: bc-linux
 
@@ -232,7 +237,7 @@ jobs:
       # Artifact download + docker pull in parallel (independent network IO).
       - name: Download BC artifacts + pull docker images (parallel)
         env:
-          BC_RUNNER_IMAGE: ${{ inputs.runner_image }}
+          BC_RUNNER_IMAGE: ${{ inputs.runner_image || (vars.IMAGE_NAMESPACE && format('ghcr.io/{0}/bc-runner:latest', vars.IMAGE_NAMESPACE)) || '' }}
         run: |
           set -e
           bash bc-linux/scripts/workflow-summary.sh begin DOWNLOAD "Download BC artifacts + pull docker images"
