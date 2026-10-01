@@ -28,7 +28,7 @@ container plus, where noted, corpus run 34079926224.
 | `Report.SaveAs(Pdf)` with an RDLC layout (issue #70) | returns false — RDLC rendering is not implemented | returns true | **The image. Re-measured 2026-09-07 on BC 28.4: still false**, so the claim is current, not stale. Note this does NOT generalise to "reports don't render on Linux": the Aspose.Words path (Word and Excel layouts) does render, since commit 9679545 linked Linux `libSkiaSharp.so` + harfbuzz into the service dir. RDLC is separate — it goes to the Windows Reporting Service PE binary, which the entrypoint replaces with a stub and Patch #19 makes throw `NavReportException` from `RenderAsync`. Fixing it means running Microsoft's own renderer, which is .NET Framework, under Mono — investigated and parked at a `TypeLoadException` inside ReportViewer's intermediate-format serializer; the CAS blocker before it IS solved. See `docs/RDLC-ON-LINUX.md` and issue #73. Until then the assertion belongs here (e.g. `extensions/smoke-test`), not in a corpus whose premise is "validated against a real service tier". |
 | ~~Opening a card on an empty linked part: part page `OnNewRecord` firing count~~ (issue #78) | ~~6 firings~~ **now 3, matching Windows** | 3 firings | **FIXED — this tier now coalesces notifications the way a real BC tier does.** A diagnostic arm (`Card.Lines.First()` returns false, then `Card.Lines.Next()` immediately returns false) proved it was one draft row notified repeatedly, not extra rows — confirmed identical in shape on both tiers (an online sandbox run gave the exact same `afterFirst=3 \| next1=No,count=3`). Traced with `dotnet-trace` into `Microsoft.Dynamics.Nav.Client.UI.dll` and `Microsoft.Dynamics.Framework.UI.dll`: `DraftLinePattern.MakeDraftLines()` is invoked from three binding-manager notifications, and BC normally coalesces rapid-fire ones — `CommunicationChannel.EnsureQueueLength()` evicts queued messages past `ChannelOptions.QueueLength`, and `BindingManagerConsumerPort.FillStarting()` pulls only one survivor per channel per fill — but only when `CommunicationBroker.DefaultChannelOptions.Async` is `true`. This image's own `PatchTestPageClient` forced it to `false` (`src/tools/PatchNclTestPage/PatchTestPageClient.cs`, wired from `scripts/entrypoint.sh` Step 2b), which sends every notification inline with nothing to evict — twice as many `OnNewRecord` firings for the same page, on this tier only. The patch is now opt-in (`BC_TESTPAGE_ASYNC_PATCH=1`); default is unpatched (`Async=true`), matching Windows. The deadlock the patch was written against (commit 29d2bdf) was never isolated from that commit's OTHER fix in the same change (a `ToUnicodeEx` bug causing its own infinite loop) and was measured before TestPage could even run end-to-end on this tier — re-tested against a RunObject → `[ModalPageHandler]` StandardDialog target (the shape most likely to need a real pump) with `Async` left at `true`: 7/7 pass, no hang. Corpus PR #284 landed and rewrote `TestPagePartOnNewRecordCount.al` as delta assertions, which pass on either tier by construction — so nothing downstream checks the absolute count any more. `extensions/smoke-test`'s `BcLinuxOnrcTests` codeunit now carries that check directly, pinning 3 on this image's own version matrix. |
 
-Three entries that were on this list and are now closed, all harness rather than
+Four entries that were on this list and are now closed, all harness rather than
 tier:
 
 - **`TestPermissions` was not enforced on the fast path** (issue #64). The
@@ -69,6 +69,26 @@ tier:
   that depends on the refusal without naming the text, for example one with a
   looser `ExpectedError`, still runs on the hub and passes silently. Only
   making the hub refuse unhandled UI itself would close that.
+- **`Active Session."Client Type"` read `Unknown` on BC 27.x** (issue #86). The
+  row said `Unknown` while `CurrentClientType()` answered `Windows` in the same
+  session. A Windows container passes. It looked like a 27.x versus 28.x
+  difference, but it is a runner difference: on BC 28+ `test_runner=auto` uses the
+  altool hub, which runs tests in a Web Client session (`Web Client` and `Web`),
+  and 27.x has no hub, so it uses the websocket runner. Measured on one BC 28.4
+  container, the same test reads `Unknown` and `Windows` on the websocket runner,
+  and `Web Client` and `Web` on both altool transports. The server takes the
+  session's connection type from `ConnectionRequest.ClientConnectionType` in the
+  client's `OpenConnection` call. `tools/TestRunner/Program.cs` did not send it, so
+  the session kept the default `UnknownClient`. The row maps that to `Unknown`,
+  and `CurrentClientType()` falls through to the server's `DefaultClient` setting,
+  which is `Windows`. The runner now sends `ClientService` (115), which is what a
+  real client-services session sends, giving `Client Service` and `Web`.
+  `extensions/smoke-test` carries a guard (codeunit 70008) that passes on both
+  runners. **Side effect:** a `ClientService` session is interactive for
+  `DisableUpdateUserPersonalization`, so it now writes user personalization the
+  way a real client does, and its number-format symbols follow the same path as
+  a real test session. The image must be rebuilt (`docker compose build bc`) for
+  `run-tests.sh` to use the new `TestRunner.dll`.
 
 ## The hub runner skips the Test Runner's per-test reset (issue #97)
 
