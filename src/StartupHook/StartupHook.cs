@@ -227,6 +227,23 @@ using System.Threading.Tasks;
 ///   = null` is redundant once the owner is going away.
 ///   Method body verified byte-identical on BC 27.0 and 28.0.
 ///
+/// Patch #33: AspNetCoreApiHost.CreateBaseAddress (Microsoft.Dynamics.Nav.Service.AspNetCore.dll) — issue #91
+///   BC 30 hosts several API endpoints on one port, separated by URL path
+///   (http://+:7048/BC/ODataV4 and /BC/api/webhooks, http://+:7085/BC/client and
+///   /BC/client/health, ...). HTTP.SYS routes those by prefix on one port. These hosts use
+///   Kestrel directly, which cannot bind a port twice, so the second Open() threw
+///   AddressInUseException (19 on one boot), the NST service start failed, and no port was
+///   opened at all. HttpSysStub already splits ports for hosts that go through UseHttpSys;
+///   these bypass it.
+///   Fix: auxiliary endpoints (health, webhooks, mcp) always get their own port in a spare
+///   range (+10000); a primary endpoint that finds its port already claimed moves too, the
+///   REST API to ODataServicesPort + 4 where tooling maps its host port. The assignment is
+///   keyed by endpoint so Open() and Resume() agree, and every move is logged. Companion
+///   change in entrypoint.sh: ManagementApiServicesEnabled is forced off, because its host
+///   File.Delete()s a Unix socket path in a directory that does not exist.
+///   Applied on BC 30 and later only: before that the hosts go through UseHttpSys, where
+///   HttpSysStub already splits the ports. Not covered: BC 30 still returns HTTP 422
+///   publishing the test framework apps.
 /// Patch #34: DevTestRunnerCodeunit.OnBeforeTestRunAsync (Nav.Ncl.dll) — issue #97
 ///   The altool/TestRunnerHub runner drives tests through this C# test runner, not an AL Test
 ///   Runner codeunit, so the "Test Runner - Mgt" events never fire and Microsoft's
@@ -578,6 +595,12 @@ internal class StartupHook
         if (name == "Microsoft.Dynamics.Nav.Watson")
         {
             PatchWatsonReporting(args.LoadedAssembly);
+        }
+
+        // Patch #33: give colliding API endpoints their own ports.
+        if (name == "Microsoft.Dynamics.Nav.Service.AspNetCore")
+        {
+            PatchApiHostPorts(args.LoadedAssembly);
         }
 
         // Patch #14: Fix Cecil type-forwarding crash in server-side AL compiler.
@@ -1926,6 +1949,115 @@ internal class StartupHook
     }
 
     // ========================================================================
+    // Patch #33: BC hosts several API endpoints on one port, separated by URL path, for
+    // example http://+:7048/BC/ODataV4 and http://+:7048/BC/api/webhooks, or
+    // http://+:7085/BC/client and http://+:7085/BC/client/health. HTTP.SYS routes those by
+    // prefix on a single port. Kestrel cannot bind a port twice, so the second Open()
+    // throws AddressInUseException and the whole NST service start fails, leaving no
+    // listener at all. Observed on BC 30: no 7045, 7047, 7048, 7049 or 7085.
+    // Fix: hand every endpoint after the first on a given port its own port. The primary
+    // endpoints (client, dev, ODataV4) are created first and keep their configured ports;
+    // the auxiliary ones (health, webhooks) move. Each move is logged, so a wrong one is
+    // visible rather than silent. This mirrors what HttpSysStub already does for the hosts
+    // that go through UseHttpSys; these hosts use Kestrel directly and bypass it.
+    internal const int ApiPortOffset = 10000;
+    // ODataServicesPort + 4 is where the REST API's host port is mapped.
+    internal const int ApiPortSpacing = 4;
+    private static readonly Dictionary<string, int> _apiHostPorts = new Dictionary<string, int>();
+    private static readonly HashSet<int> _claimedApiPorts = new HashSet<int>();
+
+    private static void PatchApiHostPorts(Assembly aspNetCoreAsm)
+    {
+        try
+        {
+            // BC 27 to 29 serve these hosts through UseHttpSys, where HttpSysStub already gives
+            // each endpoint its own port (measured on 28.4: listeners on 7050-7055 and 7086-7087).
+            // Moving them here as well would replace those ports with different ones for no
+            // gain, so only BC 30 and later, whose hosts bind Kestrel directly, are patched.
+            var asmVersion = aspNetCoreAsm.GetName().Version;
+            if (asmVersion != null && asmVersion.Major < 30)
+            {
+                Console.WriteLine($"[StartupHook] Patch #33: skipped on {asmVersion} (HttpSysStub already splits the ports before BC 30)");
+                return;
+            }
+            var hostType = aspNetCoreAsm.GetType("Microsoft.Dynamics.Nav.Service.AspNetCore.AspNetCoreApiHost");
+            if (hostType == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #33: AspNetCoreApiHost not found");
+                return;
+            }
+
+            var original = hostType.GetMethod("CreateBaseAddress", BindingFlags.Public | BindingFlags.Static);
+            if (original == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #33: CreateBaseAddress not found");
+                return;
+            }
+
+            var replacement = typeof(StartupHook).GetMethod(nameof(CreateBaseAddressReplacement),
+                BindingFlags.NonPublic | BindingFlags.Static);
+            ApplyJmpHook(original, replacement, "AspNetCoreApiHost.CreateBaseAddress");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #33 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // Endpoints that sit under a primary endpoint's URL: client/health, api/webhooks,
+    // devhealth, WSHealth, ODataV4Health, mcp. HTTP.SYS served them on the primary's port
+    // by URL prefix; none of them has a published host port.
+    private static bool IsAuxiliaryApiEndpoint(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        string n = name.Trim('/');
+        return n.Contains('/')
+            || n.EndsWith("health", StringComparison.OrdinalIgnoreCase)
+            || n.Equals("mcp", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Uri CreateBaseAddressReplacement(bool useSsl, string machineName, int portNumber,
+        string serverInstance, string name)
+    {
+        // Open() and Resume() both call this for the same host, so the assignment has to be
+        // stable: look it up by endpoint before allocating anything.
+        string key = serverInstance + "/" + name;
+        lock (_apiHostPorts)
+        {
+            int assigned;
+            if (_apiHostPorts.TryGetValue(key, out assigned))
+            {
+                portNumber = assigned;
+            }
+            else
+            {
+                // Auxiliary endpoints (health, webhooks, mcp) are decided by NAME, not by creation
+                // order: they always move, so one created before the client, dev or OData
+                // endpoint can never take that endpoint's configured port.
+                bool auxiliary = IsAuxiliaryApiEndpoint(name);
+                if (auxiliary || !_claimedApiPorts.Add(portNumber))
+                {
+                    // The REST API is a published endpoint: tooling maps a host port to
+                    // ODataServicesPort + 4 for it. Send it there rather than into the
+                    // spare range, or the mapping points at nothing. The auxiliary
+                    // endpoints (health, webhooks, mcp) have no published port, so any
+                    // free one will do.
+                    int moved = !auxiliary && name != null && name.TrimEnd('/').EndsWith("api", StringComparison.OrdinalIgnoreCase)
+                        ? portNumber + ApiPortSpacing
+                        : portNumber + ApiPortOffset;
+                    while (!_claimedApiPorts.Add(moved)) moved++;
+                    Console.WriteLine($"[StartupHook] Patch #33: {key} moved {portNumber} -> {moved} ({(auxiliary ? "auxiliary endpoint" : "port already taken")})");
+                    portNumber = moved;
+                }
+                _apiHostPorts[key] = portNumber;
+            }
+        }
+
+        string scheme = useSsl ? Uri.UriSchemeHttps : Uri.UriSchemeHttp;
+        return new Uri(FormattableString.Invariant(
+            $"{scheme}{Uri.SchemeDelimiter}{machineName}:{portNumber}/{serverInstance}/{name}").TrimEnd('/'));
+    }
+
     // Patch #18: SetupSideServices — skip Reporting Service startup on Linux.
     // The Reporting Service (.exe) is a Windows PE binary. Without this patch,
     // BC crashes with SideServiceProcessException on startup. Making it a no-op

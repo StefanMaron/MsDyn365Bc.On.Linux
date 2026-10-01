@@ -115,6 +115,21 @@ over, or being reset, between methods can still differ on the hub. Routing by AL
 cannot find those tests, so the options are to raise the same events from the hub's
 runner or to accept the gap. Measure a case before choosing.
 
+## BC 30 opened no service port (issue #91)
+
+BC 30 hosts several API endpoints on one port, separated by URL path. HTTP.SYS routes
+those by prefix, but BC 30's hosts use Kestrel directly and Kestrel cannot bind a port
+twice. The second `Open()` threw `AddressInUseException`, the service start failed, and
+the container sat unhealthy with nothing on 7045, 7047, 7048, 7049 or 7085. **Patch
+#33** gives auxiliary endpoints their own ports and moves a colliding primary endpoint
+(see the header in `StartupHook.cs`), and `entrypoint.sh` forces
+`ManagementApiServicesEnabled` off. Reported and verified on BC 30.0.55227.0 by
+@ernestasjuska: healthy in 91 seconds, Role Center reached.
+
+**Still broken on BC 30:** the test framework apps (`Library Assert`, `Test Runner` and
+the rest) fail to publish with HTTP 422, so metadata they define is missing. The cause
+has not been determined. BC 30 is therefore a boot-only target for now.
+
 ## Failure triage: bcapps-gate run 2026-08-06 (BC 28.1, hub runner, TC=0 legs)
 
 Full classification of the 787 Tests-Misc + 165 Tests-Workflow failures from
