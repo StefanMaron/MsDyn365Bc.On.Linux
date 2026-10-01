@@ -4,6 +4,7 @@
   "publisher": "BCLinux",
   "version": "1.0.0.0",
   "brief": "Smoke test for the bc-linux substrate, plus per-issue regression guards (see src/). Used by the test-versions matrix workflow to verify each BC version end-to-end via the reusable bc-test-from-source workflow.",
+  "platform": "27.0.0.0",
   "runtime": "14.0",
   "target": "OnPrem",
   "dependencies": [

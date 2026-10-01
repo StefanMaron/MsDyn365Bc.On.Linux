@@ -603,7 +603,7 @@ async Task<(JsonRpc, ClientWebSocket, CancellationTokenSource)> ConnectOnce(
         callbacks.Rpc = rpc;
         rpc.StartListening();
         await rpc.InvokeWithCancellationAsync<JToken>("OpenConnection",
-            new object[] { new { LCID = 1033, DefaultLCID = 1033, TimeZoneId = "UTC", Credentials = new { UserName = user, Password = clientServicesPassword } } }, ct);
+            new object[] { new { LCID = 1033, DefaultLCID = 1033, TimeZoneId = "UTC", ClientConnectionType = 115, Credentials = new { UserName = user, Password = clientServicesPassword } } }, ct);
         Log("Connected.");
         return (rpc, ws, sessionEndedCts);
     }
