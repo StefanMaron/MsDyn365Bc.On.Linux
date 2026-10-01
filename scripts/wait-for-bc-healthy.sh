@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # wait-for-bc-healthy.sh — Block until the BC docker container reports
-# the docker healthcheck as `healthy`. Fails fast on `unhealthy` or on
-# the container disappearing entirely.
+# the docker healthcheck as `healthy`. Fails fast on `unhealthy`, on the
+# container exiting, and on the container never appearing.
 #
 # Usage (run from a directory containing docker-compose.yml):
 #   ./scripts/wait-for-bc-healthy.sh [timeout-minutes]
@@ -36,15 +36,33 @@ STATUS="unknown"
 
 echo "Waiting for BC to be healthy (max ${TIMEOUT_MIN} min)..."
 
+# How long a missing container is tolerated before it counts as a failure. The
+# caller runs `docker compose up -d` first, so the container normally exists on
+# the first poll; this only covers a caller that starts us a moment early.
+CREATE_GRACE_SECONDS=60
+MISSING_SINCE=0
+
 for i in $(seq 1 "$MAX_ITER"); do
-    CID=$(docker compose ps -q bc 2>/dev/null | head -1)
+    # -a: without it `docker compose ps` lists only RUNNING containers. The bc
+    # service has no restart policy, so once the tier exits the container stays
+    # exited, `ps -q` goes empty, and the loop used to spin to the timeout
+    # without printing the unhealthy, not-running or progress lines.
+    CID=$(docker compose ps -a -q bc 2>/dev/null | head -1)
     if [ -z "$CID" ]; then
-        # Container hasn't been created yet — give it a moment.
+        NOW=$(date +%s)
+        [ "$MISSING_SINCE" -eq 0 ] && MISSING_SINCE=$NOW
+        if [ $((NOW - MISSING_SINCE)) -ge "$CREATE_GRACE_SECONDS" ]; then
+            echo "ERROR: no BC container exists after ${CREATE_GRACE_SECONDS}s"
+            docker compose ps -a 2>&1 | tail -20
+            exit 1
+        fi
         sleep 2
         continue
     fi
+    MISSING_SINCE=0
 
     STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CID" 2>/dev/null || echo "unknown")
+    RUN_STATE=$(docker inspect --format='{{.State.Status}}' "$CID" 2>/dev/null || echo "unknown")
     case "$STATUS" in
         healthy)
             ELAPSED=$(( $(date +%s) - START_TIME ))
@@ -58,13 +76,15 @@ for i in $(seq 1 "$MAX_ITER"); do
             ;;
     esac
 
-    # If the container has disappeared (compose ps shows nothing for `bc`),
-    # bail rather than spinning forever.
-    if ! docker compose ps bc 2>/dev/null | grep -q "Up"; then
-        echo "ERROR: BC container is no longer running"
-        docker compose logs bc 2>&1 | tail -100
-        exit 1
-    fi
+    # The container stopped (the tier crashed, or the entrypoint exited).
+    case "$RUN_STATE" in
+        exited|dead)
+            EXIT_CODE=$(docker inspect --format='{{.State.ExitCode}}' "$CID" 2>/dev/null || echo "?")
+            echo "ERROR: BC container is no longer running (state=${RUN_STATE}, exit code ${EXIT_CODE})"
+            docker compose logs bc 2>&1 | tail -100
+            exit 1
+            ;;
+    esac
 
     # Print a progress line every ~60 seconds so callers can see what
     # BC's entrypoint is currently doing instead of staring at silence.
