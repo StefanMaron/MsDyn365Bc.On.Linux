@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2010/01/reportdefinition">
+  <ReportSections><ReportSection><Body><ReportItems>
+    <Textbox Name="ArabicExplicitFonts">
+      <CanGrow>true</CanGrow>
+      <Paragraphs><Paragraph><TextRuns>
+        <TextRun><Value>فاتورة </Value><Style><FontFamily>Noto Sans Arabic</FontFamily><FontSize>16pt</FontSize></Style></TextRun>
+        <TextRun><Value>INV-123</Value><Style><FontFamily>Liberation Sans</FontFamily><FontSize>16pt</FontSize></Style></TextRun>
+        <TextRun><Value>: المبلغ </Value><Style><FontFamily>Noto Sans Arabic</FontFamily><FontSize>16pt</FontSize></Style></TextRun>
+        <TextRun><Value>123.45 EUR</Value><Style><FontFamily>Liberation Sans</FontFamily><FontSize>16pt</FontSize></Style></TextRun>
+      </TextRuns><Style><TextAlign>Right</TextAlign></Style></Paragraph></Paragraphs>
+      <Top>0in</Top><Left>0in</Left><Height>0.7in</Height><Width>6in</Width><Style><Direction>RTL</Direction></Style>
+    </Textbox>
+    <Textbox Name="HebrewExplicitFonts">
+      <CanGrow>true</CanGrow>
+      <Paragraphs><Paragraph><TextRuns>
+        <TextRun><Value>חשבונית </Value><Style><FontFamily>Noto Sans Hebrew</FontFamily><FontSize>16pt</FontSize></Style></TextRun>
+        <TextRun><Value>INV-123: </Value><Style><FontFamily>Liberation Sans</FontFamily><FontSize>16pt</FontSize></Style></TextRun>
+        <TextRun><Value>סכום </Value><Style><FontFamily>Noto Sans Hebrew</FontFamily><FontSize>16pt</FontSize></Style></TextRun>
+        <TextRun><Value>123.45 EUR</Value><Style><FontFamily>Liberation Sans</FontFamily><FontSize>16pt</FontSize></Style></TextRun>
+      </TextRuns><Style><TextAlign>Right</TextAlign></Style></Paragraph></Paragraphs>
+      <Top>1in</Top><Left>0in</Left><Height>0.7in</Height><Width>6in</Width><Style><Direction>RTL</Direction></Style>
+    </Textbox>
+  </ReportItems><Height>2in</Height><Style /></Body><Width>6in</Width>
+    <Page><PageHeight>11in</PageHeight><PageWidth>8.5in</PageWidth><LeftMargin>1in</LeftMargin><RightMargin>1in</RightMargin><TopMargin>1in</TopMargin><BottomMargin>1in</BottomMargin><Style /></Page>
+  </ReportSection></ReportSections>
+  <Language>en-US</Language>
+</Report>

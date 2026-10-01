@@ -1,0 +1,102 @@
+--- StringType.vb
++++ StringType.vb
+@@ -3,6 +3,7 @@
+ Imports System
+ Imports System.Globalization
+ Imports System.Text
++Imports Microsoft.VisualBasic.Strings
+ 
+ Imports Microsoft.VisualBasic.CompilerServices.ExceptionUtils
+ Imports Microsoft.VisualBasic.CompilerServices.Utils
+@@ -23,6 +24,9 @@
+         End Sub
+ 
+         Private Const GENERAL_FORMAT As String = "G"
++        Private Const OptionCompareTextFlags As CompareOptions =
++            CompareOptions.IgnoreCase Or CompareOptions.IgnoreWidth Or CompareOptions.IgnoreKanaType
++        Private Shared ReadOnly m_InvariantCompareInfo As CompareInfo = CultureInfo.InvariantCulture.CompareInfo
+ 
+         '============================================================================
+         ' Coercion to functions.
+@@ -172,7 +176,7 @@
+                 End If
+             End If
+ 
+-            Throw New InvalidCastException(GetResourceString(ResID.InvalidCast_FromTo, VBFriendlyName(Value), "String"))
++            Throw New InvalidCastException(GetResourceString("CastFromTypeToType", Information.TypeName(Value), "String"))
+ 
+         End Function
+ 
+@@ -202,7 +206,7 @@
+             End If
+ 
+             If TextCompare Then
+-                Return GetCultureInfo().CompareInfo.Compare(sLeft, sRight, OptionCompareTextFlags)
++                Return CultureInfo.CurrentCulture.CompareInfo.Compare(sLeft, sRight, OptionCompareTextFlags)
+             Else
+                 Return System.String.CompareOrdinal(sLeft, sRight)
+             End If
+@@ -355,7 +359,7 @@
+                             EndRangeChar = p
+ 
+                             If StartRangeChar > EndRangeChar Then
+-                                Throw VbMakeException(vbErrors.BadPatStr)
++                                Throw GetVBException(VBErrors.ERR93_Invalid_pattern_string)
+                             ElseIf (SeenNot AndAlso Match) OrElse (Not SeenNot AndAlso Not Match) Then
+                                 'Calls to ci.Compare are expensive, avoid them for good performance
+                                 Match = (s > StartRangeChar) AndAlso (s <= EndRangeChar)
+@@ -394,7 +398,7 @@
+                 If SourceEndIndex = 0 Then
+                     Return False
+                 Else
+-                    Throw New ArgumentException(GetResourceString(ResID.Argument_InvalidValue1, "Pattern"))
++                    Throw New ArgumentException("Argument 'Pattern' is not a valid value.")
+                 End If
+             Else
+                 Return (PatternIndex = PatternEndIndex) AndAlso (SourceIndex = SourceEndIndex)
+@@ -438,7 +442,7 @@
+                 s = Source.Chars(SourceIndex)
+             End If
+ 
+-            ci = GetCultureInfo().CompareInfo
++            ci = CultureInfo.CurrentCulture.CompareInfo
+             Options = CompareOptions.IgnoreCase Or _
+                       CompareOptions.IgnoreWidth Or _
+                       CompareOptions.IgnoreNonSpace Or _
+@@ -537,7 +541,7 @@
+                             EndRangeChar = p
+ 
+                             If StartRangeChar > EndRangeChar Then
+-                                Throw VbMakeException(vbErrors.BadPatStr)
++                                Throw GetVBException(VBErrors.ERR93_Invalid_pattern_string)
+                             ElseIf (SeenNot AndAlso Match) OrElse (Not SeenNot AndAlso Not Match) Then
+                                 'Calls to ci.Compare are expensive, avoid them for good performance
+                                 If Options = CompareOptions.Ordinal Then
+@@ -605,7 +609,7 @@
+                 If SourceEndIndex = 0 Then
+                     Return False
+                 Else
+-                    Throw New ArgumentException(GetResourceString(ResID.Argument_InvalidValue1, "Pattern"))
++                    Throw New ArgumentException("Argument 'Pattern' is not a valid value.")
+                 End If
+             Else
+                 Return (PatternIndex = PatternEndIndex) AndAlso (SourceIndex = SourceEndIndex)
+@@ -802,11 +806,11 @@
+             StartPosition -= 1
+ 
+             If StartPosition < 0 OrElse StartPosition >= DestLength Then
+-                Throw New ArgumentException(GetResourceString(ResID.Argument_InvalidValue1, "Start"))
++                Throw New ArgumentException("Argument 'Start' is not a valid value.")
+             End If
+ 
+             If MaxInsertLength < 0 Then
+-                Throw New ArgumentException(GetResourceString(ResID.Argument_InvalidValue1, "Length"))
++                Throw New ArgumentException("Argument 'Length' is not a valid value.")
+             End If
+ 
+             '  first, limit the length of the source string
+@@ -858,4 +862,3 @@
+ #End Region
+ 
+ End Namespace
+-

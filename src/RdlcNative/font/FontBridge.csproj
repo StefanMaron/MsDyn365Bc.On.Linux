@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AutomaticallyUseReferenceAssemblyPackages>false</AutomaticallyUseReferenceAssemblyPackages>
+    <AssemblyName>FontBridge</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="FontBridge.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2010/01/reportdefinition" xmlns:rd="http://schemas.microsoft.com/SQLServer/reporting/reportdesigner">
+  <DataSources><DataSource Name="BC"><ConnectionProperties><DataProvider>SQL</DataProvider><ConnectString /></ConnectionProperties></DataSource></DataSources>
+  <DataSets><DataSet Name="DataSet_Result">
+    <Query><DataSourceName>BC</DataSourceName><CommandText /></Query>
+    <Fields>
+      <Field Name="Description"><DataField>Description</DataField><rd:TypeName>System.String</rd:TypeName></Field>
+      <Field Name="Quantity"><DataField>Quantity</DataField><rd:TypeName>System.Int32</rd:TypeName></Field>
+      <Field Name="UnitPrice"><DataField>UnitPrice</DataField><rd:TypeName>System.Decimal</rd:TypeName></Field>
+    </Fields>
+  </DataSet></DataSets>
+  <ReportSections><ReportSection>
+    <Body><ReportItems>
+      <Textbox Name="Result"><CanGrow>true</CanGrow><KeepTogether>true</KeepTogether>
+        <Paragraphs><Paragraph><TextRuns><TextRun>
+          <Value>="Original BC gRPC Render | " &amp; First(Fields!Description.Value, "DataSet_Result") &amp; " | rows=" &amp; CountRows("DataSet_Result") &amp; " | total=" &amp; Format(Sum(Fields!Quantity.Value * Fields!UnitPrice.Value, "DataSet_Result"), "0.00")</Value>
+          <Style><FontFamily>DejaVu Sans</FontFamily><FontSize>12pt</FontSize></Style>
+        </TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+        <Top>0.2in</Top><Left>0.2in</Left><Height>1in</Height><Width>6in</Width>
+        <Style><Border><Style>None</Style></Border></Style>
+      </Textbox>
+    </ReportItems><Height>1.5in</Height><Style /></Body>
+    <Width>6.5in</Width>
+    <Page><PageHeight>11in</PageHeight><PageWidth>8.5in</PageWidth>
+      <LeftMargin>1in</LeftMargin><RightMargin>1in</RightMargin>
+      <TopMargin>1in</TopMargin><BottomMargin>1in</BottomMargin><Style />
+    </Page>
+  </ReportSection></ReportSections>
+</Report>
