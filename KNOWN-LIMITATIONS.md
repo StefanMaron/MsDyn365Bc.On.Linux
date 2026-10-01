@@ -28,7 +28,7 @@ container plus, where noted, corpus run 34079926224.
 | `Report.SaveAs(Pdf)` with an RDLC layout (issue #70) | returns false — RDLC rendering is not implemented | returns true | **The image. Re-measured 2026-09-07 on BC 28.4: still false**, so the claim is current, not stale. Note this does NOT generalise to "reports don't render on Linux": the Aspose.Words path (Word and Excel layouts) does render, since commit 9679545 linked Linux `libSkiaSharp.so` + harfbuzz into the service dir. RDLC is separate — it goes to the Windows Reporting Service PE binary, which the entrypoint replaces with a stub and Patch #19 makes throw `NavReportException` from `RenderAsync`. Fixing it means running Microsoft's own renderer, which is .NET Framework, under Mono — investigated and parked at a `TypeLoadException` inside ReportViewer's intermediate-format serializer; the CAS blocker before it IS solved. See `docs/RDLC-ON-LINUX.md` and issue #73. Until then the assertion belongs here (e.g. `extensions/smoke-test`), not in a corpus whose premise is "validated against a real service tier". |
 | ~~Opening a card on an empty linked part: part page `OnNewRecord` firing count~~ (issue #78) | ~~6 firings~~ **now 3, matching Windows** | 3 firings | **FIXED — this tier now coalesces notifications the way a real BC tier does.** A diagnostic arm (`Card.Lines.First()` returns false, then `Card.Lines.Next()` immediately returns false) proved it was one draft row notified repeatedly, not extra rows — confirmed identical in shape on both tiers (an online sandbox run gave the exact same `afterFirst=3 \| next1=No,count=3`). Traced with `dotnet-trace` into `Microsoft.Dynamics.Nav.Client.UI.dll` and `Microsoft.Dynamics.Framework.UI.dll`: `DraftLinePattern.MakeDraftLines()` is invoked from three binding-manager notifications, and BC normally coalesces rapid-fire ones — `CommunicationChannel.EnsureQueueLength()` evicts queued messages past `ChannelOptions.QueueLength`, and `BindingManagerConsumerPort.FillStarting()` pulls only one survivor per channel per fill — but only when `CommunicationBroker.DefaultChannelOptions.Async` is `true`. This image's own `PatchTestPageClient` forced it to `false` (`src/tools/PatchNclTestPage/PatchTestPageClient.cs`, wired from `scripts/entrypoint.sh` Step 2b), which sends every notification inline with nothing to evict — twice as many `OnNewRecord` firings for the same page, on this tier only. The patch is now opt-in (`BC_TESTPAGE_ASYNC_PATCH=1`); default is unpatched (`Async=true`), matching Windows. The deadlock the patch was written against (commit 29d2bdf) was never isolated from that commit's OTHER fix in the same change (a `ToUnicodeEx` bug causing its own infinite loop) and was measured before TestPage could even run end-to-end on this tier — re-tested against a RunObject → `[ModalPageHandler]` StandardDialog target (the shape most likely to need a real pump) with `Async` left at `true`: 7/7 pass, no hang. Corpus PR #284 landed and rewrote `TestPagePartOnNewRecordCount.al` as delta assertions, which pass on either tier by construction — so nothing downstream checks the absolute count any more. `extensions/smoke-test`'s `BcLinuxOnrcTests` codeunit now carries that check directly, pinning 3 on this image's own version matrix. |
 
-Two entries that were on this list and are now closed, both harness rather than
+Three entries that were on this list and are now closed, all harness rather than
 tier:
 
 - **`TestPermissions` was not enforced on the fast path** (issue #64). The
@@ -51,6 +51,24 @@ tier:
   for the old behaviour — "BC kills the session after each codeunit under test
   isolation" — was wrong: `TestIsolation = Codeunit` rolls back database changes
   and says nothing about the session.
+- **An unhandled `Confirm` in a part's `OnOpenPage` was not refused on BC 28.x**
+  (issue #93). Windows 28.4 and this image's 27.x fail `Host.OpenView()` with
+  `Unhandled UI: Confirm`. This image's 28.0 to 28.5 opened the host and raised
+  nothing. No UI patch is involved. On BC 28+ the `test_runner=auto` workflow
+  runs tests on the altool hub, and the hub has no test runner codeunit to
+  refuse an unhandled Confirm. 27.x has no hub, so it uses the websocket runner,
+  which refuses it. Measured on one BC 28.4 container: the same four tests
+  (a Confirm in a part's `OnOpenPage`, in the host's own `OnOpenPage`, on an
+  empty table and on a table with a row) pass on the websocket runner and fail
+  on both altool transports (`cli` and `hub`). So the problem is not specific to
+  parts. `classify-handler-codeunits.py` did not catch the test, because rule (b)
+  needs `.RunModal(` or `.Invoke(` next to `asserterror` and this test only calls
+  `OpenView()`. It now also routes any test whose body contains the text
+  `Unhandled UI` to the websocket runner (rule (d)), and
+  `scripts/test-classify-handler-codeunits.py` covers it. **Residual:** a test
+  that depends on the refusal without naming the text, for example one with a
+  looser `ExpectedError`, still runs on the hub and passes silently. Only
+  making the hub refuse unhandled UI itself would close that.
 
 ## Failure triage: bcapps-gate run 2026-08-06 (BC 28.1, hub runner, TC=0 legs)
 

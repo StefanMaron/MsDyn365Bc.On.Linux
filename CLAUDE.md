@@ -725,8 +725,9 @@ split exists and the reason routing errs toward websocket.
 
 `scripts/classify-handler-codeunits.py` statically scans a test app's AL
 source for `[HandlerFunctions(...)]` usage (the specific unhandled-
-modal-plus-`asserterror` shape, and any effective `TestPermissions` other
-than `Disabled`) and routes each codeunit to either the fast
+modal-plus-`asserterror` shape, any test body that names the `Unhandled UI`
+error text — issue #93, a Confirm in a part's `OnOpenPage` with no call to
+match on — and any effective `TestPermissions` other than `Disabled`) and routes each codeunit to either the fast
 path or the classic websocket path — decided ONCE, before either runner
 starts, so nothing runs twice even when many codeunits fail. It's a
 heuristic tied to the *known* failure shape, not a proof of full

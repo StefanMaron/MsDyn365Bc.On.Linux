@@ -35,7 +35,9 @@ A test method is flagged "needs websocket" when any of:
       bare `RunModal(`) — the exact shape of the repro in issue #27
       (`asserterror Host.PickIt.Invoke(); Assert.ExpectedError('Unhandled
       UI');`), or
-  (c) its effective TestPermissions is anything other than `Disabled`.
+  (c) its effective TestPermissions is anything other than `Disabled`, or
+  (d) its body mentions the `Unhandled UI` error text — i.e. it asserts the
+      refusal itself, whatever call raised it (issue #93).
 
 Rule (c) is issue #64, and unlike (a) and (b) it is measured rather than
 inferred. TestPermissions works "together with the OnBeforeTestRun and
@@ -52,6 +54,19 @@ declaration inserting into its own table: the websocket runner refuses it
 ("Sorry, the current permissions prevented the action."), the altool/hub runner
 lets it through. At corpus scale that is 652 refusals the fast path silently
 turned green — see the issue for the Windows-container comparison.
+
+Rule (d) is issue #93. A part page's `OnOpenPage` calls `Confirm`, no
+ConfirmHandler is bound, and the test does `asserterror Host.OpenView();
+Assert.ExpectedError('Unhandled UI: Confirm');`. There is no `.RunModal(` or
+`.Invoke(` anywhere in the test, so rule (b) never fires, and the hub — which
+has no test runner codeunit to refuse the Confirm — opens the host silently.
+That is the whole of the "BC 28.x swallows it, 27.x raises" difference: BC 28+
+legs take the hub under `test_runner=auto`, 27.x legs have no hub and use the
+websocket runner. Measured on BC 28.4, one container: the same four tests pass
+on the websocket runner and fail on both altool transports (`cli`, `hub`),
+including a Confirm in the host page's own `OnOpenPage`, so it is not specific
+to parts. A test that names the error text is asserting exactly the behavior
+the hub lacks, regardless of which UI call raises it.
 
 This is a heuristic, not a proof. It cannot see a modal invoked deep inside
 called business logic that the test codeunit's own source never mentions.
@@ -88,6 +103,10 @@ PROC_DECL = re.compile(
 )
 END_LINE = re.compile(r'^(?P<indent>\s*)end;\s*$')
 ASSERTERROR_RE = re.compile(r'\basserterror\b', re.IGNORECASE)
+# The refusal the hub never raises. Matching the text rather than the call that
+# produces it covers Confirm / Message / StrMenu / modal and non-modal page opens
+# alike, which no call-shape rule can enumerate.
+UNHANDLED_UI_RE = re.compile(r'\bUnhandled\s+UI\b', re.IGNORECASE)
 MODAL_CALL_RE = re.compile(r'\.(RunModal|Invoke)\s*\(|(?<![\w.])RunModal\s*\(', re.IGNORECASE)
 
 
@@ -158,6 +177,8 @@ def classify_al_source(paths: list[str]) -> dict[int, dict]:
             elif ASSERTERROR_RE.search("\n".join(proc_body)) and MODAL_CALL_RE.search(
                 "\n".join(proc_body)
             ):
+                cur.needs_websocket = True
+            elif UNHANDLED_UI_RE.search("\n".join(proc_body)):
                 cur.needs_websocket = True
 
         def flush_codeunit():
