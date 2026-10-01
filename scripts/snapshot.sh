@@ -11,7 +11,8 @@
 # Two files that are only valid TOGETHER:
 #
 #   checkpoint/          the frozen NST process image (~2.1 GB)
-#   cronus.bak           the database it was booted against (~540 MB)
+#   <database>.bak       the database it was booted against (~540 MB); <database> is
+#                        BC_DATABASE, CRONUS by default
 #   bc-snapshot:<key>    a docker image holding the container read-write layer,
 #                        because criu re-opens files by path and some of them
 #                        (the /tmp/bc-stdin FIFO NST holds as stdin) are not in
@@ -383,7 +384,14 @@ _sqlcmd() { docker compose exec -T sql /opt/mssql-tools18/bin/sqlcmd -b -S local
 # job keeps the backup path, and so does the first restore after any reboot.
 # Developer edition supports snapshots and is what this compose file gets by not
 # setting MSSQL_PID; Express does not, which is why every failure here is soft.
-DB_SNAP=CRONUS_bcsnap
+# Matches the entrypoint: the database name is configurable so several BC
+# versions can share one SQL Server.
+BC_DATABASE="${BC_DATABASE:-CRONUS}"
+DB_SNAP="${BC_DATABASE}_bcsnap"
+# One name for the backup everywhere it is written, copied, staged and read back.
+# Linux file names are case-sensitive, so "CRONUS.bak" and "cronus.bak" are two
+# different files; spelling it twice is how a default setup stops working.
+SNAP_BAK="${BC_DATABASE}.bak"
 
 # Logged because the mapping count was the leading theory for what the restore
 # scales with, and measuring it is what killed the theory: it moves ~10% across
@@ -427,10 +435,10 @@ _create_db_snapshot() {
     -- accident, since bash re-concatenates the pieces, but shellcheck flags it
     -- (SC2140) and the next edit inside such a region would not be harmless.
     DECLARE @f nvarchar(max) = STUFF((
-      SELECT ', (NAME = [' + name + '], FILENAME = ''/var/opt/mssql/data/' + name + '_bcsnap.ss'')'
-      FROM sys.master_files WHERE database_id = DB_ID('CRONUS') AND type_desc = 'ROWS'
+      SELECT ', (NAME = [' + name + '], FILENAME = ''/var/opt/mssql/data/${BC_DATABASE}_' + name + '_bcsnap.ss'')'
+      FROM sys.master_files WHERE database_id = DB_ID('$BC_DATABASE') AND type_desc = 'ROWS'
       FOR XML PATH('')), 1, 2, '');
-    EXEC('CREATE DATABASE [$DB_SNAP] ON ' + @f + ' AS SNAPSHOT OF [CRONUS]');" 2>&1); then
+    EXEC('CREATE DATABASE [$DB_SNAP] ON ' + @f + ' AS SNAPSHOT OF [$BC_DATABASE]');" 2>&1); then
     log "  (no database snapshot: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140))"
     log "  restores will rebuild from the backup — correct, just slower"
     return 0
@@ -441,24 +449,24 @@ _create_db_snapshot() {
 # Non-zero means "no usable snapshot, do it the long way" — never fatal.
 _revert_db_snapshot() {
   [ "${BC_SNAPSHOT_DB_REVERT:-1}" = "1" ] || return 1
-  # Both must exist: the snapshot alone is meaningless if CRONUS was dropped,
+  # Both must exist: the snapshot alone is meaningless if the database was dropped,
   # and a container recreated since `create` has neither.
   _sqlcmd -h -1 -W -Q "SET NOCOUNT ON; SELECT CASE WHEN DB_ID('$DB_SNAP') IS NOT NULL
-    AND DB_ID('CRONUS') IS NOT NULL THEN 1 ELSE 0 END" 2>/dev/null | grep -q '^1' || return 1
+    AND DB_ID('$BC_DATABASE') IS NOT NULL THEN 1 ELSE 0 END" 2>/dev/null | grep -q '^1' || return 1
   local out
   # SINGLE_USER first: reverting needs exclusive access, and BC is stopped at
   # this point but its sessions may not have drained. MULTI_USER is restored on
   # both paths, or the database would be left unusable by the restored NST.
   if ! out=$(_sqlcmd -Q "
-    ALTER DATABASE [CRONUS] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    ALTER DATABASE [$BC_DATABASE] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
     BEGIN TRY
-      RESTORE DATABASE [CRONUS] FROM DATABASE_SNAPSHOT = '$DB_SNAP';
+      RESTORE DATABASE [$BC_DATABASE] FROM DATABASE_SNAPSHOT = '$DB_SNAP';
     END TRY
     BEGIN CATCH
-      ALTER DATABASE [CRONUS] SET MULTI_USER;
+      ALTER DATABASE [$BC_DATABASE] SET MULTI_USER;
       THROW;
     END CATCH;
-    ALTER DATABASE [CRONUS] SET MULTI_USER;" 2>&1); then
+    ALTER DATABASE [$BC_DATABASE] SET MULTI_USER;" 2>&1); then
     log "  database revert failed, rebuilding from the backup instead:"
     printf '%s\n' "$out" | tail -4 >&2
     return 1
@@ -512,7 +520,7 @@ _prepare_sqldir() {
   # SQL Server wrote the previous backup as uid 10001 mode 640. cp TRUNCATES an
   # existing file, which needs write permission on the FILE — a 777 directory
   # does not help. Remove it first; unlink only needs the directory.
-  rm -f "$d/cronus.bak" 2>/dev/null || true
+  rm -f "$d/$SNAP_BAK" 2>/dev/null || true
 }
 
 # The store is ours: _export_checkpoint chowns the copied checkpoint to the
@@ -649,7 +657,7 @@ status() {
   if [ "${BC_SNAPSHOT_REFRESH:-}" = "1" ]; then echo "refresh forced $s"; return 1; fi
   # The stamp is written LAST by create(), so its presence is what distinguishes
   # a complete pair from one interrupted halfway. A torn snapshot is a miss.
-  if [ -f "$s/$STAMP_NAME" ] && [ -s "$s/cronus.bak" ] && [ -d "$s/checkpoint/cp1" ]; then
+  if [ -f "$s/$STAMP_NAME" ] && [ -s "$s/$SNAP_BAK" ] && [ -d "$s/checkpoint/cp1" ]; then
     echo "hit $s"; return 0
   fi
   echo "miss $s"; return 1
@@ -797,14 +805,14 @@ create() {
   # throws away the only explanation of a failed backup. -b makes the exit code
   # meaningful; this makes the reason visible.
   local bkout
-  if ! bkout=$(_sqlcmd -Q "BACKUP DATABASE [CRONUS] TO DISK='/sqlsnap/cronus.bak' WITH COPY_ONLY, INIT, COMPRESSION" 2>&1); then
+  if ! bkout=$(_sqlcmd -Q "BACKUP DATABASE [$BC_DATABASE] TO DISK='/sqlsnap/$SNAP_BAK' WITH COPY_ONLY, INIT, COMPRESSION" 2>&1); then
     log "BACKUP DATABASE failed:"; echo "$bkout" | tail -6 >&2
     die "could not back up the database"
   fi
   # Streamed out through the container rather than copied on the host: SQL
   # writes the backup as uid 10001 mode 640, which the runner user cannot read.
-  docker compose exec -T sql cat /sqlsnap/cronus.bak > "$s/cronus.bak"
-  [ -s "$s/cronus.bak" ] || die "database backup came out empty"
+  docker compose exec -T sql cat "/sqlsnap/$SNAP_BAK" > "$s/$SNAP_BAK"
+  [ -s "$s/$SNAP_BAK" ] || die "database backup came out empty"
   _create_db_snapshot
 
   # Written last: the stamp is what makes the pair readable, so it must not
@@ -907,8 +915,8 @@ restore() {
     log "database reverted to the snapshot ($(( $(date +%s) - t_sqlup ))s; sql up + revert: $(( $(date +%s) - t0 ))s)"
     t_db=$(date +%s)
   else
-  cp "$s/cronus.bak" "${BC_SNAPSHOT_SQLDIR:-/var/tmp/bc-sqlstage}/cronus.bak"
-  chmod 644 "${BC_SNAPSHOT_SQLDIR:-/var/tmp/bc-sqlstage}/cronus.bak"
+  cp "$s/$SNAP_BAK" "${BC_SNAPSHOT_SQLDIR:-/var/tmp/bc-sqlstage}/$SNAP_BAK"
+  chmod 644 "${BC_SNAPSHOT_SQLDIR:-/var/tmp/bc-sqlstage}/$SNAP_BAK"
 
   # master went with the previous container (the data dir is a tmpfs), so the
   # BC login has to be recreated exactly as entrypoint.sh Step 3 makes it.
@@ -923,7 +931,7 @@ restore() {
   # `docker compose exec` spawning sqlcmd in the container and re-reading the
   # 539 MB backup's header -- to take row 1 from the first and row 2 from the
   # second.
-  local fl; fl=$(_sqlcmd -h -1 -s $'\t' -W -Q "SET NOCOUNT ON; RESTORE FILELISTONLY FROM DISK='/sqlsnap/cronus.bak'" 2>/dev/null || true)
+  local fl; fl=$(_sqlcmd -h -1 -s $'\t' -W -Q "SET NOCOUNT ON; RESTORE FILELISTONLY FROM DISK='/sqlsnap/$SNAP_BAK'" 2>/dev/null || true)
   d=$(printf '%s\n' "$fl" | head -1 | cut -f1)
   l=$(printf '%s\n' "$fl" | head -2 | tail -1 | cut -f1)
   if [ -z "$d" ] || [ -z "$l" ]; then
@@ -932,9 +940,9 @@ restore() {
   fi
   local rsout
   if ! rsout=$(_sqlcmd -Q "
-    RESTORE DATABASE [CRONUS] FROM DISK='/sqlsnap/cronus.bak'
-    WITH MOVE '$d' TO '/var/opt/mssql/data/CRONUS.mdf',
-         MOVE '$l' TO '/var/opt/mssql/data/CRONUS_log.ldf', REPLACE" 2>&1); then
+    RESTORE DATABASE [$BC_DATABASE] FROM DISK='/sqlsnap/$SNAP_BAK'
+    WITH MOVE '$d' TO '/var/opt/mssql/data/$BC_DATABASE.mdf',
+         MOVE '$l' TO '/var/opt/mssql/data/${BC_DATABASE}_log.ldf', REPLACE" 2>&1); then
     log "RESTORE DATABASE failed — cold boot:"; echo "$rsout" | tail -6 >&2
     return 1
   fi

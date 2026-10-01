@@ -347,6 +347,7 @@ BC_DEV_PORT=17049 docker compose up -d
 | `BC_TYPE`         | `sandbox`        | `sandbox` or `onprem`                                                        |
 | `SA_PASSWORD`     | `Passw0rd123!`   | SQL Server SA password                                                       |
 | `SQL_PORT`        | `11433`          | Host port for SQL Server                                                     |
+| `BC_DATABASE`     | `CRONUS`         | SQL database name. Set one per instance so several BC versions can share one SQL Server. `scripts/snapshot.sh` reads it from its own environment, so export it there too. |
 | `BC_DEV_PORT`     | `7049`           | Dev endpoint port (publish, symbols)                                         |
 | `BC_ODATA_PORT`   | `7048`           | OData v4 port                                                                |
 | `BC_API_PORT`     | `7052`           | API v2.0 port                                                                |
