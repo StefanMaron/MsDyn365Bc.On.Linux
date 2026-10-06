@@ -43,3 +43,5 @@ __pycache__/
 
 # Serena agent workspace
 .serena/
+# CocoIndex Code (ccc)
+/.cocoindex_code/

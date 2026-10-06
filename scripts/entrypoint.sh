@@ -1447,9 +1447,19 @@ if [ "${BC_PROFILE_NST:-0}" = "1" ]; then
     export DOTNET_DiagnosticPorts="/tmp/nst-diag.sock,suspend"
 fi
 
-DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll dotnet Microsoft.Dynamics.Nav.Server.dll /console < /tmp/bc-stdin &
-BC_PID=$!
-# Keep the FIFO writer open in background (prevents EOF)
+# Launches (or relaunches) the NST process and records its pid to
+# /tmp/bc-nst.pid — scripts/restart-service.sh polls that file to detect a
+# respawn. Reused both for the initial boot and for every soft-restart the
+# supervisor loop below performs, so the two paths cannot drift apart.
+start_nst() {
+    DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll dotnet Microsoft.Dynamics.Nav.Server.dll /console < /tmp/bc-stdin &
+    BC_PID=$!
+    echo "$BC_PID" > /tmp/bc-nst.pid
+}
+
+start_nst
+# Keep the FIFO writer open in background (prevents EOF); survives across
+# soft-restarts since it is never closed or recreated.
 exec 3>/tmp/bc-stdin
 
 # Wait for dev endpoint to be ready, then publish test runner
@@ -1884,4 +1894,28 @@ PYEOF
     fi
 ) &
 
-wait $BC_PID
+# Supervise the NST process for the life of the container. A plain `wait
+# $BC_PID` here would mean the only way to bounce NST is to kill this whole
+# container (PID 1 exits right after `wait` returns, taking the container
+# with it — verified: `docker exec ... kill -TERM <nst-pid>` exits the
+# container with rc 143). scripts/restart-service.sh drops a
+# /tmp/bc-restart-requested marker and sends NST SIGTERM; when that marker
+# is present at exit we relaunch instead of exiting, so a docker exec can
+# cleanly bounce just the service tier — restart-service.sh is the intended
+# entry point, not sending the signal directly.
+while true; do
+    # `wait` as a bare command would trip `set -e` (line 4) the instant NST
+    # exits non-zero — including on the SIGTERM restart-service.sh sends for
+    # a deliberate soft-restart — and kill this script before RC is even
+    # read. `|| RC=$?` puts `wait` on the left of `||`, which set -e exempts.
+    RC=0
+    wait "$BC_PID" || RC=$?
+    if [ -f /tmp/bc-restart-requested ]; then
+        rm -f /tmp/bc-restart-requested
+        echo "[entrypoint] NST exited (rc=$RC) — restart requested, relaunching"
+        start_nst
+        continue
+    fi
+    echo "[entrypoint] NST exited (rc=$RC) — no restart requested, container is stopping"
+    exit "$RC"
+done
