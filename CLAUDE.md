@@ -1216,13 +1216,15 @@ this repository's own publishing targets and still name the owner.
 `scripts/discover-bc-versions.py` reads Microsoft's artifact indexes and
 emits two matrices:
 
-- **Released (REQUIRED).** Public sandbox index, newest `majors_back`
-  majors (dispatch input, default **2** → 27 and 28 as of 2026-08).
+- **Released (REQUIRED).** Public sandbox index, every major from
+  `min_major` up (dispatch input, default **27** → 27, 28 and 29 as of
+  2026-10; a newly released major joins by itself).
   Emitted as SHORT versions ("27.5", "28.3") on purpose:
   `download-artifacts.sh` resolves a short version to the newest build
   itself, so a hotfix landing between matrix computation and download is
-  picked up rather than missed. Capping at 2 majors is a cost decision —
-  the index carries every major back to 25 and one leg is a full BC boot.
+  picked up rather than missed. The floor is a cost decision — the index
+  carries every major back to 24 and lower, and one leg is a full BC boot.
+  Raise `min_major` when an old major is no longer supported.
 - **Preview (NON-BLOCKING).** Insider index
   (`bcinsider-fvh2ekdjecfjd6gk.b02.azurefd.net`, anonymously readable, no
   SAS token, same path shape as the public one). Two legs only: the next
@@ -1236,7 +1238,6 @@ knob lives in `bc-test-from-source.yml` as a `continue_on_error` input
 (default false) applied to the job it actually runs. Don't try to move it
 back to the caller — it silently does nothing there.
 
-**The next-major preview leg is expected to fail** until the image ships
-.NET 10: BC 29 targets .NET 10, `src/Dockerfile` ships the .NET 8 runtime,
-so the NST cannot start. `preview-note` writes that framing into the run
-summary so a red preview leg isn't misread as a regression.
+**BC 29 was released (it is a required leg as of 2026-10).** The image ships
+both .NET 8 and .NET 10, so the old "next-major preview leg is expected to
+fail" framing no longer applies and `preview-note` no longer says it.
