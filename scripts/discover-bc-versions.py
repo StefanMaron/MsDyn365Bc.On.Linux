@@ -19,14 +19,16 @@ Two groups come out of this, from two different Microsoft artifact indexes:
 Insider artifacts need no SAS token; a plain anonymous GET works, same path
 shape as the public index.
 
-Scope control: --majors-back N keeps the released matrix to the N newest BC
-majors present in the public index (default 2 → 27 and 28 as of 2026-08).
-Discovering "everything in the index" would be dozens of legs and dozens of
-BC boots; see CLAUDE.md's CI wall-clock section for why that matters.
+Scope control: --min-major N keeps every BC major from N upward that is
+present in the public index (default 27). The set grows by itself when
+Microsoft releases a new major, and the floor only moves when someone decides
+an old major is no longer supported. The index also carries majors back to 24
+and lower; a floor keeps those out, since each major is about six BC boots.
+See CLAUDE.md's CI wall-clock section for why that matters.
 
 Usage:
-    discover-bc-versions.py --mode released [--majors-back 2]
-    discover-bc-versions.py --mode preview  [--majors-back 2]
+    discover-bc-versions.py --mode released [--min-major 27]
+    discover-bc-versions.py --mode preview  [--min-major 27]
     discover-bc-versions.py --mode both --format text   # human-readable
 
 Output (default --format json) is a GitHub Actions matrix object, ready for
@@ -95,12 +97,10 @@ def newest_per_major_minor(versions):
     return {mm: raw for mm, (key, raw) in best.items()}
 
 
-def released_matrix(index_url, majors_back):
+def released_matrix(index_url, min_major):
     versions = fetch_versions(index_url)
     per_mm = newest_per_major_minor(versions)
-    majors = sorted({mm[0] for mm in per_mm})
-    keep = set(majors[-majors_back:]) if majors_back > 0 else set(majors)
-    legs = sorted(mm for mm in per_mm if mm[0] in keep)
+    legs = sorted(mm for mm in per_mm if mm[0] >= min_major)
     return ["%d.%d" % mm for mm in legs], per_mm
 
 
@@ -154,10 +154,10 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=["released", "preview", "both"],
                     default="released")
-    ap.add_argument("--majors-back", type=int, default=2,
-                    help="How many of the newest BC majors the required "
-                         "matrix covers (default 2). 0 = every major in the "
-                         "index; don't, see the module docstring.")
+    ap.add_argument("--min-major", type=int, default=27,
+                    help="Lowest BC major the required matrix covers "
+                         "(default 27). Every major from here up in the "
+                         "public index is included.")
     ap.add_argument("--country", default="w1")
     ap.add_argument("--type", default="sandbox")
     ap.add_argument("--format", choices=["json", "text"], default="json")
@@ -166,7 +166,7 @@ def main():
     pub_url = PUBLIC_INDEX.format(type=args.type, country=args.country)
     ins_url = INSIDER_INDEX.format(type=args.type, country=args.country)
 
-    legs, per_mm = released_matrix(pub_url, args.majors_back)
+    legs, per_mm = released_matrix(pub_url, args.min_major)
     if not legs:
         raise SystemExit("ERROR: released discovery produced no versions")
 

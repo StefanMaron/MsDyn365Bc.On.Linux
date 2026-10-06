@@ -16,14 +16,13 @@ name: Test BC Versions
 # reads Microsoft's artifact indexes at run time and produces two groups:
 #
 #   test          REQUIRED. Released versions from the public sandbox index,
-#                 newest `majors_back` majors (default 2 → 27 and 28 today).
+#                 every major from `min_major` up (default 27 → 27, 28 and 29
+#                 today). New majors join on their own when released.
 #                 A failure here is a real bc-linux regression.
 #
 #   test-preview  NON-BLOCKING. The next major and the next minor from the
 #                 INSIDER index, fed in as a full BC_ARTIFACT_URL. These are
-#                 early warning about unreleased BC builds; the next-major
-#                 leg is expected to fail today (BC 29 targets .NET 10, the
-#                 bc-runner image ships .NET 8).
+#                 early warning about unreleased BC builds.
 #
 # The `versions:` dispatch input still short-circuits both: pass
 # "27.0,28.1" and you get exactly those two legs and no preview.
@@ -36,10 +35,10 @@ on:
         required: false
         default: ''
         type: string
-      majors_back:
-        description: 'How many of the newest BC majors the REQUIRED matrix covers (2 = today''s 27 + 28). Used when "versions" is empty.'
+      min_major:
+        description: 'Lowest BC major the REQUIRED matrix covers; every released major from here up is tested (27 = 27, 28, 29, ...). Used when "versions" is empty.'
         required: false
-        default: '2'
+        default: '27'
         type: string
       include_preview:
         description: 'Also run the non-blocking insider preview legs (next major + next minor). Ignored when "versions" is set.'
@@ -78,7 +77,7 @@ jobs:
         # Only workflow_dispatch supplies these; on push/PR/schedule they
         # evaluate to empty and the defaults below apply.
         VERSIONS: ${{ inputs.versions }}
-        MAJORS_BACK: ${{ inputs.majors_back }}
+        MIN_MAJOR: ${{ inputs.min_major }}
         # Preview legs are on by default everywhere except when a dispatch
         # explicitly unticks the box. `inputs.include_preview` is empty (not
         # 'true') on push/PR/schedule, hence the event_name guard.
@@ -110,17 +109,17 @@ jobs:
         # against, so the matrix and the actual download always agree on
         # what "latest" means, and emits SHORT versions so a hotfix landing
         # mid-run is picked up rather than skipped.
-        MB="${MAJORS_BACK:-2}"
-        if [ -z "$MB" ]; then MB=2; fi
-        echo "Discovering released BC versions (newest $MB majors)..."
-        MATRIX=$(python3 scripts/discover-bc-versions.py --mode released --majors-back "$MB")
+        MM="${MIN_MAJOR:-27}"
+        if [ -z "$MM" ]; then MM=27; fi
+        echo "Discovering released BC versions (major $MM and newer)..."
+        MATRIX=$(python3 scripts/discover-bc-versions.py --mode released --min-major "$MM")
         echo "Required matrix: $MATRIX"
 
         if [ "$INCLUDE_PREVIEW" = "true" ]; then
           echo "Discovering insider preview versions..."
           # A wobble on the insider index must not take the required matrix
           # down with it — preview is a bonus, not a gate.
-          if P=$(python3 scripts/discover-bc-versions.py --mode preview --majors-back "$MB"); then
+          if P=$(python3 scripts/discover-bc-versions.py --mode preview --min-major "$MM"); then
             COUNT=$(P="$P" python3 -c "import os,json; print(len(json.loads(os.environ['P'])['include']))")
             PREVIEW="$P"
             if [ "$COUNT" -gt 0 ]; then HAS_PREVIEW=true; fi
@@ -406,9 +405,6 @@ jobs:
           echo "(next major + next minor). They do **not** gate this workflow."
           echo "A failure here means an unreleased BC build does not run on"
           echo "bc-linux yet — early warning, not a regression."
-          echo
-          echo "Known-expected failure: the next-major leg targets .NET 10"
-          echo "while the bc-runner image ships .NET 8, so the NST cannot start."
           echo
           echo '```json'
           echo "$PREVIEW"
