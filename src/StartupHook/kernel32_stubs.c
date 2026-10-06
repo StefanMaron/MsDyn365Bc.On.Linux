@@ -1,7 +1,7 @@
 // Stub implementations for Windows P/Invoke functions used by BC service tier on Linux.
 // Compiled to libwin32_stubs.so and loaded via NativeLibrary.ResolvingUnmanagedDll.
 // Provides no-op/stub implementations for: kernel32, user32, Wintrust, nclcsrts,
-// dhcpcsvc, Netapi32, ntdsapi, rpcrt4, advapi32.
+// dhcpcsvc, Netapi32, ntdsapi, rpcrt4, advapi32, winspool.
 
 #include <stdint.h>
 #include <errno.h>
@@ -385,3 +385,41 @@ int ReportEventW(HANDLE h, uint16_t type, uint16_t cat, uint32_t id,
     return 1;
 }
 int DeregisterEventSource(HANDLE h) { return 1; }
+
+// =============================================================================
+// winspool.drv — print spooler. This host has no printers.
+//
+// BC 29's Nav.Types PrinterHelper.GetPrinters() (reached while building a report
+// request page) P/Invokes these; without a library it dies with DllNotFoundException
+// (issue #108). The answer a Windows machine with no printers gives is "success,
+// zero printers", so that is what EnumPrinters returns. CharSet.Auto resolves to the
+// ANSI entry point on Linux, hence all three spellings of each name.
+// =============================================================================
+int GetDefaultPrinterW(uint16_t* buf, uint32_t* size) { return 0; }  // no default printer
+int GetDefaultPrinterA(char* buf, uint32_t* size) { return 0; }
+int GetDefaultPrinter(void* buf, uint32_t* size) { return 0; }
+
+int EnumPrintersW(uint32_t flags, const void* name, uint32_t level, void* buf,
+                  uint32_t cb, uint32_t* needed, uint32_t* returned) {
+    if (needed) *needed = 0;
+    if (returned) *returned = 0;
+    return 1;
+}
+int EnumPrintersA(uint32_t flags, const void* name, uint32_t level, void* buf,
+                  uint32_t cb, uint32_t* needed, uint32_t* returned) {
+    return EnumPrintersW(flags, name, level, buf, cb, needed, returned);
+}
+int EnumPrinters(uint32_t flags, const void* name, uint32_t level, void* buf,
+                 uint32_t cb, uint32_t* needed, uint32_t* returned) {
+    return EnumPrintersW(flags, name, level, buf, cb, needed, returned);
+}
+
+int OpenPrinterW(const void* name, HANDLE* h, const void* defaults) { if (h) *h = 0; return 0; }
+int OpenPrinterA(const void* name, HANDLE* h, const void* defaults) { if (h) *h = 0; return 0; }
+int OpenPrinter(const void* name, HANDLE* h, const void* defaults) { if (h) *h = 0; return 0; }
+
+int GetPrinterW(HANDLE h, int level, void* buf, int cb, int* needed) { if (needed) *needed = 0; return 0; }
+int GetPrinterA(HANDLE h, int level, void* buf, int cb, int* needed) { if (needed) *needed = 0; return 0; }
+int GetPrinter(HANDLE h, int level, void* buf, int cb, int* needed) { if (needed) *needed = 0; return 0; }
+
+int ClosePrinter(HANDLE h) { return 1; }
