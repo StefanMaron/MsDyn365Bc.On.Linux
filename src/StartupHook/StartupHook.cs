@@ -257,6 +257,17 @@ using System.Threading.Tasks;
 ///   runner class, so the websocket runner and a real tier are untouched.
 ///   NOT covered: the rest of 130453 (application areas, WorkDate, codeunits 130301/130302/
 ///   132553) is also skipped on the hub; the last error is the only part measured.
+/// Patch #19b: NavSession.InitReportingClientAsync (Nav.Ncl.dll) — BC 29, issue #109
+///   BC 29 removed NavEnvironment.CustomReportingServiceClient (the factory Patch #19 replaced) and
+///   kept only DecorateReportingServiceClient, which wraps a client InitReportingClientAsync has
+///   already built — after asking the SideServiceWatchdog for the reporting side service and
+///   throwing "Reporting service is not available." when Patch #18 left none registered. Applied
+///   only when #19's member is absent: the method is hooked to return the same no-op proxy, so
+///   Report.SaveAs gives one message on every BC version.
+/// winspool.drv stubs (kernel32_stubs.c) — BC 29, issue #108
+///   Nav.Types PrinterHelper.GetPrinters P/Invokes winspool.drv while a report request page is
+///   built; the library does not exist here (DllNotFoundException). The stubs answer as a host
+///   with no printers: EnumPrinters succeeds with zero entries, there is no default printer.
 ///
 /// JMP hooks work ONLY on BC methods (JIT-compiled). BCL methods are ReadyToRun pre-compiled
 /// and cannot be patched this way.
@@ -870,6 +881,7 @@ internal class StartupHook
         "ntdsapi", "ntdsapi.dll",
         "rpcrt4", "rpcrt4.dll",
         "advapi32", "advapi32.dll",
+        "winspool.drv", "winspool", "winspool.dll",
         "httpapi", "httpapi.dll",
         "gdiplus", "libgdiplus", "libgdiplus.so", "libgdiplus.so.0",
     };
@@ -1698,8 +1710,14 @@ internal class StartupHook
                 BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
             if (prop == null)
             {
-                Console.WriteLine("[StartupHook] Patch #19: CustomReportingServiceClient not found");
+                // BC 29 dropped CustomReportingServiceClient (the factory that replaced the
+                // whole client) for DecorateReportingServiceClient, which only wraps a client
+                // NavSession.InitReportingClientAsync has already built — and that method asks
+                // the SideServiceWatchdog for the reporting side service first and throws
+                // "Reporting service is not available." when Patch #18 left it unregistered.
+                // So hook InitReportingClientAsync itself (Patch #19b).
                 _reportingClientPatched = true;
+                TryHookInitReportingClient(navNcl);
                 return;
             }
             field = null; // will use property setter below
@@ -1754,6 +1772,63 @@ internal class StartupHook
 
         _reportingClientPatched = true;
         Console.WriteLine("[StartupHook] Patch #19: CustomReportingServiceClient → no-op proxy");
+    }
+
+    // Patch #19b: BC 29 — hook NavSession.InitReportingClientAsync to hand back the no-op
+    // client directly. Same observable behaviour as #19 on 27/28: RenderAsync/PrintReportAsync
+    // raise NavReportException, so Report.SaveAs reports the single "RDLC report rendering is
+    // not implemented on Linux BC" message on every version (issue #109).
+    private static Type? _reportingClientIface;
+
+    private static void TryHookInitReportingClient(Assembly navNcl)
+    {
+        Type? sessionType = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.NavSession");
+        var init = sessionType?.GetMethod("InitReportingClientAsync",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+        if (init == null)
+        {
+            Console.WriteLine("[StartupHook] Patch #19: neither CustomReportingServiceClient nor NavSession.InitReportingClientAsync found");
+            return;
+        }
+
+        string baseDir = AppDomain.CurrentDomain.BaseDirectory ?? "";
+        string clientDll = Path.Combine(baseDir, "Microsoft.BusinessCentral.Reporting.Client.dll");
+        if (!File.Exists(clientDll))
+            clientDll = Path.Combine(baseDir, "SideServices", "Microsoft.BusinessCentral.Reporting.Client.dll");
+        if (!File.Exists(clientDll))
+        {
+            Console.WriteLine($"[StartupHook] Patch #19b: {clientDll} not found");
+            return;
+        }
+        Type? iClientType = Assembly.LoadFrom(clientDll)
+            .GetType("Microsoft.BusinessCentral.Reporting.Client.IReportingServiceClient");
+        if (iClientType == null)
+        {
+            Console.WriteLine("[StartupHook] Patch #19b: IReportingServiceClient type not found");
+            return;
+        }
+
+        _reportingClientIface = iClientType;
+        _noopReportingClient = typeof(System.Reflection.DispatchProxy)
+            .GetMethod("Create", 2, Type.EmptyTypes)!
+            .MakeGenericMethod(iClientType, typeof(NoOpReportingProxy))
+            .Invoke(null, null);
+
+        var replacement = typeof(StartupHook).GetMethod(nameof(Replacement_InitReportingClientAsync),
+            BindingFlags.Public | BindingFlags.Static)!;
+        ApplyJmpHook(init, replacement, "NavSession.InitReportingClientAsync");
+        Console.WriteLine("[StartupHook] Patch #19b: NavSession.InitReportingClientAsync → no-op proxy");
+    }
+
+    // Declared `object` rather than Task<IReportingServiceClient>: the interface lives in an
+    // assembly this one cannot reference. Both are a plain object pointer in RAX, which is all
+    // the caller reads. The Task is built reflectively with the real interface as T.
+    public static object Replacement_InitReportingClientAsync(object session)
+    {
+        return typeof(System.Threading.Tasks.Task)
+            .GetMethod(nameof(System.Threading.Tasks.Task.FromResult))!
+            .MakeGenericMethod(_reportingClientIface!)
+            .Invoke(null, new[] { _noopReportingClient })!;
     }
 
     /// <summary>
