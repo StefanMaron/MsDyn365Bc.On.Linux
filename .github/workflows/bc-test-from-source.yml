@@ -284,6 +284,17 @@ on:
         required: false
         type: string
         default: "auto"
+      altool_transport:
+        description: >-
+          How the altool leg of test_runner=auto reaches the TestRunnerHub.
+          "auto" (default): one persistent connection for the whole leg, and
+          the per-codeunit `al runtests` process only if the hub cannot be
+          reached. "hub": the persistent connection, no fallback. "cli": a
+          new `al runtests` process, login and connection for every codeunit,
+          which was the default before and costs about 0.76 s per codeunit.
+        required: false
+        type: string
+        default: "auto"
       altool_version:
         description: >-
           Version of the Microsoft.Dynamics.BusinessCentral.Development.Tools
@@ -1246,6 +1257,7 @@ jobs:
                 --codeunit-range "${{ inputs.codeunit_range }}" \
                 --junit-output "$junit_file" \
                 --altool-cmd "$HOME/.dotnet/tools/al" \
+                --altool-transport "${{ inputs.altool_transport }}" \
                 --port "$BC_DEV_PORT" \
                 --base-url "http://localhost:${BC_ODATA_PORT}/BC" \
                 --dev-url "http://localhost:${BC_DEV_PORT}/BC/dev" \

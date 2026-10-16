@@ -30,10 +30,17 @@ That last one is the resource that was in conflict, and it produced a real
 flake: see StefanMaron/BusinessCentral.AL.Language.Tests#158 and the
 comment on run_legs below for the evidence.
 
-The altool leg defaults to --altool-transport cli, NOT hub/auto, even
-though hub is ~40x faster per codeunit, because cli spawns a fresh `al runtests`
-process per codeunit, so a codeunit that kills its session costs only that
-codeunit and not the rest of the run.
+The altool leg defaults to --altool-transport auto: ONE persistent connection to
+the TestRunnerHub for the whole leg, falling back to cli (a fresh `al runtests`
+process per codeunit) only when the hub connection cannot be established.
+It used to default to cli, because cli isolates a codeunit that kills its
+session: it costs only that codeunit and not the rest of the run. The hub
+transport now covers that case itself (run_codeunits_via_hub reconnects and
+retries the interrupted codeunit once), and cli's price was too high. In the
+corpus repository's BC 29.0 job the cli leg ran 7,288 tests in 1,660s, of which
+813s (0.76s per codeunit, 1,070 codeunits) was process start, login and
+SignalR negotiation, and the whole test step was at its 30 minute limit. See
+issue #115. Pass --altool-transport cli to get the old behaviour.
 
 READ THIS BEFORE CHANGING THAT DEFAULT ON SingleInstance GROUNDS. The reason
 originally recorded here was that tests asserting a SingleInstance codeunit's
@@ -302,9 +309,9 @@ def main() -> int:
                           "fallback) — pass the same value the caller uses for its own API port, "
                           "e.g. the reusable workflows' instance_slot-derived BC_API_PORT")
     ap.add_argument("--altool-cmd", default="al")
-    ap.add_argument("--altool-transport", default="cli", choices=["cli", "hub", "auto"],
-                     help="transport for the fast-path leg (default cli — see module "
-                          "docstring for why hub/auto aren't the default despite being faster)")
+    ap.add_argument("--altool-transport", default="auto", choices=["cli", "hub", "auto"],
+                     help="transport for the fast-path leg (default auto: one persistent hub "
+                          "connection, cli only if the hub cannot be reached — see module docstring)")
     ap.add_argument("--timeout", type=int, default=30)
     ap.add_argument("--codeunit-timeout", type=int, default=10)
     args = ap.parse_args()

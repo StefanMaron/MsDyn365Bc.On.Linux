@@ -755,14 +755,18 @@ the least harm. Codeunits
 with no matching AL source are conservatively routed to websocket —
 unproven safety is treated as unsafe.
 
-**The fast leg defaults to `--altool-transport cli`, not `hub`/`auto`**,
-even though hub is ~40x faster per codeunit: `cli` spawns a fresh
-`al runtests` process per codeunit, so a codeunit that kills its session
-costs only that codeunit and not the rest of the run. That is the reason to
-keep the default, and it is the only one — the `SingleInstance` argument that
-used to be given here is contradicted by the measurement above, and `cli`'s
-fresh session per codeunit is in fact the LESS faithful of the two on that
-surface.
+**The fast leg defaults to `--altool-transport auto`** (one persistent hub
+connection for the whole leg; `cli` only if the hub cannot be reached). It
+defaulted to `cli` so that a codeunit that kills its session costs only that
+codeunit, but the hub transport reconnects and retries the interrupted
+codeunit once, and `cli` paid about 0.76 s per codeunit for process start,
+login and SignalR negotiation. In the corpus repository's BC 29.0 job that was
+813 s of a 1,660 s leg (1,070 codeunits), in a test step that was at its 30
+minute limit (issue #115). The `SingleInstance` argument that used to be given
+for `cli` is contradicted by the measurement above: `cli`'s fresh session per
+codeunit is in fact the LESS faithful of the two on that surface, so a
+corpus test that depended on it may now fail the way a Windows container fails
+it. The reusable workflow exposes the choice as `altool_transport`.
 
 `test_runner=altool` (explicit force, BC 27/28's "catch hub regressions"
 mode) is untouched by any of this — it still runs every codeunit through
