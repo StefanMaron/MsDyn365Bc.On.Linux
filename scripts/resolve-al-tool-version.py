@@ -8,14 +8,18 @@ produces confusing downstream errors. BC 29 hit exactly that.
 
 The mapping is arithmetic, not a table:
 
-    AL major = BC major - 11
+    BC 29 and older:  AL major = BC major - 11
+    BC 30 and newer:  AL major = BC major
 
     BC 27 -> AL 16   (16.2.28.57946)
     BC 28 -> AL 17   (17.0.34.45391)
     BC 29 -> AL 18   (18.0.39.10160-beta)
+    BC 30 -> AL 30   (30.0.43.45776-beta)
 
-Both numbers the workflows previously hardcoded agree with it, so this is a
-generalization of the existing behavior rather than a new guess.
+Microsoft renumbered the AL tool to the BC major after 18: nuget.org has no
+19.x, and the next package is 30.0.42.11883-beta. BC 30's own apps declare
+Runtime="30.0" in their NavxManifest.xml, so the runtime moved with it.
+Checked 2026-10-20 against the BC 30.0.56593.0 insider artifacts.
 
 Prerelease handling is the point of this script. A BC major that is still in
 preview has NO stable compiler published — as of 2026-08 the newest AL 18.x
@@ -24,7 +28,8 @@ prefer the newest stable of the target major, and fall back to the newest
 prerelease when no stable exists, saying so on stderr. A preview BC version
 is unbuildable without that fallback.
 
-The AL runtime version follows the same offset: BC 29 -> runtime "18.0".
+The AL runtime version follows the AL major: BC 29 -> runtime "18.0",
+BC 30 -> runtime "30.0".
 
 Policies
 --------
@@ -57,9 +62,18 @@ import urllib.request
 PACKAGE = "microsoft.dynamics.businesscentral.development.tools.linux"
 INDEX = f"https://api.nuget.org/v3-flatcontainer/{PACKAGE}/index.json"
 
-# BC major - AL major. Verified against the two versions the workflows
-# previously hardcoded (BC 27 -> 16.x, BC 28 -> 17.x).
+# BC major - AL major up to BC 29. Verified against the two versions the
+# workflows previously hardcoded (BC 27 -> 16.x, BC 28 -> 17.x).
 BC_TO_AL_OFFSET = 11
+
+# The first BC major whose AL tool carries the BC major as its own major.
+FIRST_ALIGNED_BC_MAJOR = 30
+
+
+def al_major_for(bc_major):
+    if bc_major >= FIRST_ALIGNED_BC_MAJOR:
+        return bc_major
+    return bc_major - BC_TO_AL_OFFSET
 
 
 def version_key(v):
@@ -99,7 +113,7 @@ def main():
         print(f"ERROR: could not read a major version from '{args.bc_version}'", file=sys.stderr)
         return 2
 
-    al_major = bc_major - BC_TO_AL_OFFSET
+    al_major = al_major_for(bc_major)
     if al_major < 1:
         print(f"ERROR: BC major {bc_major} maps to AL major {al_major}, which is not valid",
               file=sys.stderr)

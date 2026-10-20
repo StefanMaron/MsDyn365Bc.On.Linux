@@ -266,10 +266,10 @@ on:
           (Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux on
           nuget.org). Accepts a policy keyword or an exact version.
           "matching" (default, same as blank): newest stable of the AL major
-          that matches bc_version (AL major = BC major - 11), falling back to
-          that major's newest prerelease when no stable exists — required for
-          a BC version still in preview, since BC 29 needs AL 18.x and there
-          is no stable 18.x.
+          that matches bc_version (AL major = BC major - 11 up to BC 29, and
+          AL major = BC major from BC 30), falling back to that major's newest
+          prerelease when no stable exists — required for a BC version still
+          in preview, such as BC 30, which has only 30.x betas.
           "latest": newest stable across all majors, regardless of bc_version.
           Use this when an app declares a runtime its own major's compiler
           rejects — runtime 16.1 is refused by AL 16.2.28.57946 (which accepts
@@ -929,7 +929,7 @@ jobs:
           EFFECTIVE_RUNTIME="$RUNTIME_VERSION"
           BC_MAJOR=$(echo "${{ inputs.bc_version }}" | cut -d. -f1)
           if [ "$EFFECTIVE_RUNTIME" = "auto" ]; then
-            # Same BC-major-minus-11 rule as the compiler version; no network
+            # Same BC-to-AL major rule as the compiler version; no network
             # call needed for this one. The old table's fallback to 14.0 for
             # an unknown major was silently wrong for anything newer than 28.
             if ! EFFECTIVE_RUNTIME=$(python3 bc-linux/scripts/resolve-al-tool-version.py "${{ inputs.bc_version }}" --runtime); then

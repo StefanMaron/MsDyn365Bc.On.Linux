@@ -343,7 +343,7 @@ steps:
       EFFECTIVE_RUNTIME="$(RUNTIME_VERSION)"
       BC_MAJOR=$(echo "$(BC_VERSION)" | cut -d. -f1)
       if [ -z "$EFFECTIVE_RUNTIME" ]; then
-        # Same BC-major-minus-11 rule as the compiler version.
+        # Same BC-to-AL major rule as the compiler version.
         if ! EFFECTIVE_RUNTIME=$(python3 "$(Agent.BuildDirectory)/bc-linux/scripts/resolve-al-tool-version.py" "$(BC_VERSION)" --runtime); then
           echo "##vso[task.logissue type=error]Could not resolve an AL runtime version for BC $(BC_VERSION)"
           exit 1
