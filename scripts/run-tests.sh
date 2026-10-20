@@ -24,6 +24,11 @@
 #   --company <name>           Company name (default: auto-detect)
 #   --base-url <url>           BC base URL (default: http://localhost:7048/BC)
 #   --dev-url <url>            BC Dev endpoint (default: http://localhost:7049/BC/dev)
+#   --api-port <port>          Host port of BC's API endpoint, where the TestRunner API
+#                              lives (default: $BC_API_PORT, else 7052)
+#   --client-port <port>       Host port of BC's client services endpoint, used when
+#                              TestRunner runs on the host (default: $BC_CLIENT_PORT,
+#                              else 7085)
 #   --auth <user:pass>         Authentication (default: BCRUNNER:Admin123!)
 #   --timeout <minutes>        Overall timeout (default: 30)
 #   --test-runner-app <path>   TestRunnerExtension .app (auto-detected)
@@ -67,6 +72,11 @@ Options:
   --company <name>           Company name (default: auto-detect)
   --base-url <url>           BC OData base URL (default: http://localhost:7048/BC)
   --dev-url <url>            BC Dev endpoint (default: http://localhost:7049/BC/dev)
+  --api-port <port>          Host port of BC's API endpoint, where the TestRunner API
+                             lives (default: $BC_API_PORT, else 7052)
+  --client-port <port>       Host port of BC's client services endpoint, used when
+                             TestRunner runs on the host (default: $BC_CLIENT_PORT,
+                             else 7085)
   --auth <user:pass>         Authentication (default: BCRUNNER:Admin123!)
   --timeout <minutes>        Overall timeout (default: 30)
   --test-runner-app <path>   TestRunnerExtension .app (auto-detected)
@@ -97,6 +107,8 @@ while [[ $# -gt 0 ]]; do
         --company) COMPANY="$2"; shift 2;;
         --base-url) BASE_URL="$2"; shift 2;;
         --dev-url) DEV_URL="$2"; shift 2;;
+        --api-port) API_PORT="$2"; shift 2;;
+        --client-port) CLIENT_PORT="$2"; shift 2;;
         --auth) AUTH="$2"; shift 2;;
         --timeout) TIMEOUT_MIN="$2"; shift 2;;
         --test-runner-app) TEST_RUNNER_APP="$2"; shift 2;;
@@ -119,7 +131,12 @@ _URL_ORIGIN=$(echo "$BASE_URL" | sed -E 's|(https?://[^:/]+).*|\1|')
 _BC_PATH=$(echo "$BASE_URL" | sed -E 's|https?://[^/]+(/.*)$|\1|')
 [ -z "$_URL_ORIGIN" ] && _URL_ORIGIN="http://localhost"
 [ -z "$_BC_PATH" ] && _BC_PATH="/BC"
-_API_FALLBACK="${_URL_ORIGIN}:7052${_BC_PATH}"
+# The API port follows the stack's own port mapping (issue #142): a second stack
+# or an instance_slot moves it, and a fixed 7052 then reaches nothing, or the
+# API of a different stack.
+API_PORT="${API_PORT:-${BC_API_PORT:-7052}}"
+CLIENT_PORT="${CLIENT_PORT:-${BC_CLIENT_PORT:-7085}}"
+_API_FALLBACK="${_URL_ORIGIN}:${API_PORT}${_BC_PATH}"
 
 # --- Find TestRunnerExtension .app ---
 if [ -z "$TEST_RUNNER_APP" ]; then
@@ -674,8 +691,8 @@ echo "=== Running Tests ==="
 # Reuses _URL_ORIGIN (scheme://host) parsed earlier.
 BC_HOST=$(echo "$_URL_ORIGIN" | sed 's|http[s]*://||')
 [ -z "$BC_HOST" ] && BC_HOST="localhost"
-WS_HOST="${BC_HOST}:7085"
-ODATA_HOST="${BC_HOST}:7052"
+WS_HOST="${BC_HOST}:${CLIENT_PORT}"
+ODATA_HOST="${BC_HOST}:${API_PORT}"
 
 # Parse auth components
 AUTH_USER="${AUTH%%:*}"

@@ -172,6 +172,7 @@ def _run_websocket(args, codeunit_ids: list[int], junit_path: str) -> _RunnerRes
         "--auth", args.auth,
         "--base-url", args.base_url,
         "--dev-url", args.dev_url,
+        "--api-port", str(args.api_port),
         "--timeout", str(args.timeout),
     ]
     if args.company:
