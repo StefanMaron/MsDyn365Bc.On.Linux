@@ -792,6 +792,18 @@ and returns true (issue #138), `UploadFileAction` refuses with
 runner gives. `extensions/smoke-test` codeunits 70012, 70020 and 70023 guard all of this and
 are in `test-versions.yml`'s codeunit range.
 
+**Unhandled UI on the hub is Patch #38 (issue #139).** The cause of gap 1 above was one line
+in Microsoft's hub, not the missing AL test runner: `TestRunnerRuntime.InitializeRuntime`
+(Nav.Service.Dev) sets `TestExecution.SuppressUnhandledUI = true`, and
+`NavTestExecution.FindHandler` never raises `MissingUIHandler` while it is set. Patch #38 sets
+it back to false before every test method, from Patch #34's hook on `DevTestRunnerCodeunit`.
+It is reset through the property's setter by reflection; a JMP hook on the auto-property
+would not hold, because the JIT inlines trivial accessors from IL. Smoke-test codeunit 70027
+checks Confirm, Message, StrMenu and a part's Confirm on the hub with the expected texts in
+codeunit-level labels, so the classifier does not route it away. The "names Unhandled UI"
+routing rule is kept: the hub now raises the error, but a test that names it still runs on
+the runner that has been checked against Windows the longest.
+
 `test_runner=altool` (explicit force, BC 27/28's "catch hub regressions"
 mode) is untouched by any of this — it still runs every codeunit through
 the hub with no split, on purpose, so a real hub regression can't be
