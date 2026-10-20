@@ -3,8 +3,10 @@
 // BC re-encodes an imported image through System.Drawing. On Windows, GDI+ writes the corpus's
 // 1x1 grayscale PNG back as 8-bit RGBA with an sRGB and a gAMA chunk; the expected value below
 // is what Windows returned (BC 27.5 and 29.0, official containers). DrawingStub re-encoded it
-// with Skia on BC 27 and 28 (still grayscale, an sBIT chunk) and passed it through unchanged on
-// BC 29. It now writes PNG the way GDI+ does. Only this image was compared with Windows.
+// with Skia on BC 27 and 28 (still grayscale, an sBIT chunk). BC 29 kept the bytes, because off
+// Windows it uses its own NavMediaImageSkia, whose Bytes() returns the source. DrawingStub now
+// writes PNG the way GDI+ does, and Patch #40 sends BC 29's bytes through the same encoder.
+// Only this image was compared with Windows.
 codeunit 70053 "BC Linux Media Bytes"
 {
     Subtype = Test;

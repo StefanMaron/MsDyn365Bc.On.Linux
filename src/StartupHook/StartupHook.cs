@@ -296,6 +296,11 @@ using System.Threading.Tasks;
 ///   rethrows on its thread-pool thread, which ended the whole NST (rc=134, BC 28.5). On
 ///   Windows the test runs to the end; Elapsed fired, ExceptionOccurred did not. Fix: the same
 ///   body without the rethrow. RedirectExceptions timers still raise ExceptionOccurred.
+/// Patch #40: NavMediaImageSkia.Bytes (Nav.Ncl.dll) — BC 29, issue #135
+///   BC 29 builds a NavMediaImageSkia instead of a NavMediaImage when OperatingSystem.IsWindows()
+///   is false, and its Bytes() returns the imported bytes; Windows re-encodes them with GDI+.
+///   Fix: hand a PNG to DrawingStub's GdiPlusPng (what BC 27/28 reach through
+///   NavMediaImage.Bytes); anything it does not handle keeps the source bytes.
 /// Patch #19b: NavSession.InitReportingClientAsync (Nav.Ncl.dll) — BC 29, issue #109
 ///   BC 29 removed NavEnvironment.CustomReportingServiceClient (the factory Patch #19 replaced) and
 ///   kept only DecorateReportingServiceClient, which wraps a client InitReportingClientAsync has
@@ -824,6 +829,13 @@ internal class StartupHook
         {
             PatchNavLicenseDispose(args.LoadedAssembly);
             PatchNavDatabaseSecurityAndLicenseDispose(args.LoadedAssembly);
+        }
+
+        // Patch #40: BC 29's non-Windows media image keeps the imported bytes; Windows
+        // re-encodes through GDI+ (issue #135). Only BC 29 has the class.
+        if (name == "Microsoft.Dynamics.Nav.Ncl")
+        {
+            PatchNavMediaImageSkiaBytes(args.LoadedAssembly);
         }
 
         // Patch #34: the hub's test runner never clears the last error between test methods
@@ -4345,6 +4357,70 @@ internal class StartupHook
             }
             Console.WriteLine($"[StartupHook] Patch #39: Timer Elapsed handler failed, not rethrown: {error.GetType().Name}: {error.Message}");
         }
+    }
+
+    // ========================================================================
+    // Patch #40: NavMediaImageSkia.Bytes (Nav.Ncl.dll, BC 29) — issue #135
+    // ========================================================================
+    // BC 29 takes a different media path when OperatingSystem.IsWindows() is false:
+    // NavMediaFactory.ProcessMediaObject builds a NavMediaImageSkia, whose Bytes() returns
+    // the imported bytes. On Windows the same import goes through NavMediaImage, which
+    // re-encodes the image with GDI+. So BC 29 kept a PNG's bytes here and re-encoded them
+    // on Windows. The replacement hands a PNG to DrawingStub's GdiPlusPng (the same
+    // encoder BC 27 and 28 reach through NavMediaImage.Bytes) and returns the source bytes
+    // for anything it does not handle, as before.
+
+    private static FieldInfo? _skiaSourceBytesField;
+    private static MethodInfo? _gdiPlusPngReencode;
+    private static bool _gdiPlusPngProbed;
+
+    private static void PatchNavMediaImageSkiaBytes(Assembly navNcl)
+    {
+        if (IsPatchDisabled("40")) return;
+        try
+        {
+            var type = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.Media.NavMediaImageSkia");
+            if (type == null) return; // BC 27/28: no such class, NavMediaImage.Bytes reaches DrawingStub
+            const BindingFlags inst = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var original = type.GetMethod("Bytes", inst, null, Type.EmptyTypes, null);
+            _skiaSourceBytesField = type.GetField("sourceBytes", inst);
+            if (original == null || original.ReturnType != typeof(byte[]) || _skiaSourceBytesField == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #40: NavMediaImageSkia shape changed — skipping");
+                return;
+            }
+            var replacement = typeof(StartupHook).GetMethod(nameof(Replacement_NavMediaImageSkiaBytes),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            ApplyJmpHook(original, replacement, "NavMediaImageSkia.Bytes (Patch #40)");
+            Console.WriteLine("[StartupHook] Patch #40: NavMediaImageSkia.Bytes re-encodes PNG as GDI+ does");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #40 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static byte[] Replacement_NavMediaImageSkiaBytes(object self)
+    {
+        var source = (byte[])_skiaSourceBytesField!.GetValue(self)!;
+        try
+        {
+            if (!_gdiPlusPngProbed)
+            {
+                _gdiPlusPngReencode = Type.GetType("System.Drawing.GdiPlusPng, System.Drawing.Common")
+                    ?.GetMethod("TryReencode", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                _gdiPlusPngProbed = true;
+                if (_gdiPlusPngReencode == null)
+                    Console.WriteLine("[StartupHook] Patch #40: DrawingStub GdiPlusPng not found — media bytes pass through");
+            }
+            if (_gdiPlusPngReencode?.Invoke(null, new object[] { source }) is byte[] reencoded)
+                return reencoded;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #40: re-encode failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        return source;
     }
 
     // ========================================================================

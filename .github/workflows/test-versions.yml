@@ -264,9 +264,12 @@ jobs:
       # consumers actually get rather than on a parallel configuration.
       test_app_dirs: extensions/smoke-test
       # TimerError.Codeunit.al (issue #136) declares Microsoft.Dynamics.Nav.Timer,
-      # which ships in the service folder.
+      # which ships in the service folder, and System.EventArgs from mscorlib. AL
+      # compilers before 18.0 find mscorlib only in a probing path; the web
+      # client's refs folder has one.
       assembly_probing_paths: |
         platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/*/Service
+        platform/WebClient/PFiles/Microsoft Dynamics NAV/*/Web Client/WebPublish/refs
       # The smoke-test fixture ships a placeholder runtime ("14.0") so one
       # committed app.json spans the whole version matrix; "auto" opts into
       # the per-leg rewrite (27 → 16.0, 28 → 17.0). Consumer repos should
@@ -377,9 +380,12 @@ jobs:
       health_timeout_minutes: 8
       test_app_dirs: extensions/smoke-test
       # TimerError.Codeunit.al (issue #136) declares Microsoft.Dynamics.Nav.Timer,
-      # which ships in the service folder.
+      # which ships in the service folder, and System.EventArgs from mscorlib. AL
+      # compilers before 18.0 find mscorlib only in a probing path; the web
+      # client's refs folder has one.
       assembly_probing_paths: |
         platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/*/Service
+        platform/WebClient/PFiles/Microsoft Dynamics NAV/*/Web Client/WebPublish/refs
       runtime_version: auto
       codeunit_range: "70000|70001"
       runner_image: ${{ needs.build-image.outputs.runner_image }}
