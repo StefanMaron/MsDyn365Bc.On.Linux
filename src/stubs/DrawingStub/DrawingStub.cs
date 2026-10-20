@@ -333,13 +333,18 @@ namespace System.Drawing
             idat.Position = 0;
             using (var z = new System.IO.Compression.ZLibStream(idat, System.IO.Compression.CompressionMode.Decompress))
             {
+                // Image data that ends early leaves the rest of the image zero, as GDI+
+                // accepts it (issue #161: a 1x1 RGBA PNG whose IDAT holds 4 of its 5 bytes is
+                // stored as 99 bytes on Windows). Only the length was compared with Windows;
+                // the pixel values GDI+ fills in are not known.
                 int read = 0;
                 while (read < raw.Length)
                 {
                     int n = z.Read(raw, read, raw.Length - read);
-                    if (n <= 0) return null;
+                    if (n <= 0) break;
                     read += n;
                 }
+                if (read == 0) return null;
             }
 
             var prev = new byte[stride];

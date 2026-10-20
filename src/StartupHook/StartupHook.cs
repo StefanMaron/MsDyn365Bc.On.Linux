@@ -308,6 +308,12 @@ using System.Threading.Tasks;
 ///   temporary record's SetFilter, and the license's posting-date filter ("??11*|??12*|...")
 ///   that refuses every date typed into a page. Fix: the same CompareInfo calls BC 28 makes.
 ///   BC 28 and later have no such class and are not touched.
+/// Patch #42: NavMediaImageSkia.DecodeBitmapOrThrow (Nav.Ncl.dll) — BC 29, issue #161
+///   BC 29 decodes an imported image with Skia to build its thumbnail. Skia refuses a PNG whose
+///   chunk checksums do not add up (the corpus's 1x1 PNG one byte short), so ImportStream fails
+///   with "not a valid image type". GDI+ on Windows accepts that file and stores 99 bytes.
+///   Fix: when Skia returns no bitmap, decode the bytes DrawingStub's GdiPlusPng writes for the
+///   same source. Anything GdiPlusPng does not handle is refused as before.
 /// Patch #19b: NavSession.InitReportingClientAsync (Nav.Ncl.dll) — BC 29, issue #109
 ///   BC 29 removed NavEnvironment.CustomReportingServiceClient (the factory Patch #19 replaced) and
 ///   kept only DecorateReportingServiceClient, which wraps a client InitReportingClientAsync has
@@ -850,6 +856,13 @@ internal class StartupHook
         if (name == "Microsoft.Dynamics.Nav.Ncl")
         {
             PatchNavMediaImageSkiaBytes(args.LoadedAssembly);
+        }
+
+        // Patch #42: BC 29's Skia decode refuses a PNG GDI+ accepts (issue #161). Only BC 29
+        // has the class.
+        if (name == "Microsoft.Dynamics.Nav.Ncl")
+        {
+            PatchNavMediaImageSkiaDecode(args.LoadedAssembly);
         }
 
         // Patch #34: the hub's test runner never clears the last error between test methods
@@ -4435,6 +4448,83 @@ internal class StartupHook
             Console.WriteLine($"[StartupHook] Patch #40: re-encode failed: {ex.GetType().Name}: {ex.Message}");
         }
         return source;
+    }
+
+    // ========================================================================
+    // Patch #42: NavMediaImageSkia.DecodeBitmapOrThrow (Nav.Ncl.dll, BC 29) — issue #161
+    // ========================================================================
+    // Media.ImportStream on BC 29 probes the image with SKCodec (header only) and then
+    // decodes it with SKBitmap.Decode to build the thumbnail. A PNG one byte short (its IDAT
+    // checksum has three bytes) passes the probe and fails the decode, so the import is
+    // refused with "The media object could not be loaded because it is not a valid image
+    // type". GDI+ on Windows decodes the same file and stores 99 bytes, the bytes Patch #40
+    // returns for it. The replacement makes the original's two calls, and only when Skia
+    // returns no bitmap decodes GdiPlusPng's re-encoding of the source instead. Every other
+    // image takes exactly the original path.
+
+    private static MethodInfo? _skDataCreateCopy;
+    private static MethodInfo? _skBitmapDecode;
+    private static MethodInfo? _remapImageException;
+
+    private static void PatchNavMediaImageSkiaDecode(Assembly navNcl)
+    {
+        if (IsPatchDisabled("42")) return;
+        try
+        {
+            var type = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.Media.NavMediaImageSkia");
+            if (type == null) return; // BC 27/28: NavMediaImage decodes through DrawingStub
+            var original = type.GetMethod("DecodeBitmapOrThrow", BindingFlags.Static | BindingFlags.NonPublic,
+                null, new[] { typeof(byte[]) }, null);
+            var skia = original?.ReturnType.Assembly;
+            var skData = skia?.GetType("SkiaSharp.SKData");
+            _skDataCreateCopy = skData?.GetMethod("CreateCopy", BindingFlags.Static | BindingFlags.Public,
+                null, new[] { typeof(byte[]) }, null);
+            _skBitmapDecode = original?.ReturnType.GetMethod("Decode", BindingFlags.Static | BindingFlags.Public,
+                null, skData == null ? Type.EmptyTypes : new[] { skData }, null);
+            _remapImageException = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.Media.NavMediaImageExceptionMapper")
+                ?.GetMethod("RemapImageException", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, new[] { typeof(Exception), typeof(string) }, null);
+            if (original == null || original.ReturnType.FullName != "SkiaSharp.SKBitmap"
+                || _skDataCreateCopy == null || _skBitmapDecode == null || _remapImageException == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #42: NavMediaImageSkia decode shape changed — skipping");
+                return;
+            }
+            var replacement = typeof(StartupHook).GetMethod(nameof(Replacement_NavMediaImageSkiaDecode),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            ApplyJmpHook(original, replacement, "NavMediaImageSkia.DecodeBitmapOrThrow (Patch #42)");
+            Console.WriteLine("[StartupHook] Patch #42: NavMediaImageSkia decodes a PNG Skia refuses through GdiPlusPng");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #42 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static object Replacement_NavMediaImageSkiaDecode(byte[] bytes)
+    {
+        var bitmap = SkiaDecode(bytes);
+        if (bitmap != null)
+            return bitmap;
+        if (!_gdiPlusPngProbed)
+        {
+            _gdiPlusPngReencode = Type.GetType("System.Drawing.GdiPlusPng, System.Drawing.Common")
+                ?.GetMethod("TryReencode", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+            _gdiPlusPngProbed = true;
+        }
+        if (_gdiPlusPngReencode?.Invoke(null, new object[] { bytes }) is byte[] reencoded)
+        {
+            bitmap = SkiaDecode(reencoded);
+            if (bitmap != null)
+                return bitmap;
+        }
+        throw (Exception)_remapImageException!.Invoke(null, new object?[] { new ArgumentException("Unknown image format."), null })!;
+    }
+
+    private static object? SkiaDecode(byte[] bytes)
+    {
+        using var data = (IDisposable)_skDataCreateCopy!.Invoke(null, new object[] { bytes })!;
+        return _skBitmapDecode!.Invoke(null, new object[] { data });
     }
 
     // ========================================================================
