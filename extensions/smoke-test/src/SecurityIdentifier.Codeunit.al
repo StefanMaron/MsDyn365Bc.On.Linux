@@ -8,6 +8,11 @@
 // Every expected value is what Windows reported: the first three tests are from official
 // Windows BC containers (BC 27.5 onprem, 29.0 onprem, 29.0 sandbox), the rest from .NET on a
 // Windows Server 2025 runner.
+//
+// Compiled only with BCLINUX_DOTNET_FRAMEWORK, which test-versions.yml sets on BC 29+ legs.
+// The AL 16/17 compilers of the BC 27/28 legs cannot resolve a .NET framework assembly on
+// Linux (AL0451). The stub is the same source for every BC version.
+#if BCLINUX_DOTNET_FRAMEWORK
 dotnet
 {
     assembly("System.Security.Principal.Windows")
@@ -99,3 +104,4 @@ codeunit 70042 "BC Linux Security Id Tests"
         LibraryAssert.ExpectedError('Value was invalid. (Parameter ''sddlForm'')');
     end;
 }
+#endif
