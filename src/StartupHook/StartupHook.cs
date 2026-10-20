@@ -301,6 +301,13 @@ using System.Threading.Tasks;
 ///   is false, and its Bytes() returns the imported bytes; Windows re-encodes them with GDI+.
 ///   Fix: hand a PNG to DrawingStub's GdiPlusPng (what BC 27/28 reach through
 ///   NavMediaImage.Bytes); anything it does not handle keeps the source bytes.
+/// Patch #41: WildcardEvaluatorHelper.IsPrefixSuffixInternal / IndexOf (Nav.Ncl.dll) — BC 27, issue #153
+///   BC 27 matches the parts of a filter around a '?' wildcard with kernel32's FindNLSString
+///   (BC 28 and later use CompareInfo). On Linux that call reaches libwin32_stubs.so, which
+///   always answers "not found", so every in-memory filter with a '?' matched nothing: a
+///   temporary record's SetFilter, and the license's posting-date filter ("??11*|??12*|...")
+///   that refuses every date typed into a page. Fix: the same CompareInfo calls BC 28 makes.
+///   BC 28 and later have no such class and are not touched.
 /// Patch #19b: NavSession.InitReportingClientAsync (Nav.Ncl.dll) — BC 29, issue #109
 ///   BC 29 removed NavEnvironment.CustomReportingServiceClient (the factory Patch #19 replaced) and
 ///   kept only DecorateReportingServiceClient, which wraps a client InitReportingClientAsync has
@@ -829,6 +836,13 @@ internal class StartupHook
         {
             PatchNavLicenseDispose(args.LoadedAssembly);
             PatchNavDatabaseSecurityAndLicenseDispose(args.LoadedAssembly);
+        }
+
+        // Patch #41: BC 27 matches '?' filter parts through kernel32 FindNLSString, which the
+        // Linux stub answers with "not found" (issue #153). Only BC 27 has the class.
+        if (name == "Microsoft.Dynamics.Nav.Ncl")
+        {
+            PatchWildcardEvaluatorHelper(args.LoadedAssembly);
         }
 
         // Patch #40: BC 29's non-Windows media image keeps the imported bytes; Windows
@@ -4421,6 +4435,99 @@ internal class StartupHook
             Console.WriteLine($"[StartupHook] Patch #40: re-encode failed: {ex.GetType().Name}: {ex.Message}");
         }
         return source;
+    }
+
+    // ========================================================================
+    // Patch #41: WildcardEvaluatorHelper (Nav.Ncl.dll, BC 27) — issue #153
+    // ========================================================================
+    // BC 27's WildcardEvaluator matches the constant parts of a pattern that contains '?'
+    // (and the "x?" / "?x" shapes) through WildcardEvaluatorHelper, which P/Invokes
+    // kernel32 FindNLSString and FindStringOrdinal. Patch #3 sends those to
+    // libwin32_stubs.so, whose versions return -1 ("not found") for every input. So on
+    // BC 27 no in-memory filter with a '?' ever matched. The visible case is the Cronus
+    // license's date filter "??11*|??12*|??01*|??02*", checked against "ddMMyy" when a date
+    // is typed into a page: every date was refused. BC 28 replaced the helper with the
+    // CompareInfo span overloads, and the replacements below make the same calls.
+    //
+    // The argument checks and the ordinal branch are the original's. The original also
+    // always adds NORM_LINGUISTIC_CASING, which ICU applies anyway.
+
+    private static void PatchWildcardEvaluatorHelper(Assembly navNcl)
+    {
+        if (IsPatchDisabled("41")) return;
+        try
+        {
+            var type = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.WildcardEvaluatorHelper");
+            if (type == null) return; // BC 28 and later: WildcardEvaluator uses CompareInfo itself
+            const BindingFlags stat = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+            var outInt = typeof(int).MakeByRefType();
+            var prefixSuffix = type.GetMethod("IsPrefixSuffixInternal", stat, null,
+                new[] { typeof(uint), typeof(int), typeof(string), typeof(int), typeof(int), typeof(string), typeof(CompareOptions), outInt }, null);
+            var indexOf = type.GetMethod("IndexOf", stat, null,
+                new[] { typeof(int), typeof(string), typeof(string), typeof(int), typeof(int), typeof(CompareOptions), outInt }, null);
+            if (prefixSuffix == null || indexOf == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #41: WildcardEvaluatorHelper shape changed — skipping");
+                return;
+            }
+            ApplyJmpHook(prefixSuffix, typeof(StartupHook).GetMethod(nameof(Replacement_WildcardIsPrefixSuffix), stat)!,
+                "WildcardEvaluatorHelper.IsPrefixSuffixInternal (Patch #41)");
+            ApplyJmpHook(indexOf, typeof(StartupHook).GetMethod(nameof(Replacement_WildcardIndexOf), stat)!,
+                "WildcardEvaluatorHelper.IndexOf (Patch #41)");
+            Console.WriteLine("[StartupHook] Patch #41: '?' filter matching uses CompareInfo instead of FindNLSString");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #41 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private const uint FindStartsWith = 0x00100000;
+    private const CompareOptions ValidNlsCompareOptions = (CompareOptions)31;
+
+    private static bool Replacement_WildcardIsPrefixSuffix(uint operation, int locale, string source, int startIndex,
+        int sourceLength, string value, CompareOptions options, out int matchLength)
+    {
+        if (source == null || value == null)
+            throw new ArgumentNullException(source == null ? "source" : "value");
+        matchLength = value.Length;
+        if (value.Length == 0) return true;
+        if (source.Length == 0) return false;
+        if (startIndex < 0) throw new ArgumentOutOfRangeException("startIndex");
+        if (sourceLength < 0 || startIndex > source.Length - sourceLength)
+            throw new ArgumentOutOfRangeException("sourceLength");
+        var span = source.AsSpan(startIndex, sourceLength);
+        bool prefix = operation == FindStartsWith;
+        if (options == CompareOptions.Ordinal || options == CompareOptions.OrdinalIgnoreCase)
+        {
+            var comparison = options == CompareOptions.Ordinal ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+            return prefix ? span.StartsWith(value, comparison) : span.EndsWith(value, comparison);
+        }
+        if ((options & ~ValidNlsCompareOptions) != 0)
+            throw new ArgumentException("Unsupported combination of flags", "options");
+        var compareInfo = CompareInfo.GetCompareInfo(locale);
+        return prefix
+            ? compareInfo.IsPrefix(span, value, options, out matchLength)
+            : compareInfo.IsSuffix(span, value, options, out matchLength);
+    }
+
+    private static int Replacement_WildcardIndexOf(int locale, string source, string value, int startIndex, int count,
+        CompareOptions options, out int matchLength)
+    {
+        if (source == null || value == null)
+            throw new ArgumentNullException(source == null ? "source" : "value");
+        if (startIndex > source.Length) throw new ArgumentOutOfRangeException("startIndex");
+        matchLength = value.Length;
+        if (source.Length == 0) return value.Length == 0 ? 0 : -1;
+        if (startIndex < 0) throw new ArgumentOutOfRangeException("startIndex");
+        if (count < 0 || startIndex > source.Length - count) throw new ArgumentOutOfRangeException("count");
+        if (options == CompareOptions.Ordinal || options == CompareOptions.OrdinalIgnoreCase)
+            return source.IndexOf(value, startIndex, count,
+                options == CompareOptions.Ordinal ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
+        if ((options & ~ValidNlsCompareOptions) != 0)
+            throw new ArgumentException("Unsupported combination of flags", "options");
+        int found = CompareInfo.GetCompareInfo(locale).IndexOf(source.AsSpan(startIndex, count), value, options, out matchLength);
+        return found >= 0 ? found + startIndex : found;
     }
 
     // ========================================================================
