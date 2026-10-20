@@ -247,6 +247,346 @@ namespace System.Drawing
         }
     }
 
+    // PNG to PNG the way Windows GDI+ writes it (issue #135). GDI+ decodes a grayscale or
+    // truecolor PNG into a 32-bit ARGB bitmap, and its PNG encoder (libpng) writes that back
+    // as 8-bit RGBA with an sRGB chunk (intent 0) and a gAMA chunk (45455), no pHYs. The
+    // pixel rows go through libpng 1.6's adaptive filter choice and classic zlib with the
+    // window libpng sizes to the image.
+    //
+    // Measured against Windows (BC 27.5 and 29.0, official containers) for one image only:
+    // the corpus's 1x1 grayscale PNG, which comes out byte for byte the same here. zlib
+    // levels 2 to 5 all give that output; the level GDI+ uses is not known, so larger images
+    // may compress differently. Only 8-bit, non-interlaced gray, gray+alpha, RGB and RGBA
+    // sources are handled, and only without colour-management chunks (gAMA other than
+    // 45455, cHRM, iCCP), which GDI+ applies while decoding. Everything else returns null
+    // and takes the older path.
+    internal static class GdiPlusPng
+    {
+        private static readonly byte[] Signature = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+
+        internal static byte[]? TryReencode(byte[] source)
+        {
+            try
+            {
+                var rgba = Decode(source, out int width, out int height);
+                if (rgba == null) return null;
+                return Encode(rgba, width, height);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // Returns straight (not premultiplied) RGBA, or null for anything out of scope.
+        private static byte[]? Decode(byte[] d, out int width, out int height)
+        {
+            width = height = 0;
+            if (d.Length < 8) return null;
+            for (int i = 0; i < 8; i++) if (d[i] != Signature[i]) return null;
+
+            int depth = -1, colorType = -1, interlace = -1;
+            byte[]? trns = null;
+            using var idat = new MemoryStream();
+            int p = 8;
+            while (p + 12 <= d.Length)
+            {
+                int len = BE32(d, p);
+                if (len < 0 || p + 12 + len > d.Length) return null;
+                string type = System.Text.Encoding.ASCII.GetString(d, p + 4, 4);
+                int data = p + 8;
+                switch (type)
+                {
+                    case "IHDR":
+                        if (len != 13) return null;
+                        width = BE32(d, data);
+                        height = BE32(d, data + 4);
+                        depth = d[data + 8];
+                        colorType = d[data + 9];
+                        interlace = d[data + 12];
+                        break;
+                    case "IDAT":
+                        idat.Write(d, data, len);
+                        break;
+                    case "tRNS":
+                        trns = new byte[len];
+                        Buffer.BlockCopy(d, data, trns, 0, len);
+                        break;
+                    case "gAMA":
+                        if (len != 4 || BE32(d, data) != 45455) return null;
+                        break;
+                    case "cHRM":
+                    case "iCCP":
+                        return null;
+                }
+                p += 12 + len;
+                if (type == "IEND") break;
+            }
+
+            if (depth != 8 || interlace != 0 || width <= 0 || height <= 0) return null;
+            int channels = colorType switch { 0 => 1, 2 => 3, 4 => 2, 6 => 4, _ => 0 };
+            if (channels == 0) return null;
+            if ((long)width * height > 16_000_000) return null;
+
+            int stride = width * channels;
+            var raw = new byte[(long)height * (stride + 1)];
+            idat.Position = 0;
+            using (var z = new System.IO.Compression.ZLibStream(idat, System.IO.Compression.CompressionMode.Decompress))
+            {
+                int read = 0;
+                while (read < raw.Length)
+                {
+                    int n = z.Read(raw, read, raw.Length - read);
+                    if (n <= 0) return null;
+                    read += n;
+                }
+            }
+
+            var prev = new byte[stride];
+            var cur = new byte[stride];
+            var rgba = new byte[(long)width * height * 4];
+            for (int y = 0; y < height; y++)
+            {
+                int rowStart = y * (stride + 1);
+                byte filter = raw[rowStart];
+                Buffer.BlockCopy(raw, rowStart + 1, cur, 0, stride);
+                if (!Unfilter(filter, cur, prev, channels)) return null;
+
+                for (int x = 0; x < width; x++)
+                {
+                    int o = (y * width + x) * 4;
+                    int s = x * channels;
+                    switch (colorType)
+                    {
+                        case 0:
+                            rgba[o] = rgba[o + 1] = rgba[o + 2] = cur[s];
+                            rgba[o + 3] = (trns != null && trns.Length >= 2 && cur[s] == trns[1] && trns[0] == 0) ? (byte)0 : (byte)255;
+                            break;
+                        case 4:
+                            rgba[o] = rgba[o + 1] = rgba[o + 2] = cur[s];
+                            rgba[o + 3] = cur[s + 1];
+                            break;
+                        case 2:
+                            rgba[o] = cur[s]; rgba[o + 1] = cur[s + 1]; rgba[o + 2] = cur[s + 2];
+                            bool transparent = trns != null && trns.Length >= 6
+                                && trns[0] == 0 && trns[1] == cur[s] && trns[2] == 0 && trns[3] == cur[s + 1]
+                                && trns[4] == 0 && trns[5] == cur[s + 2];
+                            rgba[o + 3] = transparent ? (byte)0 : (byte)255;
+                            break;
+                        default:
+                            rgba[o] = cur[s]; rgba[o + 1] = cur[s + 1]; rgba[o + 2] = cur[s + 2]; rgba[o + 3] = cur[s + 3];
+                            break;
+                    }
+                }
+                (prev, cur) = (cur, prev);
+            }
+            return rgba;
+        }
+
+        private static bool Unfilter(byte filter, byte[] cur, byte[] prev, int bpp)
+        {
+            int n = cur.Length;
+            switch (filter)
+            {
+                case 0: return true;
+                case 1:
+                    for (int i = bpp; i < n; i++) cur[i] = (byte)(cur[i] + cur[i - bpp]);
+                    return true;
+                case 2:
+                    for (int i = 0; i < n; i++) cur[i] = (byte)(cur[i] + prev[i]);
+                    return true;
+                case 3:
+                    for (int i = 0; i < n; i++)
+                        cur[i] = (byte)(cur[i] + (((i >= bpp ? cur[i - bpp] : 0) + prev[i]) >> 1));
+                    return true;
+                case 4:
+                    for (int i = 0; i < n; i++)
+                        cur[i] = (byte)(cur[i] + Paeth(i >= bpp ? cur[i - bpp] : 0, prev[i], i >= bpp ? prev[i - bpp] : 0));
+                    return true;
+                default: return false;
+            }
+        }
+
+        private static int Paeth(int a, int b, int c)
+        {
+            int p = b - c, pc = a - c;
+            int pa = Math.Abs(p), pb = Math.Abs(pc);
+            pc = Math.Abs(p + pc);
+            return (pa <= pb && pa <= pc) ? a : (pb <= pc) ? b : c;
+        }
+
+        private static byte[] Encode(byte[] rgba, int width, int height)
+        {
+            const int bpp = 4;
+            int rowBytes = width * bpp;
+
+            // libpng 1.6 png_write_start_row: filters that need a row above are dropped for a
+            // one-row image, filters that need a pixel to the left for a one-column image.
+            bool sub = width > 1, up = height > 1, avg = width > 1 && height > 1, paeth = avg;
+
+            var filtered = new byte[(long)height * (rowBytes + 1)];
+            var prev = new byte[rowBytes];
+            var row = new byte[rowBytes];
+            var best = new byte[rowBytes];
+            var trial = new byte[rowBytes];
+            for (int y = 0; y < height; y++)
+            {
+                Buffer.BlockCopy(rgba, y * rowBytes, row, 0, rowBytes);
+                // png_write_find_filter: smallest sum of the bytes read as signed, ties keep
+                // the earlier filter in the order None, Sub, Up, Average, Paeth.
+                byte bestFilter = 0;
+                Buffer.BlockCopy(row, 0, best, 0, rowBytes);
+                long mins = Sum(best);
+                for (byte f = 1; f <= 4; f++)
+                {
+                    if ((f == 1 && !sub) || (f == 2 && !up) || (f == 3 && !avg) || (f == 4 && !paeth)) continue;
+                    for (int i = 0; i < rowBytes; i++)
+                    {
+                        int a = i >= bpp ? row[i - bpp] : 0, b = prev[i], c = i >= bpp ? prev[i - bpp] : 0;
+                        int pred = f switch { 1 => a, 2 => b, 3 => (a + b) >> 1, _ => Paeth(a, b, c) };
+                        trial[i] = (byte)(row[i] - pred);
+                    }
+                    long sum = Sum(trial);
+                    if (sum < mins)
+                    {
+                        mins = sum;
+                        bestFilter = f;
+                        (best, trial) = (trial, best);
+                    }
+                }
+                long at = (long)y * (rowBytes + 1);
+                filtered[at] = bestFilter;
+                Buffer.BlockCopy(best, 0, filtered, (int)at + 1, rowBytes);
+                (prev, row) = (row, prev);
+            }
+
+            // png_deflate_claim: the smallest window that still covers the image data.
+            int windowBits = 15;
+            long dataSize = filtered.Length;
+            if (dataSize <= 16384)
+            {
+                long half = 1L << (windowBits - 1);
+                while (dataSize + 262 <= half) { half >>= 1; windowBits--; }
+            }
+            if (windowBits == 8) windowBits = 9;
+
+            byte[] zdata = Zlib.Deflate(filtered, Level, windowBits, 8, ZFiltered);
+
+            var ihdr = new byte[13];
+            PutBE32(ihdr, 0, width);
+            PutBE32(ihdr, 4, height);
+            ihdr[8] = 8;  // bit depth
+            ihdr[9] = 6;  // RGBA
+
+            using var png = new MemoryStream();
+            png.Write(Signature, 0, Signature.Length);
+            Chunk(png, "IHDR", ihdr, 0, ihdr.Length);
+            Chunk(png, "sRGB", new byte[] { 0 }, 0, 1);
+            Chunk(png, "gAMA", new byte[] { 0, 0, 0xB1, 0x8F }, 0, 4);
+            // libpng writes IDAT whenever its 8 KiB compression buffer is full.
+            for (int o = 0; o < zdata.Length; o += 8192)
+                Chunk(png, "IDAT", zdata, o, Math.Min(8192, zdata.Length - o));
+            Chunk(png, "IEND", Array.Empty<byte>(), 0, 0);
+            return png.ToArray();
+        }
+
+        // zlib level. Levels 2 to 5 give the same bytes on the one image measured on Windows.
+        private const int Level = 5;
+        private const int ZFiltered = 1;
+
+        private static long Sum(byte[] row)
+        {
+            long s = 0;
+            foreach (byte v in row) s += v < 128 ? v : 256 - v;
+            return s;
+        }
+
+        private static int BE32(byte[] d, int i) => (d[i] << 24) | (d[i + 1] << 16) | (d[i + 2] << 8) | d[i + 3];
+
+        private static void PutBE32(byte[] d, int i, int v)
+        {
+            d[i] = (byte)(v >> 24); d[i + 1] = (byte)(v >> 16); d[i + 2] = (byte)(v >> 8); d[i + 3] = (byte)v;
+        }
+
+        private static void Chunk(Stream s, string type, byte[] data, int offset, int length)
+        {
+            var t = System.Text.Encoding.ASCII.GetBytes(type);
+            var len = new byte[4];
+            PutBE32(len, 0, length);
+            s.Write(len, 0, 4);
+            s.Write(t, 0, 4);
+            s.Write(data, offset, length);
+            var body = new byte[length];
+            Buffer.BlockCopy(data, offset, body, 0, length);
+            uint crc = StubImageWriter.Crc32(t, body);
+            var c = new byte[4];
+            PutBE32(c, 0, (int)crc);
+            s.Write(c, 0, 4);
+        }
+    }
+
+    // Classic zlib (libz.so.1), because libpng uses it and its output is what GDI+ writes.
+    // .NET's own deflate is a different implementation and compresses to different bytes.
+    // When libz cannot be loaded, the caller gets an exception and falls back.
+    internal static class Zlib
+    {
+        [Runtime.InteropServices.StructLayout(Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct ZStream
+        {
+            public IntPtr next_in; public uint avail_in; public UIntPtr total_in;
+            public IntPtr next_out; public uint avail_out; public UIntPtr total_out;
+            public IntPtr msg; public IntPtr state;
+            public IntPtr zalloc; public IntPtr zfree; public IntPtr opaque;
+            public int data_type; public UIntPtr adler; public UIntPtr reserved;
+        }
+
+        [Runtime.InteropServices.DllImport("libz.so.1", EntryPoint = "deflateInit2_")]
+        private static extern int DeflateInit2(ref ZStream strm, int level, int method, int windowBits, int memLevel, int strategy,
+            [Runtime.InteropServices.MarshalAs(Runtime.InteropServices.UnmanagedType.LPStr)] string version, int streamSize);
+        [Runtime.InteropServices.DllImport("libz.so.1", EntryPoint = "deflate")]
+        private static extern int DeflateCall(ref ZStream strm, int flush);
+        [Runtime.InteropServices.DllImport("libz.so.1", EntryPoint = "deflateEnd")]
+        private static extern int DeflateEnd(ref ZStream strm);
+        [Runtime.InteropServices.DllImport("libz.so.1", EntryPoint = "zlibVersion")]
+        private static extern IntPtr ZlibVersion();
+
+        internal static byte[] Deflate(byte[] input, int level, int windowBits, int memLevel, int strategy)
+        {
+            var output = new byte[input.Length + input.Length / 1000 + 64 + 16];
+            var inHandle = Runtime.InteropServices.GCHandle.Alloc(input, Runtime.InteropServices.GCHandleType.Pinned);
+            var outHandle = Runtime.InteropServices.GCHandle.Alloc(output, Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                var z = new ZStream
+                {
+                    next_in = inHandle.AddrOfPinnedObject(), avail_in = (uint)input.Length,
+                    next_out = outHandle.AddrOfPinnedObject(), avail_out = (uint)output.Length,
+                };
+                string version = Runtime.InteropServices.Marshal.PtrToStringAnsi(ZlibVersion()) ?? "1.2.11";
+                int rc = DeflateInit2(ref z, level, 8, windowBits, memLevel, strategy, version,
+                    Runtime.InteropServices.Marshal.SizeOf<ZStream>());
+                if (rc != 0) throw new InvalidOperationException("deflateInit2_ returned " + rc);
+                try
+                {
+                    rc = DeflateCall(ref z, 4); // Z_FINISH
+                    if (rc != 1) throw new InvalidOperationException("deflate returned " + rc); // Z_STREAM_END
+                    var result = new byte[(long)z.total_out];
+                    Buffer.BlockCopy(output, 0, result, 0, result.Length);
+                    return result;
+                }
+                finally
+                {
+                    DeflateEnd(ref z);
+                }
+            }
+            finally
+            {
+                inHandle.Free();
+                outHandle.Free();
+            }
+        }
+    }
+
     // Re-encodes through SkiaSharp when it is available, so a Save() round-trip
     // behaves the way GDI+ does: the bytes that come out are a fresh encode, not the
     // bytes that went in. Falls back to writing the source bytes verbatim when Skia
@@ -262,13 +602,14 @@ namespace System.Drawing
     // Windows — a test asserting "ExportStream returns what I imported" passed here
     // and failed on a real tier.
     //
-    // This does NOT reproduce GDI+ byte-for-byte; Skia's PNG encoder is its own. The
-    // observable class of behaviour matches (the stream is re-encoded), the exact
-    // length does not. A test pinning an exact byte count is pinning a GDI+ version.
+    // PNG saved as PNG goes through GdiPlusPng first, which writes what GDI+ writes for the
+    // sources it handles (issue #135). Everything else goes through Skia, whose encoder is
+    // its own: the stream is re-encoded, but the bytes differ from GDI+'s.
     internal static class StubImageWriter
     {
         private static readonly Guid JpegGuid = new Guid("b96b3cae-0728-11d3-9d7b-0000f81ef32e");
         private static readonly Guid ExifGuid = new Guid("b96b3cb2-0728-11d3-9d7b-0000f81ef32e");
+        private static readonly Guid PngGuid = new Guid("b96b3caf-0728-11d3-9d7b-0000f81ef32e");
 
         // Smallest well-formed baseline JPEG (1×1 white). Synthesizing JPEG at arbitrary
         // dimensions isn't worth a DCT encoder — consumers that care about dimensions get
@@ -283,7 +624,8 @@ namespace System.Drawing
             var src = image?.SourceBytes;
             if (src != null && src.Length > 0)
             {
-                var reencoded = SkiaCodec.TryReencode(src, formatGuid);
+                var reencoded = (formatGuid == PngGuid ? GdiPlusPng.TryReencode(src) : null)
+                                ?? SkiaCodec.TryReencode(src, formatGuid);
                 var outBytes = reencoded ?? src;
                 stream.Write(outBytes, 0, outBytes.Length);
                 return;
@@ -412,7 +754,7 @@ namespace System.Drawing
         }
 
         private static uint[]? _crcTable;
-        private static uint Crc32(byte[] type, byte[] data)
+        internal static uint Crc32(byte[] type, byte[] data)
         {
             if (_crcTable == null)
             {

@@ -291,6 +291,11 @@ using System.Threading.Tasks;
 ///   says false to the static IsAvailable (no browser, so no extension), and refuses anything
 ///   else with NavDotNetFromAlNotSupportedException. Fix: the same answers. The websocket
 ///   runner's client gives them too (tools/TestRunner, CreateDotNetHandle).
+/// Patch #39: Microsoft.Dynamics.Nav.Timer.OnTimerElapsed (Microsoft.Dynamics.Nav.Timer.dll) — issue #136
+///   An Error() in a DotNet Timer's Elapsed trigger: with RedirectExceptions false the add-in
+///   rethrows on its thread-pool thread, which ended the whole NST (rc=134, BC 28.5). On
+///   Windows the test runs to the end; Elapsed fired, ExceptionOccurred did not. Fix: the same
+///   body without the rethrow. RedirectExceptions timers still raise ExceptionOccurred.
 /// Patch #19b: NavSession.InitReportingClientAsync (Nav.Ncl.dll) — BC 29, issue #109
 ///   BC 29 removed NavEnvironment.CustomReportingServiceClient (the factory Patch #19 replaced) and
 ///   kept only DecorateReportingServiceClient, which wraps a client InitReportingClientAsync has
@@ -706,6 +711,12 @@ internal class StartupHook
         if (name == "Microsoft.Dynamics.Nav.Watson")
         {
             PatchWatsonReporting(args.LoadedAssembly);
+        }
+
+        // Patch #39: an AL error in a DotNet Timer's Elapsed trigger must not end the process.
+        if (name == "Microsoft.Dynamics.Nav.Timer")
+        {
+            PatchNavTimerElapsed(args.LoadedAssembly);
         }
 
         // Patch #33: give colliding API endpoints their own ports.
@@ -4264,6 +4275,76 @@ internal class StartupHook
             // let the real file operation surface the error with its usual mapping.
         }
         return fileName;
+    }
+
+    // ========================================================================
+    // Patch #39: Microsoft.Dynamics.Nav.Timer.OnTimerElapsed (issue #136)
+    // ========================================================================
+    // The Timer add-in raises Elapsed on a thread-pool thread. When the AL trigger fails
+    // and RedirectExceptions is false, OnTimerElapsed rethrows (`else if (timer != null)
+    // throw;`), and an exception that leaves a thread-pool callback ends the process: the
+    // whole NST stopped with rc=134 here, measured on BC 28.5. On Windows (BC 27.5 and 29.0)
+    // the same test runs to the end, Elapsed fired and ExceptionOccurred did not. Why
+    // Windows survives the rethrow was not determined. The replacement is the same body
+    // without the rethrow: the error is already logged by BC's interop event handler, a
+    // RedirectExceptions timer still raises ExceptionOccurred, and nothing else changes.
+
+    private static FieldInfo? _timerElapsedField;      // m_Elapsed
+    private static PropertyInfo? _timerRedirectProp;   // RedirectExceptions
+    private static MethodInfo? _timerOnRedirect;       // OnRedirectException(Exception)
+
+    private static void PatchNavTimerElapsed(Assembly timerAsm)
+    {
+        if (IsPatchDisabled("39")) return;
+        try
+        {
+            var timerType = timerAsm.GetType("Microsoft.Dynamics.Nav.Timer");
+            const BindingFlags inst = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var original = timerType?.GetMethod("OnTimerElapsed", inst, null, Type.EmptyTypes, null);
+            _timerElapsedField = timerType?.GetField("m_Elapsed", inst)
+                ?? timerType?.GetField("Elapsed", inst);
+            _timerRedirectProp = timerType?.GetProperty("RedirectExceptions", inst);
+            _timerOnRedirect = timerType?.GetMethod("OnRedirectException", inst, null, new[] { typeof(Exception) }, null);
+            if (original == null || _timerElapsedField == null || _timerRedirectProp == null || _timerOnRedirect == null)
+            {
+                Console.WriteLine("[StartupHook] Patch #39: Microsoft.Dynamics.Nav.Timer shape changed — skipping");
+                return;
+            }
+            var replacement = typeof(StartupHook).GetMethod(nameof(Replacement_TimerOnTimerElapsed),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            ApplyJmpHook(original, replacement, "Microsoft.Dynamics.Nav.Timer.OnTimerElapsed (Patch #39)");
+            Console.WriteLine("[StartupHook] Patch #39: Timer.OnTimerElapsed no longer rethrows onto the thread pool");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #39 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void Replacement_TimerOnTimerElapsed(object self)
+    {
+        if (_timerElapsedField!.GetValue(self) is not Delegate elapsed) return;
+        try
+        {
+            elapsed.DynamicInvoke(self, new EventArgs());
+        }
+        catch (Exception ex)
+        {
+            var error = ex is TargetInvocationException { InnerException: not null } tie ? tie.InnerException! : ex;
+            try
+            {
+                if (_timerRedirectProp!.GetValue(self) is true)
+                {
+                    _timerOnRedirect!.Invoke(self, new object[] { error });
+                    return;
+                }
+            }
+            catch (Exception redirectEx)
+            {
+                error = redirectEx is TargetInvocationException { InnerException: not null } rtie ? rtie.InnerException! : redirectEx;
+            }
+            Console.WriteLine($"[StartupHook] Patch #39: Timer Elapsed handler failed, not rethrown: {error.GetType().Name}: {error.Message}");
+        }
     }
 
     // ========================================================================

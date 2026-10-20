@@ -263,6 +263,10 @@ jobs:
       # docker-compose.yml defaults to, so this stays a gate on what
       # consumers actually get rather than on a parallel configuration.
       test_app_dirs: extensions/smoke-test
+      # TimerError.Codeunit.al (issue #136) declares Microsoft.Dynamics.Nav.Timer,
+      # which ships in the service folder.
+      assembly_probing_paths: |
+        platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/*/Service
       # The smoke-test fixture ships a placeholder runtime ("14.0") so one
       # committed app.json spans the whole version matrix; "auto" opts into
       # the per-leg rewrite (27 → 16.0, 28 → 17.0). Consumer repos should
@@ -275,12 +279,13 @@ jobs:
       # 70012 (file dialogs, hub Patch #36) runs on the hub on 28+; 70020 (part
       # Confirm) and 70023 (moved table) guard the classifier's routing to the
       # websocket runner (issues #138-#141). 70040 and 70041 guard the Windows month
-      # names and the "Time Zone" table (#134, #132). 70042 guards the
-      # SecurityIdentifier stub (#137) and runs on BC 29+ only: it declares a DotNet
-      # framework type, and the AL 16/17 compilers of the BC 27/28 legs cannot resolve
-      # one on Linux (AL0451, also with the shared framework as a probing path). The
-      # preprocessor symbol below leaves the codeunit out of those legs' compile.
-      codeunit_range: ${{ (startsWith(matrix.bc_version, '27.') || startsWith(matrix.bc_version, '28.')) && '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041' || '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041|70042' }}
+      # names and the "Time Zone" table (#134, #132). 70051 (control add-in), 70053
+      # (Media bytes) and 70055 (Timer trigger error) guard issues #133, #135 and #136.
+      # 70042 guards the SecurityIdentifier stub (#137) and runs on BC 29+ only: it
+      # declares a DotNet framework type, and the AL 16/17 compilers of the BC 27/28 legs
+      # cannot resolve one on Linux (AL0451, also with the shared framework as a probing
+      # path). The preprocessor symbol below leaves the codeunit out of those legs' compile.
+      codeunit_range: ${{ (startsWith(matrix.bc_version, '27.') || startsWith(matrix.bc_version, '28.')) && '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041|70051|70053|70055' || '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041|70042|70051|70053|70055' }}
       # test_runner is left at its default ("auto"): each leg probes the
       # live server's dev endpoint and uses `al runtests` (the AL dotnet
       # tool's native runner driving the NST's /dev/TestRunnerHub) when
@@ -371,6 +376,10 @@ jobs:
       # fail. Required legs keep the 30-minute default.
       health_timeout_minutes: 8
       test_app_dirs: extensions/smoke-test
+      # TimerError.Codeunit.al (issue #136) declares Microsoft.Dynamics.Nav.Timer,
+      # which ships in the service folder.
+      assembly_probing_paths: |
+        platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/*/Service
       runtime_version: auto
       codeunit_range: "70000|70001"
       runner_image: ${{ needs.build-image.outputs.runner_image }}

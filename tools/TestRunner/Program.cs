@@ -941,7 +941,21 @@ class Callbacks
     // Lang.NavDotNetFromAlNotSupportedException, the message of NavDotNetFromAlNotSupportedException.
     private const string DotNetFromAlNotSupportedMessage =
         "The operation cannot complete because it uses a feature that is not supported (.NET Framework Interoperability.)";
-    [JsonRpcMethod("GetDotNetObject")] public async Task GetDotNetObject(JToken r) => await AckCallback("GetDotNetObject");
+    // A control add-in's instance, asked for when AL calls a procedure of a usercontrol
+    // (CurrPage.Ctl.Say(...)). A TestPage has no client form, so no add-in was ever created.
+    // The web client answers with an AutomationMethodResponse whose ReturnValue is null
+    // (ServiceClientCallback.OnGetDotNetObject, AutomationHandlerBase.GetDotNetObjectCore), and
+    // NavDotNet.CheckClientControlAddIn then raises "The control add-in on control X on page Y
+    // has not been instantiated." (DotNetControlAddInNotCreated), as on Windows. The generic
+    // null ack made NSClientCallback dereference a null response instead: a
+    // NullReferenceException, reported as "A call to Say failed" (issue #133).
+    [JsonRpcMethod("GetDotNetObject")] public async Task GetDotNetObject(JToken r)
+    {
+        if (Rpc == null) return;
+        var returnValue = new JObject { ["typeHint"] = 25, ["value"] = null }; // JsonTypeHint.Null
+        try { await Rpc.InvokeAsync("EndClientAutomationMethodCall", new object?[] { new JObject { ["returnValue"] = returnValue, ["arguments"] = new JArray() } }); }
+        catch { /* connection may be closing */ }
+    }
     // Dialog callbacks — BC sends these when AL code opens/closes dialogs
     [JsonRpcMethod("CloseDialog")] public async Task CloseDialog(JToken r) => await AckCallback("CloseDialog");
     [JsonRpcMethod("OpenDialog")] public async Task OpenDialog(JToken r) => await AckCallback("OpenDialog");
