@@ -92,9 +92,24 @@ internal static class PatchServiceCompat
                     "Microsoft.BusinessCentral.Reporting.Server.LocalReportHandle/LocalReportProxy" &&
                     called != null && called.Name == "set_EnableAppDomainMonitor")
                 {
-                    if (instruction.Previous.OpCode != OpCodes.Ldarg_1)
+                    // The value is the constructor's Boolean enableMonitoring
+                    // parameter. BC 27/28 pass it first (ldarg.1); BC 29 added a
+                    // NavDiagnosticsEnvironment parameter in front and passes it
+                    // fourth (ldarg.s 4). Match the parameter, not its position.
+                    var load = instruction.Previous;
+                    ParameterDefinition loaded = null;
+                    switch (load.OpCode.Code)
+                    {
+                        case Code.Ldarg_1: loaded = method.Parameters[0]; break;
+                        case Code.Ldarg_2: loaded = method.Parameters[1]; break;
+                        case Code.Ldarg_3: loaded = method.Parameters[2]; break;
+                        case Code.Ldarg_S:
+                        case Code.Ldarg: loaded = load.Operand as ParameterDefinition; break;
+                    }
+                    if (loaded == null || loaded.ParameterType.FullName != "System.Boolean")
                         throw new InvalidOperationException("Unexpected monitoring constructor IL.");
-                    instruction.Previous.OpCode = OpCodes.Ldc_I4_0;
+                    load.OpCode = OpCodes.Ldc_I4_0;
+                    load.Operand = null;
                     monitoring++;
                     continue;
                 }

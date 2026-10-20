@@ -1172,6 +1172,18 @@ Things to know before touching it:
   (`NativeRdlcService` + `scripts/start-rdlc-service.sh`); BC's Windows
   side-service lifecycle stays disabled. Patch #19's no-op client is replaced
   by #19a, which hands BC its own real gRPC client.
+- **BC 29 talks HTTP, not gRPC (issue #143).** The BC 29 reporting service is
+  an ASP.NET Core host; it must be started with `--PortNumber 0` (Kestrel —
+  any other port selects Windows-only HTTP.sys) and announces its port on
+  stdout. `NativeRdlcService` switches to that mode when
+  `NavEnvironment.CustomReportingServiceClient` is missing, and hooks
+  `NavSession.InitReportingClientAsync` and
+  `ReportingProcessStartup.GetReportingServiceHostUrl`. Details in
+  `prototypes/rdlc/README.md`.
+- **Word and Excel need Microsoft's System.IO.Packaging (issue #144).** Mono's
+  WindowsBase cannot write a new Open XML package. `PatchRdlc` retargets
+  ReportViewer's Packaging types to the NuGet `netstandard2.0` build (not
+  `net462`, which forwards back to WindowsBase).
 - **`libgrpc_csharp_ext.x64.so` is needed by BOTH processes** — the reporting
   service is the gRPC server and the NST is the client, and Grpc.Core looks for
   the native next to each process's base directory. Staging it only into

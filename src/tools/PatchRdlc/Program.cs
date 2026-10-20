@@ -9,6 +9,9 @@ if (args.Length < 4)
 using var resolver = new DefaultAssemblyResolver();
 resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(args[0]))!);
 resolver.AddSearchDirectory(args[3]);
+// System.IO.Packaging.dll is staged next to the bridge (scripts/build-rdlc.sh).
+string bridgeDirectory = Path.GetDirectoryName(Path.GetFullPath(args[2]))!;
+resolver.AddSearchDirectory(bridgeDirectory);
 using var assembly = AssemblyDefinition.ReadAssembly(args[0],
     new ReaderParameters { AssemblyResolver = resolver });
 using var bridge = AssemblyDefinition.ReadAssembly(args[2],
@@ -116,9 +119,39 @@ if (fontTokens.Count > 0)
     }
     Console.WriteLine("Bridge: original PDF font ownership and italic angle");
 }
+RetargetPackaging();
 RewriteDrawingCalls();
 assembly.Write(args[1]);
 return 0;
+
+// The Word and Excel renderers build their Open XML output with WindowsBase's
+// System.IO.Packaging. Mono's WindowsBase cannot write a new package: the first
+// CreateRelationship reads the empty relationships part back and throws "Root
+// element is missing", so Word and Excel failed while PDF worked (issue #144).
+// Point ReportViewer's Packaging type references at Microsoft's MIT
+// System.IO.Packaging instead. It is the same public API, so every member
+// reference resolves unchanged; only the assembly the types come from moves.
+void RetargetPackaging()
+{
+    string path = Path.Combine(bridgeDirectory, "System.IO.Packaging.dll");
+    if (!File.Exists(path))
+        throw new FileNotFoundException("System.IO.Packaging.dll must be staged next to the bridge.", path);
+    var name = AssemblyDefinition.ReadAssembly(path).Name;
+    var reference = new AssemblyNameReference(name.Name, name.Version)
+    {
+        PublicKeyToken = name.PublicKeyToken,
+        Culture = string.Empty
+    };
+    var packagingTypes = module.GetTypeReferences()
+        .Where(t => t.Scope.Name == "WindowsBase" && t.Namespace == "System.IO.Packaging")
+        .ToArray();
+    if (packagingTypes.Length == 0)
+        throw new InvalidDataException("No System.IO.Packaging references found in ReportViewer.");
+    module.AssemblyReferences.Add(reference);
+    foreach (var type in packagingTypes)
+        type.Scope = reference;
+    Console.WriteLine($"Packaging: {packagingTypes.Length} System.IO.Packaging types now come from {name.FullName}");
+}
 
 void RewriteDrawingCalls()
 {

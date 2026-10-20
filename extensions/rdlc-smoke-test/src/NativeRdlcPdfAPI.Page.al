@@ -31,22 +31,37 @@ page 70102 "BC Linux RDLC PDF API"
                 field(pdfBase64; PdfBase64)
                 {
                 }
+                field(wordBase64; WordBase64)
+                {
+                }
+                field(excelBase64; ExcelBase64)
+                {
+                }
             }
         }
     }
 
     trigger OnAfterGetRecord()
+    begin
+        PdfBase64 := Render(ReportFormat::Pdf);
+        WordBase64 := Render(ReportFormat::Word);
+        ExcelBase64 := Render(ReportFormat::Excel);
+    end;
+
+    local procedure Render(Format: ReportFormat): Text
     var
         Probe: Codeunit "BC Linux RDLC Probe";
         TempBlob: Codeunit "Temp Blob";
         Base64Convert: Codeunit "Base64 Convert";
-        PdfInput: InStream;
+        Input: InStream;
     begin
-        Probe.CreatePdf(TempBlob);
-        TempBlob.CreateInStream(PdfInput);
-        PdfBase64 := Base64Convert.ToBase64(PdfInput);
+        Probe.CreateDocument(TempBlob, Format);
+        TempBlob.CreateInStream(Input);
+        exit(Base64Convert.ToBase64(Input));
     end;
 
     var
         PdfBase64: Text;
+        WordBase64: Text;
+        ExcelBase64: Text;
 }

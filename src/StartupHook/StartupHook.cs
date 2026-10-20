@@ -293,6 +293,11 @@ using System.Threading.Tasks;
 ///   throwing "Reporting service is not available." when Patch #18 left none registered. Applied
 ///   only when #19's member is absent: the method is hooked to return the same no-op proxy, so
 ///   Report.SaveAs gives one message on every BC version.
+/// Patch #19a on BC 29 (NativeRdlcService.cs, only with BC_RDLC_RENDERER=mono) — issue #143
+///   BC 29's reporting protocol is HTTP. With the Mono renderer active, InitReportingClientAsync is
+///   hooked to return BC's own ReportingServiceHttpClient for the supervised service process, and
+///   ReportingProcessStartup.GetReportingServiceHostUrl to return its loopback URL. #19b is not
+///   applied in that case.
 /// winspool.drv stubs (kernel32_stubs.c) — BC 29, issue #108
 ///   Nav.Types PrinterHelper.GetPrinters P/Invokes winspool.drv while a report request page is
 ///   built; the library does not exist here (DllNotFoundException). The stubs answer as a host
@@ -4390,7 +4395,7 @@ internal class StartupHook
     /// Force JIT compilation of both methods, then overwrite the original's native code
     /// entry with an absolute JMP to the replacement. Works on JIT-compiled BC methods only.
     /// </summary>
-    private static void ApplyJmpHook(MethodBase original, MethodInfo replacement, string name)
+    internal static void ApplyJmpHook(MethodBase original, MethodInfo replacement, string name)
     {
         // Never apply a JMP hook to a method that already carries one.
         //

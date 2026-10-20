@@ -32,6 +32,18 @@ fi
 # "internal error while rendering" over gRPC, and Mono's StackTrace.AddFrames
 # throws inside BC's exception telemetry, so without this the actual cause —
 # a missing native, an invalid layout, a font with no glyph — is invisible.
+if [ "${BC_RDLC_PROTOCOL:-grpc}" = "http" ]; then
+    # BC 29+: an ASP.NET Core service with System.CommandLine arguments. Port 0
+    # selects Kestrel on a free loopback port (any other port selects HTTP.sys,
+    # which is Windows-only); the service prints REPORTING_SERVICE_PORT=<n> on
+    # stdout. The hook reads that line, so stdout goes to the hook AND the log.
+    # The antiforgery token arrives in the AntiforgeryToken variable.
+    exec 2>>"$LOG"
+    exec > >(tee -a "$LOG")
+    exec mono "${opts[@]}" Microsoft.BusinessCentral.Reporting.Service.exe \
+        --Host http://127.0.0.1 --PortNumber 0 --Name ReportingService
+fi
+
 exec >>"$LOG" 2>&1
 
 exec mono "${opts[@]}" Microsoft.BusinessCentral.Reporting.Service.exe \

@@ -25,6 +25,8 @@ RUNTIME_SHA512=3c99a46f90b1ddfaeaf37547a27dbbcaa8d9f22ce4403dbaa5db751115376588d
 GLOBALIZATION_SHA256=7da0130279f621ace5cabfc256657947cf4498e7733dc85883ad7f930a8783bc
 GRPC_VERSION=2.46.6
 GRPC_NATIVE_SHA256=776dc19edd2649800a93bd35b74b61d0b81ae840edc659cffef504ee28b5d581
+PACKAGING_VERSION=8.0.1
+PACKAGING_SHA256=c5fd0101fa90bc84e89a906cbdfa7188bb6cffab11404cdd8cd0377ffabfbd8e
 
 log() { echo "[build-rdlc] $*" >&2; }
 
@@ -60,6 +62,20 @@ unzip -p "$WORK/grpc.nupkg" "runtimes/linux-x64/native/libgrpc_csharp_ext.x64.so
     > "$OUT/libgrpc_csharp_ext.x64.so"
 printf '%s  %s\n' "$GRPC_NATIVE_SHA256" "$OUT/libgrpc_csharp_ext.x64.so" | sha256sum --check --quiet
 
+# Microsoft's MIT System.IO.Packaging (dotnet/runtime) for the Word and Excel
+# renderers. ReportViewer builds its Open XML packages with WindowsBase's
+# System.IO.Packaging, and Mono's WindowsBase reimplementation cannot write a
+# new package: the first CreateRelationship reads the empty relationships part
+# back and fails with "Root element is missing" (issue #144). PatchRdlc points
+# ReportViewer's five Packaging type references at this assembly instead. The
+# netstandard2.0 build is the implementation; the net462 build only forwards
+# back to WindowsBase. Its one dependency, System.Memory, ships in SideServices.
+curl --fail --location --silent --retry 3 \
+    "https://api.nuget.org/v3-flatcontainer/system.io.packaging/$PACKAGING_VERSION/system.io.packaging.$PACKAGING_VERSION.nupkg" \
+    --output "$WORK/packaging.nupkg"
+printf '%s  %s\n' "$PACKAGING_SHA256" "$WORK/packaging.nupkg" | sha256sum --check --quiet
+unzip -p "$WORK/packaging.nupkg" lib/netstandard2.0/System.IO.Packaging.dll > "$OUT/System.IO.Packaging.dll"
+
 VB=$SRC/prototypes/rdlc/vb-runtime
 mkdir -p "$WORK/referencesource"
 curl --fail --location --silent --retry 3 \
@@ -76,6 +92,7 @@ curl --fail --location --silent --retry 3 \
     --output "$OUT/licenses/Microsoft-referencesource-MIT.txt"
 cp "$WORK/mono-basic/LICENSE" "$OUT/licenses/mono-basic-LICENSE.txt"
 unzip -p "$WORK/runtime.nupkg" LICENSE.TXT > "$OUT/licenses/dotnet-runtime-LICENSE.TXT"
+unzip -p "$WORK/packaging.nupkg" LICENSE.TXT > "$OUT/licenses/System.IO.Packaging-LICENSE.TXT"
 
 # ------------------------------------------------------------- ICU shim + VB
 log "building the ICU collation bridge"

@@ -75,9 +75,11 @@ AppDomain handling and protobuf layer are all Microsoft's, retained.
   section above — this is the highest-value remaining fix.
 - **Still untested:** subreports, non-Latin text, concurrent renders, and
   anything out of a real customer app.
-- **Any BC version but 28.4.** `src/tools/PatchRdlc/Program.cs` refuses a
-  ReportViewer whose MVID it does not know, which disables the renderer. A new
-  BC version needs those MVIDs re-pointed and the font tokens re-checked.
+- **A BC version with a new ReportViewer build.** `src/tools/PatchRdlc/Program.cs`
+  refuses a ReportViewer whose MVID it does not know, which disables the
+  renderer. BC 27.5, 28.x and 29.0 all ship the same ReportViewer build
+  (MVID `5b437ccb-...`), so all three render. A new build needs those MVIDs
+  re-pointed and the font tokens re-checked.
 
 ## Real BC document layouts render
 
@@ -264,7 +266,8 @@ The 9 that still fail are not rendering faults except two:
   does not exist", a Production BOM validation error. These fail identically
   with the renderer off.
 - **2 are Word and Excel output** — `TestRdlcSaveAsWord` and
-  `TestRdlcSaveAsExcel`. See below.
+  `TestRdlcSaveAsExcel`. That measurement predates the Packaging fix below
+  (issue #144); they were not re-run after it.
 
 ### The AL Runner corpus test stays green both ways
 
@@ -302,23 +305,44 @@ renderer and it has not been shown unrelated either — no core dump was analyse
 Worth reproducing under `BC_RDLC_RENDERER` on and off before anyone relies on
 this in CI.
 
-### Excel and Word output do not work, and that is a separate problem
+### Excel and Word output: fixed by swapping System.IO.Packaging (issue #144)
 
-`Report.SaveAsExcel` and `SaveAsWord` fail under Mono inside
-`System.IO.Packaging`, which ReportViewer uses to build the OPC package:
+ReportViewer's Word and Excel renderers build their Open XML package with
+WindowsBase's `System.IO.Packaging`. Under Mono that is Mono's own WindowsBase,
+which cannot write a new package. The first relationship the Word renderer adds
+makes it read the still-empty relationships part back as XML:
 
 ```
-System.Exception: Could not open unzip archive
-  at zipsharp.NativeUnzip.OpenArchive64
-  at System.IO.Packaging.ZipPackage.LoadParts
+System.Xml.XmlException: Root element is missing.
+  at System.IO.Packaging.Package.LoadRelationships
+  at System.IO.Packaging.Package.CreateRelationship
+  at ...WordOpenXmlRenderer.Models.Relationships.OPCRelationshipTree.AddRelationship
 ```
+
+(An earlier session saw `Could not open unzip archive` in
+`zipsharp.NativeUnzip.OpenArchive64` on the same path. Both are Mono's
+WindowsBase.) The NST reports either one as "an internal error while rendering
+the report", error code `ReportingService:Rpc`.
+
+The fix: `PatchRdlc` points ReportViewer's five `System.IO.Packaging` type
+references (`Package`, `PackagePart`, `PackageRelationship`, `CompressionOption`,
+`TargetMode`) at Microsoft's MIT `System.IO.Packaging` 8.0.1 from NuGet, the
+`netstandard2.0` build. It has the same public API, so no member reference
+changes. Do not use the package's `net462` build: it only type-forwards back to
+WindowsBase. Its one dependency, `System.Memory`, already ships in
+SideServices. `scripts/build-rdlc.sh` downloads it with a pinned SHA-256 and the
+entrypoint stages it next to ReportViewer.
+
+Measured with `extensions/rdlc-smoke-test` (report 70100, 120 rows) through
+`Report.SaveAs`, on BC 27.5, 28.5 and 29.0: PDF 24,898 bytes (4 pages), Word
+8,898 bytes, Excel 6,878 bytes. Both Open XML files are valid ZIP packages and
+contain all 120 rows. Nothing was compared against a Windows container.
 
 This matters for reading the corpus. The nine Tests-ERM codeunits whose failures
-are labelled "RDLC report rendering is not implemented" (134008, 134325-134330,
+were labelled "RDLC report rendering is not implemented" (134008, 134325-134330,
 134377, 134386) are **all `SaveAsExcel`** — 18 of the 19 whose bodies resolve.
-Running them proves nothing about this work: 737 tests, 669 passed, 68 failed,
-with the renderer both off and on. The "not implemented" message disappears
-because the renderer is engaged, and then they fail in the Excel writer instead.
+Before this fix they failed in the Excel writer with the renderer on. They have
+not been re-run since.
 
 Do not use those ERM codeunits to judge PDF rendering. Use Tests-Report 134607
 and 132600.
@@ -339,6 +363,37 @@ Mono throws inside `StackTrace.AddFrames`, and the original message is lost — 
 the client sees only "The system encountered an internal error while rendering
 the report". Fixing this is worth doing before the Excel work, because without
 it the Excel failures cannot be diagnosed either.
+
+## BC 29: same renderer, HTTP instead of gRPC (issue #143)
+
+BC 29 ships the same ReportViewer build, so the render path is unchanged. What
+changed is the service around it, and it took two fixes:
+
+- **`PatchServiceCompat` refused the BC 29 `Reporting.Server.dll`.**
+  `LocalReportProxy`'s constructor gained a `NavDiagnosticsEnvironment`
+  parameter in front of `enableMonitoring`, so the flag is now loaded with
+  `ldarg.s 4` instead of `ldarg.1`. The patcher checked for `ldarg.1` and threw
+  "Unexpected monitoring constructor IL", and the entrypoint turned the renderer
+  off. It now matches the Boolean parameter, not its position. The entrypoint
+  also prints the end of `/tmp/rdlc-patch.log` when it turns the renderer off,
+  because CI jobs do not keep `/tmp`.
+- **The protocol is HTTP.** `Reporting.Service.exe` is an ASP.NET Core 2.x host
+  on .NET Framework. With `--PortNumber 0` it uses Kestrel on a free loopback
+  port and prints `REPORTING_SERVICE_PORT=<n>`; any other port selects
+  HTTP.sys, which is Windows-only. Requests must carry a per-process antiforgery
+  token, passed in the `AntiforgeryToken` environment variable. On the NST side
+  `NavEnvironment.CustomReportingServiceClient` is gone, and
+  `NavSession.InitReportingClientAsync` builds a `ReportingServiceHttpClient`
+  from the side-service watchdog, which Patch #18 keeps empty.
+  `NativeRdlcService` detects BC 29 by the missing factory and then: starts the
+  service with `--Host http://127.0.0.1 --PortNumber 0`, reads the port line
+  from its stdout, hooks `ReportingProcessStartup.GetReportingServiceHostUrl`
+  (BC builds the URL from the container's DNS name, which Kestrel does not
+  listen on), runs BC's own `InitializeReportingServiceConfiguration`, and hooks
+  `InitReportingClientAsync` to hand back one `ReportingServiceHttpClient` per
+  service process. BC 27/28 keep the gRPC path unchanged.
+
+Kestrel, MVC and the antiforgery middleware all run under Mono without changes.
 
 ## Layout
 

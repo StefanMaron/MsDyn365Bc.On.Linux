@@ -709,8 +709,11 @@ if [ "${BC_RDLC_RENDERER:-}" = "mono" ]; then
                     Microsoft.BusinessCentral.Reporting.Server.dll \
                     >> "$RDLC_LOG" 2>&1); then
                 # HeadlessPageSettings.dll is not optional: the patched
-                # Reporting.Server.dll holds real calls into it.
+                # Reporting.Server.dll holds real calls into it. Neither is
+                # System.IO.Packaging.dll: the patched ReportViewer takes its
+                # Packaging types from it (Word and Excel output, issue #144).
                 cp /bc/rdlc/RdlcNativeBridge.dll /bc/rdlc/librdlc_native.so \
+                   /bc/rdlc/System.IO.Packaging.dll \
                    /bc/rdlc/Microsoft.VisualBasic.dll /bc/rdlc/HeadlessPageSettings.dll \
                    /bc/rdlc/libBCRdlc.IcuBridge.so /bc/rdlc/libSystem.Globalization.Native.so \
                    "$SIDE_DIR/"
@@ -727,6 +730,11 @@ if [ "${BC_RDLC_RENDERER:-}" = "mono" ]; then
             fi
         else
             rdlc_disable "ReportViewer in this BC build is not one this renderer knows (see $RDLC_LOG)"
+        fi
+        # CI jobs do not keep /tmp, so a refusal that only names the log file
+        # cannot be diagnosed from the job output (issue #143). Print its end.
+        if [ "$RDLC_ENABLED" = "0" ] && [ -s "$RDLC_LOG" ]; then
+            tail -n 30 "$RDLC_LOG" | sed 's/^/[entrypoint] RDLC patch log: /' >&2
         fi
         # A refused patch must not leave a partly-written assembly behind.
         if [ "$RDLC_ENABLED" = "0" ]; then
