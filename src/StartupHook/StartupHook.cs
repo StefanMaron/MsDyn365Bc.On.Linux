@@ -257,6 +257,11 @@ using System.Threading.Tasks;
 ///   runner class, so the websocket runner and a real tier are untouched.
 ///   NOT covered: the rest of 130453 (application areas, WorkDate, codeunits 130301/130302/
 ///   132553) is also skipped on the hub; the last error is the only part measured.
+/// Patch #38: hub test session SuppressUnhandledUI (Nav.Service.Dev.dll) — issue #139
+///   The hub's TestRunnerRuntime sets TestExecution.SuppressUnhandledUI = true, so an
+///   unhandled Confirm, Message, StrMenu or page open raised nothing. A Windows test session
+///   fails with "Unhandled UI: <kind> <text>" (MissingUIHandler). Fix: Patch #34's
+///   replacement sets the property back to false before every test method.
 /// Patch #35: NavFile.ALIsPathTemporary (Nav.Ncl.dll) — issue #122
 ///   BC's IsPathTemporary is "ExpandFileName(enforceUserPath: true) did not throw". Patch #28
 ///   stopped ExpandFileName enforcing the user folder, so every path came back temporary —
@@ -4932,6 +4937,60 @@ internal class StartupHook
         }
     }
 
+    // ========================================================================
+    // Patch #38: the hub reports unhandled UI as a Windows test session does (issue #139)
+    // ------------------------------------------------------------------------
+    // TestRunnerRuntime.InitializeRuntime (Nav.Service.Dev) sets
+    // TestRunSession.TestExecution.SuppressUnhandledUI = true. NavTestExecution.FindHandler
+    // then never throws NavNCLMissingUIHandlerException, so on the hub an unhandled Confirm
+    // returns its default, a Message or StrMenu passes, and a page open shows nothing. A
+    // Windows test session (an AL test runner codeunit, SuppressUnhandledUI false) fails with
+    // "Unhandled UI: <kind> <text>", code MissingUIHandler. The hub is the only code that sets
+    // the property, so it is reset to false before every test method, here in Patch #34's
+    // replacement, which is the hub's own per-method hook. The property's setter is called
+    // through reflection: hooking the auto-property itself would not hold, because the JIT
+    // inlines a trivial setter or getter into its callers from IL. BC_DISABLE_PATCHES=38
+    // restores the hub's own behavior.
+    // ========================================================================
+    private static PropertyInfo? _sessionTestExecutionProp;
+    private static PropertyInfo? _suppressUnhandledUiProp;
+    private static bool _suppressUnhandledUiReported;
+    private static bool? _patch38Disabled;
+
+    private static void AllowUnhandledUiErrors(object devRunner)
+    {
+        _patch38Disabled ??= IsPatchDisabled("38");
+        if (_patch38Disabled == true) return;
+        try
+        {
+            var session = _devRunnerSessionProp!.GetValue(devRunner);
+            if (session == null) return;
+            const BindingFlags all = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            _sessionTestExecutionProp ??= session.GetType().GetProperty("TestExecution", all);
+            var execution = _sessionTestExecutionProp?.GetValue(session);
+            if (execution == null) return;
+            _suppressUnhandledUiProp ??= execution.GetType().GetProperty("SuppressUnhandledUI", all);
+            if (_suppressUnhandledUiProp == null)
+            {
+                if (!_suppressUnhandledUiReported)
+                    Console.WriteLine("[StartupHook] Patch #38: NavTestExecution.SuppressUnhandledUI not found — skipping");
+                _suppressUnhandledUiReported = true;
+                return;
+            }
+            if (_suppressUnhandledUiProp.GetValue(execution) is true)
+            {
+                _suppressUnhandledUiProp.SetValue(execution, false);
+                if (!_suppressUnhandledUiReported)
+                    Console.WriteLine("[StartupHook] Patch #38: hub test session reports unhandled UI as a Windows test session does");
+                _suppressUnhandledUiReported = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #38 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     private static ValueTask<bool> Replacement_DevOnBeforeTestRunAsync(object self, int codeUnitId, object codeUnitName, object functionName, int testPermissions)
     {
         // What a real tier's OnBeforeTestMethodRun does first. Never let it block the run.
@@ -4944,6 +5003,8 @@ internal class StartupHook
         {
             Console.WriteLine($"[StartupHook] Patch #34: ClearLastError failed: {ex.GetType().Name}: {ex.Message}");
         }
+
+        AllowUnhandledUiErrors(self);
 
         string fn = ShowFormGetProperty(functionName, "Value") as string ?? string.Empty;
         var toRun = _devRunnerTestsToRunProp!.GetValue(self) as HashSet<string>;
