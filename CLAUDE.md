@@ -777,6 +777,21 @@ transport), the websocket runner and a Windows container give the AL error. Meas
 `74214|74217` fails, `74217` alone passes. The root cause inside the hub is not found; the
 routing is the workaround, and only five corpus codeunits move.
 
+A sixth shape routes to websocket (issue #140): a test body that names one of Microsoft's test
+runner codeunits ("Test Runner - Mgt.", "Test Runner - Isol. ..."). Errors such as
+"You tried to invoke the Table object with the ID n from the object X" name the caller of the
+test method. On Windows and on the websocket runner that is "Test Runner - Mgt."; the hub has
+no AL caller, so BC names the test codeunit. Faking a caller inside BC's error path on the hub
+would be inventing an object name, so the test is routed instead. Corpus tests that pinned
+the hub's text under `#if BC28PLUS` (`report/lt-t-validate-layout`, codeunit 69366) now get the
+Windows text on 28+ and need that branch removed.
+
+The hub's file answers are Patch #36, not routing: `ExportDataAction` reads the export stream
+and returns true (issue #138), `UploadFileAction` refuses with
+`NavNotSupportedFileDialogProviderException` (issue #141), the same answers the websocket
+runner gives. `extensions/smoke-test` codeunits 70012, 70020 and 70023 guard all of this and
+are in `test-versions.yml`'s codeunit range.
+
 `test_runner=altool` (explicit force, BC 27/28's "catch hub regressions"
 mode) is untouched by any of this — it still runs every codeunit through
 the hub with no split, on purpose, so a real hub regression can't be

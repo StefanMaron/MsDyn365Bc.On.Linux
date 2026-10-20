@@ -40,7 +40,10 @@ A test method is flagged "needs websocket" when any of:
       refusal itself, whatever call raised it (issue #93), or
   (e) a test calls `NumberSequence.` and also uses `asserterror` (issue #120):
       a failed sequence DDL statement dooms the SQL transaction, which the
-      hub's reused session cannot recover from.
+      hub's reused session cannot recover from, or
+  (f) its body names one of Microsoft's test runner codeunits ("Test Runner -
+      Mgt.", "Test Runner - Isol. Codeunit", ...) (issue #140): it expects an
+      error text that only a run under a test runner codeunit produces.
 
 Rule (c) is issue #64, and unlike (a) and (b) it is measured rather than
 inferred. TestPermissions works "together with the OnBeforeTestRun and
@@ -70,6 +73,17 @@ on the websocket runner and fail on both altool transports (`cli`, `hub`),
 including a Confirm in the host page's own `OnOpenPage`, so it is not specific
 to parts. A test that names the error text is asserting exactly the behavior
 the hub lacks, regardless of which UI call raises it.
+
+Rule (f) is issue #140. Some BC errors name the object that called the
+current AL method: `RecordRef.Open` of a table that is not in the runtime app
+raises "You tried to invoke the Table object with the ID n from the object X".
+Called directly from a [Test] method, X is the test method's caller. On a
+Windows container and on the websocket runner that is the test runner
+codeunit "Test Runner - Mgt."; the hub calls the test method with no AL caller,
+so BC names the test codeunit itself. Faking a caller on the hub would mean
+making up an object name in BC's error path, so the test is routed instead. A
+test that checks that text names the test runner object, which is what the
+rule matches.
 
 This is a heuristic, not a proof. It cannot see a modal invoked deep inside
 called business logic that the test codeunit's own source never mentions.
@@ -118,6 +132,10 @@ UNHANDLED_UI_RE = re.compile(r'\bUnhandled\s+UI\b', re.IGNORECASE)
 # back by the server." The websocket runner, a fresh session and a Windows
 # container all give the AL error instead.
 NUMBER_SEQUENCE_RE = re.compile(r'\bNumberSequence\s*\.', re.IGNORECASE)
+# Microsoft's test runner codeunits: "Test Runner - Mgt.", "Test Runner - Isol.
+# Codeunit", "Test Runner - Isol. Disabled" (issue #140). A test that names one
+# expects an error text that only a run under that codeunit produces.
+TEST_RUNNER_NAME_RE = re.compile(r'\bTest\s+Runner\s+-\s+(Mgt\.|Isol\.)', re.IGNORECASE)
 MODAL_CALL_RE = re.compile(r'\.(RunModal|Invoke)\s*\(|(?<![\w.])RunModal\s*\(', re.IGNORECASE)
 
 
@@ -194,6 +212,8 @@ def classify_al_source(paths: list[str]) -> dict[int, dict]:
             elif ASSERTERROR_RE.search("\n".join(proc_body)) and NUMBER_SEQUENCE_RE.search(
                 "\n".join(proc_body)
             ):
+                cur.needs_websocket = True
+            elif TEST_RUNNER_NAME_RE.search("\n".join(proc_body)):
                 cur.needs_websocket = True
 
         def flush_codeunit():

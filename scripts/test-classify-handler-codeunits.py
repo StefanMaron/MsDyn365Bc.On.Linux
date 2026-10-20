@@ -65,6 +65,10 @@ CASES = [
      "Disabled", False, "a sequence without asserterror stays fast"),
     (9, "        asserterror Error('x');\n        Assert.ExpectedError('x');",
      "Disabled", False, "asserterror without a sequence stays fast"),
+    (10, "        asserterror RR.Open(80301);\n        Assert.ExpectedError('from the object Test Runner - Mgt. An object');",
+     "Disabled", True, "issue #140: names the test runner codeunit"),
+    (11, "        asserterror RR.Open(80301);\n        Assert.ExpectedErrorCode('AL:MetadataNotFound');",
+     "Disabled", False, "the same open without the runner's name stays fast"),
 ]
 
 

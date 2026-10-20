@@ -272,7 +272,9 @@ using System.Threading.Tasks;
 ///   which hands the download to the caller (true, file name unchanged) and refuses the
 ///   upload with NavNotSupportedFileDialogProviderException. Fix: DownloadFileAction returns
 ///   true, ImportDataAction (behind Database.ImportData and DataFileInformation) throws that
-///   exception. The websocket runner's client answers the same way (tools/TestRunner,
+///   exception. ExportDataAction reads the export stream and returns true, so
+///   Database.ExportData returns true (issue #138); UploadFileAction throws the same exception,
+///   so an import xmlport with no source fails as on Windows (issue #141). The websocket runner's client answers the same way (tools/TestRunner,
 ///   FileActionDialog); before that change it answered with a null result, which BC
 ///   dereferenced (NullReferenceException in AL, and on BC 27 the session ended).
 /// Patch #37: TestRunnerClientCallback RunOnClient DotNet (Nav.Service.Dev.dll) — issue #125
@@ -4993,7 +4995,14 @@ internal class StartupHook
                 && m.ReturnType == typeof(bool) && m.GetParameters().Length == 7);
             var import = callback.GetMethods(all).FirstOrDefault(m => m.Name == "ImportDataAction"
                 && m.ReturnType == typeof(bool) && m.GetParameters().Length == 3);
-            if (download == null || import == null || _notSupportedFileDialogExceptionType == null)
+            // Issue #138 and #141: the export half of Database.ExportData, and every upload
+            // (Xmlport.Run of an import xmlport with no source, UploadIntoStream, File.Upload).
+            var export = callback.GetMethods(all).FirstOrDefault(m => m.Name == "ExportDataAction"
+                && m.ReturnType == typeof(bool) && m.GetParameters().Length == 4);
+            var upload = callback.GetMethods(all).FirstOrDefault(m => m.Name == "UploadFileAction"
+                && m.GetParameters().Length == 6);
+            if (download == null || import == null || export == null || upload == null
+                || _notSupportedFileDialogExceptionType == null)
             {
                 Console.WriteLine("[StartupHook] Patch #36: TestRunnerClientCallback shape changed — skipping");
                 return;
@@ -5003,7 +5012,11 @@ internal class StartupHook
                 BindingFlags.Static | BindingFlags.NonPublic)!, "TestRunnerClientCallback.DownloadFileAction (Patch #36)");
             ApplyJmpHook(import, typeof(StartupHook).GetMethod(nameof(Replacement_TestRunnerImportDataAction),
                 BindingFlags.Static | BindingFlags.NonPublic)!, "TestRunnerClientCallback.ImportDataAction (Patch #36)");
-            Console.WriteLine("[StartupHook] Patch #36: TestRunnerClientCallback download/import answer as a Windows test client");
+            ApplyJmpHook(export, typeof(StartupHook).GetMethod(nameof(Replacement_TestRunnerExportDataAction),
+                BindingFlags.Static | BindingFlags.NonPublic)!, "TestRunnerClientCallback.ExportDataAction (Patch #36)");
+            ApplyJmpHook(upload, typeof(StartupHook).GetMethod(nameof(Replacement_TestRunnerUploadFileAction),
+                BindingFlags.Static | BindingFlags.NonPublic)!, "TestRunnerClientCallback.UploadFileAction (Patch #36)");
+            Console.WriteLine("[StartupHook] Patch #36: TestRunnerClientCallback download/export/import/upload answer as a Windows test client");
         }
         catch (Exception ex)
         {
@@ -5021,11 +5034,41 @@ internal class StartupHook
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static bool Replacement_TestRunnerImportDataAction(object self, ref string fileName, string dialogTitle, bool showDialog)
     {
-        // On Windows the client's exception crosses the wire, and the server rethrows a clone
-        // that wraps it (ExceptionHandler.WrapOriginalException). That nesting is what makes
-        // the AL error code "NotSupportedFileDialogProvider:NotSupportedFileDialogProvider".
+        throw NotSupportedFileDialog();
+    }
+
+    // Database.ExportData (issue #138). ALDatabase.ALExportData writes the export on a pool
+    // thread into a ReaderBlocksWriterStream and hands the reader to this callback; false
+    // makes ExportData return false. A Windows test run's client takes the export as a
+    // download: true, file name unchanged. The stream has to be read to the end, or the
+    // writer blocks until the pipe times out (the websocket runner hit that in issue #125).
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool Replacement_TestRunnerExportDataAction(object self, System.IO.Stream stream, ref string fileName,
+        string dialogTitle, bool showDialog)
+    {
+        stream?.CopyTo(System.IO.Stream.Null);
+        return true;
+    }
+
+    // Every upload: Xmlport.Run of an import xmlport with no source, UploadIntoStream,
+    // File.Upload (issue #141). The hub returned null, which an import xmlport read as an
+    // empty file and ran without an error. A Windows test run's client refuses every upload
+    // with NavNotSupportedFileDialogProviderException; the websocket runner does the same
+    // since issue #122.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static object Replacement_TestRunnerUploadFileAction(object self, bool displayDialog, string title,
+        string initialFolder, string typeFilter, ref string fileName, Guid automationId)
+    {
+        throw NotSupportedFileDialog();
+    }
+
+    // On Windows the client's exception crosses the wire, and the server rethrows a clone
+    // that wraps it (ExceptionHandler.WrapOriginalException). That nesting is what makes
+    // the AL error code "NotSupportedFileDialogProvider:NotSupportedFileDialogProvider".
+    private static Exception NotSupportedFileDialog()
+    {
         var inner = (Exception)Activator.CreateInstance(_notSupportedFileDialogExceptionType!)!;
-        throw (Exception)Activator.CreateInstance(_notSupportedFileDialogExceptionType!, inner.Message, inner)!;
+        return (Exception)Activator.CreateInstance(_notSupportedFileDialogExceptionType!, inner.Message, inner)!;
     }
 
     // ========================================================================
