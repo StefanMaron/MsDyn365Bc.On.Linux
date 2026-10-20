@@ -1029,6 +1029,174 @@ namespace System.Drawing.Drawing2D
         SourceOver = 0,
         SourceCopy = 1,
     }
+
+    public enum MatrixOrder
+    {
+        Prepend = 0,
+        Append = 1,
+    }
+
+    // A real implementation, not a no-op: Aspose.PDF (in Microsoft's DocumentProcessor) uses it
+    // for image placement while it makes a PDF compliant, and a missing type made every Word
+    // layout with section breaks leave "Unable to merge pdf streams" as the last error (#155).
+    // GDI+'s 3x2 affine matrix in float math, row-vector convention (p' = p * M), with
+    // MatrixOrder.Prepend as the default order, as System.Drawing.Common has it.
+    public sealed class Matrix : MarshalByRefObject, IDisposable
+    {
+        private float _m11, _m12, _m21, _m22, _dx, _dy;
+
+        public Matrix() { _m11 = 1; _m22 = 1; }
+
+        public Matrix(float m11, float m12, float m21, float m22, float dx, float dy)
+        {
+            _m11 = m11; _m12 = m12; _m21 = m21; _m22 = m22; _dx = dx; _dy = dy;
+        }
+
+        public Matrix(System.Numerics.Matrix3x2 matrix)
+            : this(matrix.M11, matrix.M12, matrix.M21, matrix.M22, matrix.M31, matrix.M32) { }
+
+        public Matrix(RectangleF rect, PointF[] plgpts)
+        {
+            ArgumentNullException.ThrowIfNull(plgpts);
+            if (plgpts.Length != 3) throw new ArgumentException("Invalid parameter.", nameof(plgpts));
+            if (rect.Width == 0 || rect.Height == 0) throw new ArgumentException("Invalid parameter.", nameof(rect));
+            _m11 = (plgpts[1].X - plgpts[0].X) / rect.Width;
+            _m12 = (plgpts[1].Y - plgpts[0].Y) / rect.Width;
+            _m21 = (plgpts[2].X - plgpts[0].X) / rect.Height;
+            _m22 = (plgpts[2].Y - plgpts[0].Y) / rect.Height;
+            _dx = plgpts[0].X - _m11 * rect.X - _m21 * rect.Y;
+            _dy = plgpts[0].Y - _m12 * rect.X - _m22 * rect.Y;
+        }
+
+        public Matrix(Rectangle rect, Point[] plgpts)
+            : this(new RectangleF(rect.X, rect.Y, rect.Width, rect.Height),
+                   (plgpts ?? throw new ArgumentNullException(nameof(plgpts))).Select(p => new PointF(p.X, p.Y)).ToArray()) { }
+
+        public float[] Elements => new[] { _m11, _m12, _m21, _m22, _dx, _dy };
+
+        public System.Numerics.Matrix3x2 MatrixElements
+        {
+            get => new System.Numerics.Matrix3x2(_m11, _m12, _m21, _m22, _dx, _dy);
+            set { _m11 = value.M11; _m12 = value.M12; _m21 = value.M21; _m22 = value.M22; _dx = value.M31; _dy = value.M32; }
+        }
+
+        public float OffsetX => _dx;
+        public float OffsetY => _dy;
+        public bool IsIdentity => _m11 == 1 && _m12 == 0 && _m21 == 0 && _m22 == 1 && _dx == 0 && _dy == 0;
+        public bool IsInvertible => _m11 * _m22 - _m12 * _m21 != 0;
+
+        public Matrix Clone() => new Matrix(_m11, _m12, _m21, _m22, _dx, _dy);
+        public void Dispose() { }
+
+        public void Reset() { _m11 = 1; _m12 = 0; _m21 = 0; _m22 = 1; _dx = 0; _dy = 0; }
+
+        public void Multiply(Matrix matrix) => Multiply(matrix, MatrixOrder.Prepend);
+
+        public void Multiply(Matrix matrix, MatrixOrder order)
+        {
+            ArgumentNullException.ThrowIfNull(matrix);
+            if (ReferenceEquals(matrix, this)) throw new InvalidOperationException("The matrix cannot be multiplied by itself.");
+            Apply(matrix._m11, matrix._m12, matrix._m21, matrix._m22, matrix._dx, matrix._dy, order);
+        }
+
+        public void Translate(float offsetX, float offsetY) => Translate(offsetX, offsetY, MatrixOrder.Prepend);
+        public void Translate(float offsetX, float offsetY, MatrixOrder order) => Apply(1, 0, 0, 1, offsetX, offsetY, order);
+
+        public void Scale(float scaleX, float scaleY) => Scale(scaleX, scaleY, MatrixOrder.Prepend);
+        public void Scale(float scaleX, float scaleY, MatrixOrder order) => Apply(scaleX, 0, 0, scaleY, 0, 0, order);
+
+        public void Shear(float shearX, float shearY) => Shear(shearX, shearY, MatrixOrder.Prepend);
+        public void Shear(float shearX, float shearY, MatrixOrder order) => Apply(1, shearY, shearX, 1, 0, 0, order);
+
+        public void Rotate(float angle) => Rotate(angle, MatrixOrder.Prepend);
+
+        public void Rotate(float angle, MatrixOrder order)
+        {
+            double radians = angle * Math.PI / 180.0;
+            float cos = (float)Math.Cos(radians), sin = (float)Math.Sin(radians);
+            Apply(cos, sin, -sin, cos, 0, 0, order);
+        }
+
+        public void RotateAt(float angle, PointF point) => RotateAt(angle, point, MatrixOrder.Prepend);
+
+        public void RotateAt(float angle, PointF point, MatrixOrder order)
+        {
+            // Translate the point to the origin, rotate, translate back.
+            var op = new Matrix(1, 0, 0, 1, -point.X, -point.Y);
+            op.Rotate(angle, MatrixOrder.Append);
+            op.Translate(point.X, point.Y, MatrixOrder.Append);
+            Apply(op._m11, op._m12, op._m21, op._m22, op._dx, op._dy, order);
+        }
+
+        public void Invert()
+        {
+            float det = _m11 * _m22 - _m12 * _m21;
+            if (det == 0) throw new ArgumentException("Invalid parameter.");
+            float m11 = _m22 / det, m12 = -_m12 / det, m21 = -_m21 / det, m22 = _m11 / det;
+            float dx = -(_dx * m11 + _dy * m21), dy = -(_dx * m12 + _dy * m22);
+            _m11 = m11; _m12 = m12; _m21 = m21; _m22 = m22; _dx = dx; _dy = dy;
+        }
+
+        public void TransformPoints(PointF[] pts)
+        {
+            ArgumentNullException.ThrowIfNull(pts);
+            for (int i = 0; i < pts.Length; i++)
+                pts[i] = new PointF(pts[i].X * _m11 + pts[i].Y * _m21 + _dx, pts[i].X * _m12 + pts[i].Y * _m22 + _dy);
+        }
+
+        public void TransformPoints(Point[] pts)
+        {
+            ArgumentNullException.ThrowIfNull(pts);
+            for (int i = 0; i < pts.Length; i++)
+                pts[i] = new Point(Round(pts[i].X * _m11 + pts[i].Y * _m21 + _dx), Round(pts[i].X * _m12 + pts[i].Y * _m22 + _dy));
+        }
+
+        public void TransformVectors(PointF[] pts)
+        {
+            ArgumentNullException.ThrowIfNull(pts);
+            for (int i = 0; i < pts.Length; i++)
+                pts[i] = new PointF(pts[i].X * _m11 + pts[i].Y * _m21, pts[i].X * _m12 + pts[i].Y * _m22);
+        }
+
+        public void TransformVectors(Point[] pts)
+        {
+            ArgumentNullException.ThrowIfNull(pts);
+            for (int i = 0; i < pts.Length; i++)
+                pts[i] = new Point(Round(pts[i].X * _m11 + pts[i].Y * _m21), Round(pts[i].X * _m12 + pts[i].Y * _m22));
+        }
+
+        public void VectorTransformPoints(Point[] pts) => TransformVectors(pts);
+
+        public override bool Equals(object? obj) =>
+            obj is Matrix m && m._m11 == _m11 && m._m12 == _m12 && m._m21 == _m21 && m._m22 == _m22 && m._dx == _dx && m._dy == _dy;
+
+        public override int GetHashCode() => base.GetHashCode();
+
+        // this = op * this (Prepend) or this * op (Append), row-vector convention.
+        private void Apply(float a11, float a12, float a21, float a22, float adx, float ady, MatrixOrder order)
+        {
+            float l11, l12, l21, l22, ldx, ldy, r11, r12, r21, r22, rdx, rdy;
+            if (order == MatrixOrder.Append)
+            {
+                l11 = _m11; l12 = _m12; l21 = _m21; l22 = _m22; ldx = _dx; ldy = _dy;
+                r11 = a11; r12 = a12; r21 = a21; r22 = a22; rdx = adx; rdy = ady;
+            }
+            else
+            {
+                l11 = a11; l12 = a12; l21 = a21; l22 = a22; ldx = adx; ldy = ady;
+                r11 = _m11; r12 = _m12; r21 = _m21; r22 = _m22; rdx = _dx; rdy = _dy;
+            }
+            _m11 = l11 * r11 + l12 * r21;
+            _m12 = l11 * r12 + l12 * r22;
+            _m21 = l21 * r11 + l22 * r21;
+            _m22 = l21 * r12 + l22 * r22;
+            _dx = ldx * r11 + ldy * r21 + rdx;
+            _dy = ldx * r12 + ldy * r22 + rdy;
+        }
+
+        // GDI+'s GpRound.
+        private static int Round(float value) => (int)MathF.Floor(value + 0.5f);
+    }
 }
 
 // ============================================================================

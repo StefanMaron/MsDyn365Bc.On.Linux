@@ -953,7 +953,7 @@ sites are ordinary IL, so `src/tools/PatchNclTestPage` rewrites them on disk in 
 | `newline` | `Environment.NewLine` → CRLF; `StringBuilder.AppendLine`; `new XmlWriterSettings`, `StreamWriter`, `StringWriter` get `NewLine`/`NewLineChars` CRLF; `new XmlTextWriter(path, enc)` and `XDocument.Save(Stream, SaveOptions)` go through a helper |
 | `encoding` | every `Encoding.GetEncoding(int)` → a helper that treats 0 as 1252 |
 | `uri` | `new Uri(string)` in `NavHttpRequestMessage` / `NavHttpClient` refuses a leading `/` |
-| `culture` | every `CultureInfo.GetCultureInfo(...)` and `new CultureInfo(...)` result goes through `BcLinuxCulture` (U+202F → plain space, da-DK short date, de-DE/es-ES month abbreviations — issue #134); the "Time Zone" table's `GetSystemTimeZones()` call returns `BcLinuxTimeZones`' 144 Windows zones (issue #132) |
+| `culture` | every `CultureInfo.GetCultureInfo(...)` and `new CultureInfo(...)` result goes through `BcLinuxCulture` (U+202F → plain space, da-DK short date, de-DE/es-ES month abbreviations — issue #134; the da-DK time separator, es-ES/nl-NL short dates, en-GB/sv-SE long dates and sv-SE/nb-NO minus sign — issue #157); the "Time Zone" table's `GetSystemTimeZones()` call returns `BcLinuxTimeZones`' 144 Windows zones (issue #132) |
 
 The OEM half of `TextEncoding::MSDos` lives in `src/StartupHook/kernel32_stubs.c`
 (`OemToCharBuffA` / `CharToOemBuffA`): code page 437 ↔ 1252 tables. BC builds its own MSDos

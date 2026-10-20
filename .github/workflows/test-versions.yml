@@ -285,11 +285,12 @@ jobs:
       # names and the "Time Zone" table (#134, #132). 70051 (control add-in), 70053
       # (Media bytes) and 70055 (Timer trigger error) guard issues #133, #135 and #136.
       # 70064 guards '?' in an in-memory filter and the license's date filter on BC 27 (#153).
+      # 70069 guards a section-break Word layout saved as PDF (#155), 70071 FormatRegion culture data (#157).
       # 70042 guards the SecurityIdentifier stub (#137) and runs on BC 29+ only: it
       # declares a DotNet framework type, and the AL 16/17 compilers of the BC 27/28 legs
       # cannot resolve one on Linux (AL0451, also with the shared framework as a probing
       # path). The preprocessor symbol below leaves the codeunit out of those legs' compile.
-      codeunit_range: ${{ (startsWith(matrix.bc_version, '27.') || startsWith(matrix.bc_version, '28.')) && '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041|70051|70053|70055|70064' || '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041|70042|70051|70053|70055|70064' }}
+      codeunit_range: ${{ (startsWith(matrix.bc_version, '27.') || startsWith(matrix.bc_version, '28.')) && '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041|70051|70053|70055|70064|70069|70071' || '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041|70042|70051|70053|70055|70064|70069|70071' }}
       # test_runner is left at its default ("auto"): each leg probes the
       # live server's dev endpoint and uses `al runtests` (the AL dotnet
       # tool's native runner driving the NST's /dev/TestRunnerHub) when
