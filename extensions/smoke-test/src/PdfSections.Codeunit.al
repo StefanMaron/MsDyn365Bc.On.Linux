@@ -6,6 +6,10 @@
 // compliance, and SaveAs returned true with "Unable to merge pdf streams due to internal
 // error. Retry without compliance" (InvalidOperation:TypeLoad) as the last error. A Windows
 // container leaves no last error.
+//
+// The check looks for the merge error only. In the version matrix the selective app filter
+// leaves out the Base Application, and SaveAs then also leaves "The metadata object Page 1560
+// was not found" as the last error, which has nothing to do with the merge.
 codeunit 70069 "BC Linux Pdf Sections"
 {
     Subtype = Test;
@@ -28,7 +32,7 @@ codeunit 70069 "BC Linux Pdf Sections"
         TempBlob.CreateOutStream(OutS);
         if not Report.SaveAs(Report::"BC Linux Pdf Sections", '', ReportFormat::Pdf, OutS) then
             Error('SaveAs returned false');
-        if GetLastErrorText() <> '' then
+        if GetLastErrorText().Contains('merge pdf') or GetLastErrorCode().Contains('TypeLoad') then
             Error('last error: %1 | %2', GetLastErrorText(), GetLastErrorCode());
         TempBlob.CreateInStream(InS);
         InS.ReadText(Head, 4);
