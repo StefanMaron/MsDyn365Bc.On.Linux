@@ -13,6 +13,7 @@ using System.Linq;
 ///   every CultureInfo.GetCultureInfo(...) result in the assembly goes through Fix
 ///   every new CultureInfo(lcid|name) goes through FixWritable (in place, the instance is writable)
 ///   ClientSettings.Refresh:   the formatCulture argument goes through Fix first
+///   TimeZoneDataProvider:     GetSystemTimeZones() becomes the Windows list (BcLinuxTimeZones.cs)
 ///
 /// Idempotent: a call already followed by Fix, or a Refresh that already starts with it,
 /// is left alone.
@@ -42,6 +43,24 @@ static class PatchCulture
             foreach (var type in module.GetTypes().ToList())
             {
                 if (type.Name == HolderType) continue;
+
+                // The virtual table "Time Zone" (2000000164) lists GetSystemTimeZones(): the
+                // Windows zones on Windows, the IANA zones here (issue #132). Its iterator gets the
+                // Windows list instead. Same signature, so the call is swapped in place.
+                if (type.Name == "TimeZoneDataProvider" || type.DeclaringType?.Name == "TimeZoneDataProvider")
+                {
+                    foreach (var method in type.Methods.Where(m => m.HasBody))
+                    {
+                        foreach (var ins in method.Body.Instructions)
+                        {
+                            if (ins.OpCode.Code != Code.Call || ins.Operand is not MethodReference tz) continue;
+                            if (tz.Name != "GetSystemTimeZones" || tz.Parameters.Count != 0
+                                || tz.DeclaringType?.FullName != "System.TimeZoneInfo") continue;
+                            ins.Operand = HelperCloner.Clone(module, "BcLinuxTimeZones", "WindowsTimeZones");
+                            patched++;
+                        }
+                    }
+                }
 
                 // Every CultureInfo.GetCultureInfo(...) result in BC's code: the format culture,
                 // the session culture, the report's format region, parsing cultures.

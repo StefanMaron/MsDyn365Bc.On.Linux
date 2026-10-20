@@ -953,7 +953,7 @@ sites are ordinary IL, so `src/tools/PatchNclTestPage` rewrites them on disk in 
 | `newline` | `Environment.NewLine` → CRLF; `StringBuilder.AppendLine`; `new XmlWriterSettings`, `StreamWriter`, `StringWriter` get `NewLine`/`NewLineChars` CRLF; `new XmlTextWriter(path, enc)` and `XDocument.Save(Stream, SaveOptions)` go through a helper |
 | `encoding` | every `Encoding.GetEncoding(int)` → a helper that treats 0 as 1252 |
 | `uri` | `new Uri(string)` in `NavHttpRequestMessage` / `NavHttpClient` refuses a leading `/` |
-| `culture` | every `CultureInfo.GetCultureInfo(...)` and `new CultureInfo(...)` result goes through `BcLinuxCulture` (U+202F → plain space, da-DK short date) |
+| `culture` | every `CultureInfo.GetCultureInfo(...)` and `new CultureInfo(...)` result goes through `BcLinuxCulture` (U+202F → plain space, da-DK short date, de-DE/es-ES month abbreviations — issue #134); the "Time Zone" table's `GetSystemTimeZones()` call returns `BcLinuxTimeZones`' 144 Windows zones (issue #132) |
 
 The OEM half of `TextEncoding::MSDos` lives in `src/StartupHook/kernel32_stubs.c`
 (`OemToCharBuffA` / `CharToOemBuffA`): code page 437 ↔ 1252 tables. BC builds its own MSDos
@@ -983,8 +983,17 @@ Things that bit, so they stay fixed:
   with Cecil and copies every method of that class into the target assembly. So it may call
   only framework APIs and may not use lambdas, closures, static fields or try/catch (nothing
   a plain IL copy carries over). The cache for the fixed cultures lives in
-  `AppDomain.GetData` because of that. Methods other than `Fix` are copied as
-  `Culture<Name>`.
+  `AppDomain.GetData` because of that. Methods other than the root are copied as
+  `<Class>_<Name>`. `BcLinuxTimeZones.cs` follows the same rules. Two traps a plain C#
+  reading misses: an `int[]` (or any primitive array) initializer and a `switch` on a string
+  both compile to helpers outside the class, so the data is string arrays and the
+  comparisons are `string.Equals` chains.
+- **The time zone list and the month names are Windows data, measured, not derived.** The
+  zones come from .NET in `mcr.microsoft.com/windows/servercore:ltsc2025` 10.0.26100.33650,
+  the OS build of the official BC containers; the month names from NLS on Windows Server
+  2025, and only the cultures a BC Windows run confirmed (de-DE, es-ES) are set. Don't
+  generate either from ICU or from `TryConvertIanaIdToWindowsId`: CLDR's Windows mapping has
+  no display names and does not follow a Windows build's set of zones.
 - **Use the raw xunit XML as the Windows reference, not the corpus's `failures.tsv`.** The
   TSV flattens whitespace and control characters, which is exactly what this issue is about:
   a U+202F in a Windows message shows as a plain space there and the two sides look
@@ -1116,7 +1125,10 @@ itself, not .NET 10 problems:
   version — a no-op on 27/28, which never reach it.
 - **`SecurityIdentifier` equality operators** — BC 29 calls
   `op_Inequality`, which `WindowsPrincipalStub` didn't define
-  (`MissingMethodException`). Added; purely additive for 27/28.
+  (`MissingMethodException`). Added; purely additive for 27/28. Since issue #137 the stub's
+  `SecurityIdentifier` is a real SID (parse, `BinaryLength`, `IsAccountSid`, binary form),
+  checked against .NET on Windows; invalid text now throws as it does there. The
+  `WellKnownSidType` enum has the real names and values (`NetworkSid` was 6, is 9).
 
 - **A JMP hook must never be applied twice to the same method.** This is what
   segfaulted BC 29, and it is the single most important thing in this

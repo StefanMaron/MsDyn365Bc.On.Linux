@@ -15,6 +15,9 @@ using System.Globalization;
 ///    patterns; NLS uses a plain space. "2:30:05 PM" came out with a character no Windows
 ///    tier writes, and showed up in Format(), report datasets, CSV length and page values.
 ///  * da-DK: the short date is dd-MM-yyyy on Windows and dd.MM.y in CLDR.
+///  * de-DE, es-ES: the abbreviated month names ("MMM", which Format(Date, 0, 7) uses) differ
+///    (issue #134). Windows: Jan Feb Mrz ... / ene. feb. mar. ...; ICU: Jan. Feb. März ... /
+///    ene feb mar ... sept .... Only the two cultures whose Windows values were measured are set.
 /// The rest of the ICU/NLS gap (collation, special-casing) is not reachable from here.
 /// </summary>
 internal static class BcLinuxCulture
@@ -48,7 +51,8 @@ internal static class BcLinuxCulture
     {
         DateTimeFormatInfo source = culture.DateTimeFormat;
         bool danish = culture.Name.StartsWith("da", StringComparison.Ordinal);
-        if (!HasNarrowSpace(source) && !danish)
+        string[] months = WindowsAbbreviatedMonths(culture.Name);
+        if (!HasNarrowSpace(source) && !danish && months == null)
             return culture;
 
         CultureInfo copy = (CultureInfo)culture.Clone();
@@ -66,6 +70,11 @@ internal static class BcLinuxCulture
         {
             d.DateSeparator = "-";
             d.ShortDatePattern = source.ShortDatePattern.Replace('.', '-');
+        }
+        if (months != null)
+        {
+            d.AbbreviatedMonthNames = months;
+            d.AbbreviatedMonthGenitiveNames = months;
         }
         return CultureInfo.ReadOnly(copy);
     }
@@ -95,7 +104,28 @@ internal static class BcLinuxCulture
             d.DateSeparator = "-";
             d.ShortDatePattern = d.ShortDatePattern.Replace('.', '-');
         }
+        string[] months = WindowsAbbreviatedMonths(culture.Name);
+        if (months != null)
+        {
+            d.AbbreviatedMonthNames = months;
+            d.AbbreviatedMonthGenitiveNames = months;
+        }
         return culture;
+    }
+
+    /// <summary>
+    /// The Windows (NLS) abbreviated month names for a culture whose ICU names differ, or null.
+    /// Values from an official Windows BC container (27.5 and 29.0), issue #134. A new array on
+    /// every call: the copied IL cannot hold a static field. No string switch either: the compiler
+    /// turns one into a call to a hash helper that lives outside this class.
+    /// </summary>
+    private static string[] WindowsAbbreviatedMonths(string name)
+    {
+        if (string.Equals(name, "de-DE", StringComparison.Ordinal))
+            return new string[] { "Jan", "Feb", "Mrz", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez", "" };
+        if (string.Equals(name, "es-ES", StringComparison.Ordinal))
+            return new string[] { "ene.", "feb.", "mar.", "abr.", "may.", "jun.", "jul.", "ago.", "sep.", "oct.", "nov.", "dic.", "" };
+        return null;
     }
 
     private static bool HasNarrowSpace(DateTimeFormatInfo d)
