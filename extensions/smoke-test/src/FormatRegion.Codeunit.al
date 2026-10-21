@@ -54,7 +54,7 @@ codeunit 70071 "BC Linux Format Region"
     [Test]
     procedure UnknownRegionFallsBackToPaddedDate()
     begin
-        LibraryAssert.AreEqual('01/31/2025', ColumnValue(Dataset('zz-ZZ'), 'D1Col'), 'zz-ZZ short date');
+        LibraryAssert.AreEqual('01/31/2025', ColumnValue(UnknownRegionDataset(), 'D1Col'), 'zz-ZZ short date');
     end;
 
 #if BCLINUX_DOTNET_FRAMEWORK
@@ -69,6 +69,20 @@ codeunit 70071 "BC Linux Format Region"
         LibraryAssert.IsTrue(Formatted[2] = 160, 'fr-FR group separator is U+00A0, got ' + Formatted);
     end;
 #endif
+
+    local procedure UnknownRegionDataset(): Text
+    var
+        TempBlob: Codeunit "Temp Blob";
+        OutS: OutStream;
+        InS: InStream;
+        Xml: Text;
+    begin
+        TempBlob.CreateOutStream(OutS);
+        Report.SaveAs(Report::"BC Linux Format Region Zz", '', ReportFormat::Xml, OutS);
+        TempBlob.CreateInStream(InS, TextEncoding::UTF8);
+        InS.Read(Xml);
+        exit(Xml);
+    end;
 
     local procedure Run(Region: Text): Text
     begin
