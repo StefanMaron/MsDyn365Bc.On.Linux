@@ -24,11 +24,9 @@ using System.Globalization;
 ///    and nb-NO minus sign (U+002D, CLDR U+2212).
 ///  * fr-FR on BC 29 (.NET 10), issue #167: the number group separator is U+00A0 on a Windows BC
 ///    29.0 container and U+202F in CLDR. BC 28 matched already and is left alone.
-///  * An unknown region such as zz-ZZ (issue #167): ICU accepts any well-formed locale name and
-///    builds a custom culture (LCID 4096); NLS has no such culture and GetCultureInfo throws
-///    CultureNotFoundException. BC catches that and formats with its fallback, which is what a
-///    Windows report with FormatRegion = 'zz-ZZ' shows (zero-padded en-US dates). Fix throws for
-///    a custom culture whose region is ZZ, the CLDR "unknown region".
+///  * An unknown region such as zz-ZZ (issue #167): the dataset's typed dates are zero-padded
+///    (01/31/2025) on a Windows container and not (1/31/2025) here. The short date of a custom
+///    culture (LCID 4096) whose region is ZZ, the CLDR "unknown region", is set to MM/dd/yyyy.
 /// The rest of the ICU/NLS gap (collation, special-casing) is not reachable from here.
 /// </summary>
 internal static class BcLinuxCulture
@@ -37,9 +35,6 @@ internal static class BcLinuxCulture
     {
         if (culture == null || culture.IsNeutralCulture)
             return culture;
-
-        if (culture.LCID == 4096 && culture.Name.EndsWith("-ZZ", StringComparison.OrdinalIgnoreCase))
-            throw new CultureNotFoundException("name", culture.Name, "Culture is not supported.");
 
         // One fixed clone per culture name. The cache lives in the AppDomain's data slots because
         // a plain IL copy cannot carry a static field over. Two threads racing on the first call
@@ -156,7 +151,8 @@ internal static class BcLinuxCulture
             || string.Equals(name, "nl-NL", StringComparison.Ordinal)
             || string.Equals(name, "sv-SE", StringComparison.Ordinal)
             || string.Equals(name, "nb-NO", StringComparison.Ordinal)
-            || (string.Equals(name, "fr-FR", StringComparison.Ordinal) && Environment.Version.Major >= 10);
+            || (string.Equals(name, "fr-FR", StringComparison.Ordinal) && Environment.Version.Major >= 10)
+            || name.EndsWith("-ZZ", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -203,6 +199,10 @@ internal static class BcLinuxCulture
         else if (string.Equals(name, "fr-FR", StringComparison.Ordinal) && Environment.Version.Major >= 10)
         {
             n.NumberGroupSeparator = "\u00A0";
+        }
+        else if (culture.LCID == 4096 && name.EndsWith("-ZZ", StringComparison.OrdinalIgnoreCase))
+        {
+            d.ShortDatePattern = "MM/dd/yyyy";
         }
     }
 
