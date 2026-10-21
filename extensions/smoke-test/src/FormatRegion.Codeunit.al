@@ -50,6 +50,13 @@ codeunit 70071 "BC Linux Format Region"
         LibraryAssert.AreEqual('den 5 March 2024', ColumnValue(Dataset('sv-SE'), 'LongCol'), 'sv-SE long date');
     end;
 
+    // Issue #167: an unknown region falls back to en-US with a zero-padded date, as on Windows.
+    [Test]
+    procedure UnknownRegionFallsBackToPaddedDate()
+    begin
+        LibraryAssert.AreEqual('01/31/2025', ColumnValue(Dataset('zz-ZZ'), 'D1Col'), 'zz-ZZ short date');
+    end;
+
 #if BCLINUX_DOTNET_FRAMEWORK
     // Issue #167: on BC 29 a Windows container groups fr-FR thousands with U+00A0 (CLDR: U+202F).
     // Compiled with the BC 29+ legs' symbol only; BC 28 already matched Windows.
