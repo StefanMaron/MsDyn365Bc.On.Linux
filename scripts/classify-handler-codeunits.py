@@ -85,6 +85,13 @@ making up an object name in BC's error path, so the test is routed instead. A
 test that checks that text names the test runner object, which is what the
 rule matches.
 
+Rule (f) reads only the lines the compiler compiles when the caller passes the
+app's preprocessor symbols (`--define`, `--preprocessor-symbols` on
+run-tests-hybrid.py). A codeunit with `#if BC28PLUS` ... `#else` that names
+"Test Runner - Mgt." only in the BC 27 branch used to go to the websocket
+runner on BC 28 and later, which names that object where Windows names the test
+codeunit (issue #166). Without symbols every branch is scanned, as before.
+
 This is a heuristic, not a proof. It cannot see a modal invoked deep inside
 called business logic that the test codeunit's own source never mentions.
 It exists to catch the known failure shape cheaply, not to guarantee full
@@ -139,6 +146,115 @@ TEST_RUNNER_NAME_RE = re.compile(r'\bTest\s+Runner\s+-\s+(Mgt\.|Isol\.)', re.IGN
 MODAL_CALL_RE = re.compile(r'\.(RunModal|Invoke)\s*\(|(?<![\w.])RunModal\s*\(', re.IGNORECASE)
 
 
+PREPROC_RE = re.compile(r'^\s*#\s*(if|elif|else|endif)\b(.*)$', re.IGNORECASE)
+PREPROC_TOKEN_RE = re.compile(r'\s*(&&|\|\||!|\(|\)|[A-Za-z_][A-Za-z0-9_]*)')
+
+
+def _eval_condition(expr: str, symbols: set[str]) -> bool:
+    """Evaluate an AL preprocessor condition: symbols, !, &&, ||, parentheses.
+    An expression it cannot parse counts as true, which keeps the lines (the
+    behavior before symbols were known)."""
+    tokens = PREPROC_TOKEN_RE.findall(expr.split("//")[0])
+    pos = 0
+
+    def peek():
+        return tokens[pos] if pos < len(tokens) else None
+
+    def take():
+        nonlocal pos
+        pos += 1
+        return tokens[pos - 1]
+
+    def parse_or():
+        v = parse_and()
+        while peek() == "||":
+            take()
+            r = parse_and()
+            v = v or r
+        return v
+
+    def parse_and():
+        v = parse_not()
+        while peek() == "&&":
+            take()
+            r = parse_not()
+            v = v and r
+        return v
+
+    def parse_not():
+        if peek() == "!":
+            take()
+            return not parse_not()
+        return parse_atom()
+
+    def parse_atom():
+        t = peek()
+        if t is None:
+            raise ValueError("unexpected end")
+        take()
+        if t == "(":
+            v = parse_or()
+            if peek() != ")":
+                raise ValueError("missing )")
+            take()
+            return v
+        if t in ("&&", "||", ")", "!"):
+            raise ValueError("unexpected " + t)
+        if t.lower() == "true":
+            return True
+        if t.lower() == "false":
+            return False
+        return t in symbols
+
+    try:
+        v = parse_or()
+        return v if pos == len(tokens) else True
+    except ValueError:
+        return True
+
+
+def apply_preprocessor(lines: list[str], symbols: set[str] | None) -> list[str]:
+    """Drop the lines the AL compiler would not compile, and the directive
+    lines themselves. With symbols None every branch stays, as before."""
+    if symbols is None:
+        return lines
+    out: list[str] = []
+    # One frame per open #if: [parent_active, any_branch_taken, this_branch_active]
+    stack: list[list[bool]] = []
+    for line in lines:
+        m = PREPROC_RE.match(line)
+        if not m:
+            if all(f[2] for f in stack):
+                out.append(line)
+            continue
+        kind = m.group(1).lower()
+        rest = m.group(2)
+        parent = all(f[2] for f in stack)
+        if kind == "if":
+            taken = _eval_condition(rest, symbols)
+            stack.append([parent, taken, taken])
+        elif kind == "elif" and stack:
+            frame = stack[-1]
+            taken = (not frame[1]) and _eval_condition(rest, symbols)
+            frame[1] = frame[1] or taken
+            frame[2] = taken
+        elif kind == "else" and stack:
+            frame = stack[-1]
+            frame[2] = not frame[1]
+            frame[1] = True
+        elif kind == "endif" and stack:
+            stack.pop()
+    return out
+
+
+def parse_symbols(value: str | None) -> set[str] | None:
+    """None (option absent or empty) scans every branch; a list selects branches.
+    An empty value means the caller sets no symbols through the workflow input, which is
+    not the same as the app having none: app.json can define them too."""
+    symbols = {x.strip() for x in re.split(r"[,;\s]+", value or "") if x.strip()}
+    return symbols or None
+
+
 def find_al_files(paths: list[str]) -> list[str]:
     files: list[str] = []
     for p in paths:
@@ -173,12 +289,17 @@ class _CodeunitState:
         self.method_permissions: list[str | None] = []
 
 
-def classify_al_source(paths: list[str]) -> dict[int, dict]:
+def classify_al_source(paths: list[str], symbols: set[str] | None = None) -> dict[int, dict]:
     """Scan every .al file under `paths` and return
     {codeunit_id: {"is_test": bool, "needs_websocket": bool}} for every
     `Subtype = Test;` codeunit found. Codeunits not found in the scanned
     source simply don't appear in the result — the caller decides how to
-    treat that (this script's CLI treats it as "needs websocket")."""
+    treat that (this script's CLI treats it as "needs websocket").
+
+    `symbols` is the set of AL preprocessor symbols the app is compiled with. Given,
+    only the lines inside an active #if branch are scanned: a BC 27 `#else` branch
+    that names "Test Runner - Mgt." must not route a codeunit that does not compile
+    it (issue #166). None scans every branch."""
     result: dict[int, dict] = {}
 
     for path in find_al_files(paths):
@@ -187,6 +308,7 @@ def classify_al_source(paths: list[str]) -> dict[int, dict]:
                 lines = f.readlines()
         except OSError:
             continue
+        lines = apply_preprocessor(lines, symbols)
 
         cur: _CodeunitState | None = None
         pending_attrs: list[str] = []
@@ -308,9 +430,15 @@ def main() -> int:
         "no matching source are reported separately as 'unmatched'",
     )
     ap.add_argument("--format", choices=["text", "json"], default="text")
+    ap.add_argument(
+        "--define",
+        default=None,
+        help="comma-separated AL preprocessor symbols the app is compiled with; "
+        "lines in inactive #if branches are not scanned. Omit to scan every branch.",
+    )
     args = ap.parse_args()
 
-    info = classify_al_source(args.paths)
+    info = classify_al_source(args.paths, parse_symbols(args.define))
 
     ids_filter = None
     if args.codeunit_ids:

@@ -293,6 +293,10 @@ def main() -> int:
     ap.add_argument("--al-source-dir", action="append", default=[], dest="al_source_dirs",
                      help="AL source directory to scan for [HandlerFunctions] usage; repeatable. "
                           "Codeunits with no matching source are routed to websocket.")
+    ap.add_argument("--preprocessor-symbols", default=None,
+                     help="comma-separated AL preprocessor symbols the test app is compiled with. "
+                          "The classifier then skips lines in inactive #if branches. "
+                          "Omit to scan every branch.")
     ap.add_argument("--codeunit-range", default="", help="range filter, same syntax as run-tests.sh")
     ap.add_argument("--junit-output", default="", help="write merged JUnit XML to this path")
     ap.add_argument("--company", default="")
@@ -336,7 +340,7 @@ def main() -> int:
     print("Test codeunits: " + _ids_str(all_ids))
 
     if args.al_source_dirs:
-        info = classify.classify_al_source(args.al_source_dirs)
+        info = classify.classify_al_source(args.al_source_dirs, classify.parse_symbols(args.preprocessor_symbols))
         hub_ids = sorted(c for c in all_ids if info.get(c, {}).get("needs_websocket", True) is False)
         ws_ids = sorted(c for c in all_ids if c not in hub_ids)
     else:

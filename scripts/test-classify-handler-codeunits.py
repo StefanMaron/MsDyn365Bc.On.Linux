@@ -72,6 +72,49 @@ CASES = [
 ]
 
 
+PREPROCESSOR_CASES = [
+    # (symbols, expected needs_websocket, why)
+    (None, True, "no symbols: every branch is scanned"),
+    ({"BC28PLUS"}, False, "the BC 27 #else branch is not compiled, its runner name does not count"),
+    (set(), True, "no symbol set: the #else branch is the compiled one"),
+    ({"BC28PLUS", "BC27PLUS"}, False, "#if with && and !, nested"),
+]
+
+PREPROCESSOR_SOURCE = """codeunit 90166 "Case 90166"
+{
+    Subtype = Test;
+    TestPermissions = Disabled;
+
+    [Test]
+    procedure T()
+    begin
+#if BC28PLUS
+        Expect('from the object Case 90166.');
+#else
+        Expect('from the object Test Runner - Mgt. An object');
+#endif
+#if BC27PLUS && !BC28PLUS
+        Expect('Test Runner - Isol. Disabled');
+#endif
+    end;
+}
+"""
+
+
+def preprocessor_cases() -> int:
+    failures = 0
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "90166.al"), "w") as f:
+            f.write(PREPROCESSOR_SOURCE)
+        for symbols, expected, why in PREPROCESSOR_CASES:
+            info = classify.classify_al_source([d], symbols)
+            got = info.get(90166, {}).get("needs_websocket")
+            ok = got is expected
+            print(f"{'ok  ' if ok else 'FAIL'} #if symbols={symbols}: needs_websocket={got} (want {expected}) — {why}")
+            failures += 0 if ok else 1
+    return failures
+
+
 def main() -> int:
     failures = 0
     with tempfile.TemporaryDirectory() as d:
@@ -85,7 +128,8 @@ def main() -> int:
             print(f"{'ok  ' if ok else 'FAIL'} cu {cuid}: needs_websocket={got} (want {expected}) — {why}")
             failures += 0 if ok else 1
     print(f"{len(CASES) - failures}/{len(CASES)} cases passed")
-    return 1 if failures else 0
+    pre_failures = preprocessor_cases()
+    return 1 if failures or pre_failures else 0
 
 
 if __name__ == "__main__":

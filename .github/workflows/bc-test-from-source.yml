@@ -1365,6 +1365,7 @@ jobs:
               python3 -u scripts/run-tests-hybrid.py \
                 --app "$app" \
                 --al-source-dir "../project/$d" \
+                --preprocessor-symbols "${{ inputs.preprocessor_symbols }}" \
                 --codeunit-range "${{ inputs.codeunit_range }}" \
                 --junit-output "$junit_file" \
                 --altool-cmd "$HOME/.dotnet/tools/al" \
