@@ -22,6 +22,8 @@ using System.Globalization;
 ///    Windows, '.' in CLDR), the es-ES and nl-NL short dates (dd/MM/yyyy and d-M-yyyy), the
 ///    en-GB long date (dd MMMM yyyy), the sv-SE long date ('den ' d MMMM yyyy) and the sv-SE
 ///    and nb-NO minus sign (U+002D, CLDR U+2212).
+///  * fr-FR on BC 29 (.NET 10), issue #167: the number group separator is U+00A0 on a Windows BC
+///    29.0 container and U+202F in CLDR. BC 28 matched already and is left alone.
 /// The rest of the ICU/NLS gap (collation, special-casing) is not reachable from here.
 /// </summary>
 internal static class BcLinuxCulture
@@ -145,7 +147,8 @@ internal static class BcLinuxCulture
             || string.Equals(name, "en-GB", StringComparison.Ordinal)
             || string.Equals(name, "nl-NL", StringComparison.Ordinal)
             || string.Equals(name, "sv-SE", StringComparison.Ordinal)
-            || string.Equals(name, "nb-NO", StringComparison.Ordinal);
+            || string.Equals(name, "nb-NO", StringComparison.Ordinal)
+            || (string.Equals(name, "fr-FR", StringComparison.Ordinal) && Environment.Version.Major >= 10);
     }
 
     /// <summary>
@@ -188,6 +191,10 @@ internal static class BcLinuxCulture
         else if (string.Equals(name, "nb-NO", StringComparison.Ordinal))
         {
             n.NegativeSign = "-";
+        }
+        else if (string.Equals(name, "fr-FR", StringComparison.Ordinal) && Environment.Version.Major >= 10)
+        {
+            n.NumberGroupSeparator = "\u00A0";
         }
     }
 
