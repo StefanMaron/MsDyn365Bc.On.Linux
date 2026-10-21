@@ -290,7 +290,7 @@ jobs:
       # declares a DotNet framework type, and the AL 16/17 compilers of the BC 27/28 legs
       # cannot resolve one on Linux (AL0451, also with the shared framework as a probing
       # path). The preprocessor symbol below leaves the codeunit out of those legs' compile.
-      codeunit_range: ${{ (startsWith(matrix.bc_version, '27.') || startsWith(matrix.bc_version, '28.')) && '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041|70051|70053|70055|70064|70069|70071' || '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041|70042|70051|70053|70055|70064|70069|70071' }}
+      codeunit_range: ${{ (startsWith(matrix.bc_version, '27.') || startsWith(matrix.bc_version, '28.')) && '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041|70051|70053|70055|70064|70069|70071|70073' || '70000|70001|70008|70009|70012|70020|70023|70027|70040|70041|70042|70051|70053|70055|70064|70069|70071|70073' }}
       # test_runner is left at its default ("auto"): each leg probes the
       # live server's dev endpoint and uses `al runtests` (the AL dotnet
       # tool's native runner driving the NST's /dev/TestRunnerHub) when

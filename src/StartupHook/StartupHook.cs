@@ -314,6 +314,16 @@ using System.Threading.Tasks;
 ///   with "not a valid image type". GDI+ on Windows accepts that file and stores 99 bytes.
 ///   Fix: when Skia returns no bitmap, decode the bytes DrawingStub's GdiPlusPng writes for the
 ///   same source. Anything GdiPlusPng does not handle is refused as before.
+/// Patch #43: HttpClientRequestFilterService.RequestUserPermissionForBlockingOrAllowingRequestFromApplication (Nav.Ncl.dll) — issue #165
+///   A Sandbox tenant asks the user before an extension's first HttpClient request when the
+///   app has no row in the app setting table: StrMenu "Allow Always,Allow Once,Block Always,
+///   Block Once". A Windows container publishes through the dev endpoint with that setting
+///   on, so a test never sees the prompt. Nobody can answer it in a test session. The hub
+///   used to hide it because it suppressed unhandled UI (Patch #38 ended that): a request to
+///   an unresolvable host then raised "Unhandled UI: StrMenu ..." or returned a default
+///   response with status 200, where Windows sends the request and reports the socket error.
+///   Fix: answer "Allow Once" without asking and without saving a row.
+///   BC_DISABLE_PATCHES=43 restores the prompt.
 /// Patch #19b: NavSession.InitReportingClientAsync (Nav.Ncl.dll) — BC 29, issue #109
 ///   BC 29 removed NavEnvironment.CustomReportingServiceClient (the factory Patch #19 replaced) and
 ///   kept only DecorateReportingServiceClient, which wraps a client InitReportingClientAsync has
@@ -849,6 +859,13 @@ internal class StartupHook
         if (name == "Microsoft.Dynamics.Nav.Ncl")
         {
             PatchWildcardEvaluatorHelper(args.LoadedAssembly);
+        }
+
+        // Patch #43: the outbound HttpClient approval prompt cannot be answered in a test
+        // session (issue #165).
+        if (name == "Microsoft.Dynamics.Nav.Ncl")
+        {
+            PatchHttpClientRequestPrompt(args.LoadedAssembly);
         }
 
         // Patch #40: BC 29's non-Windows media image keeps the imported bytes; Windows
@@ -4526,6 +4543,43 @@ internal class StartupHook
         using var data = (IDisposable)_skDataCreateCopy!.Invoke(null, new object[] { bytes })!;
         return _skBitmapDecode!.Invoke(null, new object[] { data });
     }
+
+    // ========================================================================
+    // Patch #43: HttpClientRequestFilterService prompt (Nav.Ncl.dll) — issue #165
+    // ========================================================================
+    // On a Sandbox tenant HttpClientRequestFilterService.ApplyRequestFiltering looks the calling
+    // app up in the app setting table (2000000201, field 2 "allow HttpClient requests"). With no
+    // row it calls RequestUserPermissionForBlockingOrAllowingRequestFromApplication, which opens
+    // a StrMenu when the session allows callbacks. A test session has no user, so with
+    // Patch #38 in place the menu raises "Unhandled UI". The method returns (allow, save):
+    // (true, false) is "Allow Once", which neither asks nor writes a row.
+
+    private static void PatchHttpClientRequestPrompt(Assembly navNcl)
+    {
+        if (IsPatchDisabled("43")) return;
+        try
+        {
+            var type = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.HttpClientRequestFilterService");
+            var original = type?.GetMethod("RequestUserPermissionForBlockingOrAllowingRequestFromApplication",
+                BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+            if (original == null || original.ReturnType != typeof(ValueTuple<bool, bool>) || original.GetParameters().Length != 1)
+            {
+                Console.WriteLine("[StartupHook] Patch #43: HttpClientRequestFilterService shape changed — skipping");
+                return;
+            }
+            var replacement = typeof(StartupHook).GetMethod(nameof(Replacement_AllowHttpClientRequestOnce),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            ApplyJmpHook(original, replacement, "HttpClientRequestFilterService.RequestUserPermission... (Patch #43)");
+            Console.WriteLine("[StartupHook] Patch #43: the HttpClient approval prompt answers Allow Once");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #43 failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static ValueTuple<bool, bool> Replacement_AllowHttpClientRequestOnce(object owningApp)
+        => new ValueTuple<bool, bool>(true, false);
 
     // ========================================================================
     // Patch #41: WildcardEvaluatorHelper (Nav.Ncl.dll, BC 27) — issue #153
