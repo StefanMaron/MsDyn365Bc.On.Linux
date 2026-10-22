@@ -1477,7 +1477,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-test-results-${{ inputs.bc_version }}
+          name: junit-test-results-${{ inputs.bc_version }}${{ inputs.artifact_name_suffix != '' && format('-{0}', inputs.artifact_name_suffix) || '' }}
           path: build/junit-*.xml
           if-no-files-found: ignore
           retention-days: 14
@@ -1521,13 +1521,13 @@ jobs:
           echo "=== last 500 lines of bc-1 ==="
           tail -500 "../bc-logs/bc-${{ inputs.bc_version }}.log"
           echo ""
-          echo "Full container log uploaded as artifact bc-container-log-${{ inputs.bc_version }} ($(wc -l < "../bc-logs/bc-${{ inputs.bc_version }}.log") lines)."
+          echo "Full container log uploaded as artifact bc-container-log-${{ inputs.bc_version }}${{ inputs.artifact_name_suffix != '' && format('-{0}', inputs.artifact_name_suffix) || '' }} ($(wc -l < "../bc-logs/bc-${{ inputs.bc_version }}.log") lines)."
 
       - name: Upload full BC container log (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: bc-container-log-${{ inputs.bc_version }}
+          name: bc-container-log-${{ inputs.bc_version }}${{ inputs.artifact_name_suffix != '' && format('-{0}', inputs.artifact_name_suffix) || '' }}
           path: bc-logs/
           retention-days: 14
           if-no-files-found: ignore
