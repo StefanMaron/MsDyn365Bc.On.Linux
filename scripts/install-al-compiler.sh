@@ -118,6 +118,25 @@ select_dotnet_alc() {
 
 AL_TOOL_DIR=""
 
+# Jobs on one machine under one user share ~/.al-tool-cache. Without the lock,
+# two jobs download and unzip into the same folder at once and leave a
+# corrupt compiler behind ("invalid compressed data to inflate"). A folder
+# without .complete is from an install that did not finish and is replaced.
+mkdir -p "$HOME/.al-tool-cache"
+exec 9> "$HOME/.al-tool-cache/.lock"
+flock 9
+
+# extract_nupkg <url> <dir>: download and unzip once; later calls reuse it
+extract_nupkg() {
+  [ -f "$2/.complete" ] && return 0
+  rm -rf "$2"
+  mkdir -p "$2"
+  curl -fsSL "$1" -o "$2/pkg.zip" || return 1
+  unzip -q -o "$2/pkg.zip" -d "$2" || return 1
+  rm -f "$2/pkg.zip"
+  touch "$2/.complete"
+}
+
 # --- Attempt 1: dotnet global tool (BC 27 / v16 packages ship with
 # DotnetToolSettings.xml and install correctly this way). BC 28+ dropped
 # the tool manifest — the package is now a plain library nupkg and
@@ -144,12 +163,9 @@ fi
 if [ -z "$AL_TOOL_DIR" ]; then
   echo "Looking for alc in the $LINUX_PKG nupkg" >&2
   EXTRACT_DIR="$HOME/.al-tool-cache/$AL_TOOL"
-  mkdir -p "$EXTRACT_DIR"
-  if curl -fsSL \
+  if extract_nupkg \
       "https://api.nuget.org/v3-flatcontainer/${LINUX_PKG}/${AL_TOOL}/${LINUX_PKG}.${AL_TOOL}.nupkg" \
-      -o "$EXTRACT_DIR/pkg.zip"; then
-    unzip -q -o "$EXTRACT_DIR/pkg.zip" -d "$EXTRACT_DIR"
-    rm -f "$EXTRACT_DIR/pkg.zip"
+      "$EXTRACT_DIR"; then
     ALC_PATH=$(find "$EXTRACT_DIR" -type f -name alc 2>/dev/null | sort | tail -1)
     if [ -n "$ALC_PATH" ]; then
       AL_TOOL_DIR=$(dirname "$ALC_PATH")
@@ -167,12 +183,9 @@ fi
 if [ -z "$AL_TOOL_DIR" ]; then
   echo "$LINUX_PKG has no alc binary for $AL_TOOL; trying the base package $BASE_PKG" >&2
   BASE_EXTRACT_DIR="$HOME/.al-tool-cache/${AL_TOOL}-base"
-  mkdir -p "$BASE_EXTRACT_DIR"
-  if curl -fsSL \
+  if extract_nupkg \
       "https://api.nuget.org/v3-flatcontainer/${BASE_PKG}/${AL_TOOL}/${BASE_PKG}.${AL_TOOL}.nupkg" \
-      -o "$BASE_EXTRACT_DIR/pkg.zip"; then
-    unzip -q -o "$BASE_EXTRACT_DIR/pkg.zip" -d "$BASE_EXTRACT_DIR"
-    rm -f "$BASE_EXTRACT_DIR/pkg.zip"
+      "$BASE_EXTRACT_DIR"; then
     ALC_DLL=$(select_dotnet_alc "$BASE_EXTRACT_DIR")
     if [ -n "$ALC_DLL" ]; then
       AL_TOOL_DIR=$(dirname "$ALC_DLL")
