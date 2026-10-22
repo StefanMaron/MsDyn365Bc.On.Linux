@@ -48,6 +48,9 @@ jobs:
       # looks like a green run with fewer tests in it, which is the shape
       # issue #57 was about. These three run in seconds, need no BC, and are
       # the only thing standing between that bug and a merge.
+      - name: Jobs take a free BC stack from the slot pool
+        run: bash scripts/test-ci-lock-slots.sh
+
       - name: Codeunit id batching is total
         run: python3 scripts/chunk-codeunit-ids.py --self-test
 
