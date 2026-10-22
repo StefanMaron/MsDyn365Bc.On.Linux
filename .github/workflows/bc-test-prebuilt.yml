@@ -219,8 +219,10 @@ jobs:
       # Where the extracted artifacts live. Job-level so the download step and
       # docker-compose's bind mount cannot disagree about the path — which is
       # what makes a warm cache visible to the container instead of being
-      # re-downloaded into it.
-      BC_ARTIFACTS_DIR: ${{ inputs.artifact_cache_dir != '' && inputs.artifact_cache_dir || format('{0}/artifact-cache', github.workspace) }}/${{ inputs.bc_version }}
+      # re-downloaded into it. Keyed on the country too: one folder per
+      # version held one country, and a second country in the same run
+      # cleared it as a cache miss while the first job was still using it.
+      BC_ARTIFACTS_DIR: ${{ inputs.artifact_cache_dir != '' && inputs.artifact_cache_dir || format('{0}/artifact-cache', github.workspace) }}/${{ inputs.bc_version }}-${{ inputs.bc_country }}
       # ─── Which container stack on this machine is ours (issue #24) ───
       # Slot 0 keeps the historical identity exactly: project `bc-linux`, the
       # default ports from docker-compose.yml, and therefore the same named
