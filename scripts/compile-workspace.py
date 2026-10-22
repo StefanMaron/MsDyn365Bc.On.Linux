@@ -88,8 +88,12 @@ def compile_wave(altool: list[str], wave: list[dict], package_cache: str, stagin
         if log_dir:
             cmd += ["--logdirectory", os.path.abspath(log_dir)]
         cmd += options
+        # altool's progress display crashes with ArgumentOutOfRangeException
+        # (count -1) when TERM is unset, as it is for a CI runner service.
+        env = dict(os.environ)
+        env.setdefault("TERM", "dumb")
         # stdin from /dev/null: a caller's `while read` loop must keep its input
-        return subprocess.run(cmd, stdin=subprocess.DEVNULL).returncode
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, env=env).returncode
     finally:
         os.unlink(ws.name)
 

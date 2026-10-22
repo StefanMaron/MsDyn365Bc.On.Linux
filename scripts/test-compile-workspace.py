@@ -25,7 +25,8 @@ ws = json.load(open(args[2]))
 opt = {args[i]: args[i + 1] for i in range(3, len(args) - 1, 2)}
 with open(os.environ["FAKE_ALTOOL_CALLS"], "a") as log:
     log.write(json.dumps({"folders": [f["path"] for f in ws["folders"]], "opt": opt,
-                          "stdin_is_null": os.path.samefile("/dev/stdin", "/dev/null")}) + "\n")
+                          "stdin_is_null": os.path.samefile("/dev/stdin", "/dev/null"),
+                          "term": os.environ.get("TERM")}) + "\n")
 failed = False
 for f in ws["folders"]:
     app = json.load(open(os.path.join(f["path"], "app.json")))
@@ -117,6 +118,21 @@ class CompileWorkspaceTests(unittest.TestCase):
     def test_altool_gets_no_stdin(self):
         self.run_script(self.core)
         self.assertTrue(self.altool_calls()[0]["stdin_is_null"])
+
+    def test_altool_gets_a_term_when_the_caller_has_none(self):
+        # altool's progress display crashes (ArgumentOutOfRangeException) when
+        # TERM is unset, as it is for a CI runner service
+        env = {k: v for k, v in os.environ.items() if k != "TERM"}
+        env["FAKE_ALTOOL_CALLS"] = self.calls
+        r = subprocess.run([sys.executable, SCRIPT, "--altool", self.altool, "--package-cache",
+                            self.cache, "--out-dir", self.out, self.core],
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.altool_calls()[0]["term"], "dumb")
+
+    def test_a_term_the_caller_set_is_kept(self):
+        self.run_script(self.core, env={"TERM": "xterm"})
+        self.assertEqual(self.altool_calls()[0]["term"], "xterm")
 
     def test_failed_wave_stops_and_fails(self):
         r = self.run_script(self.core, self.sales, self.test, env={"FAKE_FAIL": "Sales"})
