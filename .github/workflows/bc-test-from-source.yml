@@ -569,6 +569,12 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ inputs.instance_slot == 0 && 'bc-linux' || format('bc-linux-{0}', inputs.instance_slot) }}
 
     steps:
+      # A self-hosted runner keeps its workspace between jobs. Without this, a
+      # previous job's extra-symbols/ (another project's third-party apps) or
+      # build/ would be merged into, published and tested with this one.
+      - name: Clear the previous job's files
+        run: rm -rf extra-symbols symbols build compile-logs bc-logs artifact-staging
+
       # ─── Phase 1: cheap parallel-friendly checkouts ──────────────────
       - name: Checkout your repo
         uses: actions/checkout@v4
