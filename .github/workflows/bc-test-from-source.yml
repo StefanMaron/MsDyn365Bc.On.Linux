@@ -1021,6 +1021,8 @@ jobs:
           ASSEMBLY_PROBING_PATHS: ${{ inputs.assembly_probing_paths }}
         run: |
           set -e
+          # shellcheck disable=SC1091
+          . bc-linux/scripts/app-artifact-name.sh
           bash bc-linux/scripts/workflow-summary.sh begin COMPILE "Compile AL apps"
 
           # ─── Resolve analyzer flags via the helper ─────────────────────
@@ -1118,7 +1120,7 @@ jobs:
             mkdir -p "$src/.alpackages"
             cp symbols/*.app "$src/.alpackages/" 2>/dev/null || true
             local out
-            out="$(pwd)/build/$(basename "$src").app"
+            out="$(pwd)/build/$(app_artifact_name "$src").app"
             mkdir -p build
             echo ">>> Compiling $src → $out"
             # Remaining args ($@) are the analyzer flag fragments — may be empty.
@@ -1190,15 +1192,17 @@ jobs:
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
         run: |
           set -e
+          # shellcheck disable=SC1091
+          . bc-linux/scripts/app-artifact-name.sh
           mkdir -p artifact-staging/Apps artifact-staging/TestApps
           while IFS= read -r d; do
             [ -z "$d" ] && continue
-            f="build/$(basename "$d").app"
+            f="build/$(app_artifact_name "$d").app"
             [ -f "$f" ] && cp "$f" artifact-staging/Apps/
           done <<< "$APP_DIRS"
           while IFS= read -r d; do
             [ -z "$d" ] && continue
-            f="build/$(basename "$d").app"
+            f="build/$(app_artifact_name "$d").app"
             [ -f "$f" ] && cp "$f" artifact-staging/TestApps/
           done <<< "$TEST_APP_DIRS"
           echo "Staged files:"
@@ -1240,6 +1244,8 @@ jobs:
           EXTRA_SYMBOLS_ARTIFACT_SUBDIR: ${{ inputs.extra_symbols_artifact_subdir }}
         run: |
           set -e
+          # shellcheck disable=SC1091
+          . bc-linux/scripts/app-artifact-name.sh
           bash bc-linux/scripts/workflow-summary.sh begin PUBLISH "Publish AL apps"
           DEV="http://localhost:${BC_DEV_PORT}/BC/dev"
           # Source the canonical publish helper from bc-linux. Previously
@@ -1271,7 +1277,7 @@ jobs:
           fi
           while IFS= read -r d; do
             [ -z "$d" ] && continue
-            app="build/$(basename "$d").app"
+            app="build/$(app_artifact_name "$d").app"
             [ -f "$app" ] || { echo "missing: $app"; exit 1; }
             echo ">>> Publishing $app"
             bc_publish_app "$app" "$DEV" "$AUTH" || exit 1
@@ -1290,6 +1296,8 @@ jobs:
           TEST_COMPANY: ${{ inputs.test_company }}
         run: |
           set -e
+          # shellcheck disable=SC1091
+          . scripts/app-artifact-name.sh
           bash scripts/workflow-summary.sh begin TESTS "Run AL tests"
           # Iterate only the test apps (we know which ones from TEST_APP_DIRS).
           # Production apps in APP_DIRS are already published but their .app
@@ -1338,16 +1346,16 @@ jobs:
           # via the upload-artifact step below OR via their own steps that read
           # the workspace path. AL-Go's AnalyzeTests post-step looks for these
           # files at consumer-controlled paths, so we put them somewhere
-          # predictable: ../build/junit-<test-app-basename>.xml relative to
+          # predictable: ../build/junit-<app_artifact_name of the test app dir>.xml relative to
           # the bc-linux working dir (= ./build/junit-* relative to the
           # consumer's repo root after the workflow finishes).
           mkdir -p ../build
           while IFS= read -r d; do
             [ -z "$d" ] && continue
-            app="../build/$(basename "$d").app"
+            app="../build/$(app_artifact_name "$d").app"
             [ -f "$app" ] || { echo "skip: $app (not built)"; continue; }
             base=$(basename "$app")
-            junit_file="../build/junit-$(basename "$d").xml"
+            junit_file="../build/junit-$(app_artifact_name "$d").xml"
             echo "=== Running tests in $base ==="
             # Capture output so we can parse the totals for telemetry.
             tmplog=$(mktemp)
