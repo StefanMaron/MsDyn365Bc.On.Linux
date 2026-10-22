@@ -1360,10 +1360,18 @@ jobs:
           # the bc-linux working dir (= ./build/junit-* relative to the
           # consumer's repo root after the workflow finishes).
           mkdir -p ../build
-          while IFS= read -r d; do
+          # The loop reads the app list from fd 3, not stdin: a runner child
+          # that reads stdin (al runtests, docker compose exec without -T)
+          # would otherwise eat the rest of the list, the loop would stop
+          # after the first app and the job would still go green.
+          APPS_EXPECTED=0
+          APPS_RUN=0
+          while IFS= read -r d <&3; do
             [ -z "$d" ] && continue
+            APPS_EXPECTED=$((APPS_EXPECTED + 1))
             app="../build/$(app_artifact_name "$d").app"
             [ -f "$app" ] || { echo "skip: $app (not built)"; continue; }
+            APPS_RUN=$((APPS_RUN + 1))
             base=$(basename "$app")
             junit_file="../build/junit-$(app_artifact_name "$d").xml"
             echo "=== Running tests in $base ==="
@@ -1447,7 +1455,13 @@ jobs:
               CODEUNITS_TOTAL=$((CODEUNITS_TOTAL + n))
             fi
             rm -f "$tmplog"
-          done <<< "$TEST_APP_DIRS"
+          done 3<<< "$TEST_APP_DIRS"
+          APPS_LISTED=$(grep -c . <<< "$TEST_APP_DIRS" || true)
+          echo "Test apps: $APPS_RUN run of $APPS_LISTED listed"
+          if [ "$APPS_EXPECTED" -ne "$APPS_LISTED" ]; then
+            echo "ERROR: the test loop saw $APPS_EXPECTED of $APPS_LISTED test apps; it ended early"
+            exit 1
+          fi
           bash scripts/workflow-summary.sh count tests_total    "$TESTS_TOTAL"
           bash scripts/workflow-summary.sh count tests_passed   "$TESTS_PASSED"
           bash scripts/workflow-summary.sh count tests_failed   "$TESTS_FAILED"
