@@ -57,6 +57,9 @@ jobs:
       # looks like a green run with fewer tests in it, which is the shape
       # issue #57 was about. These three run in seconds, need no BC, and are
       # the only thing standing between that bug and a merge.
+      - name: Workspace compile builds every wave before the next
+        run: python3 scripts/test-compile-workspace.py
+
       - name: Codeunit id batching is total
         run: python3 scripts/chunk-codeunit-ids.py --self-test
 

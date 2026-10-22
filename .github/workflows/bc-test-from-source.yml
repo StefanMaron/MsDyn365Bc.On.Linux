@@ -260,6 +260,27 @@ on:
         required: false
         type: number
         default: 0
+      workspace_compile:
+        description: >-
+          Opt-in. Compile with `altool workspace compile` instead of one `alc`
+          run per app dir. altool compiles independent apps in parallel, which
+          is much faster for repositories with many apps, but it needs every
+          app's in-repo dependencies to be listed in app_dirs/test_app_dirs.
+          The apps are compiled in dependency waves (see
+          scripts/compile-workspace.py for why). Analyzers, the ruleset and
+          preprocessor symbols apply as with the default compile.
+          Default false: one `alc` per app dir, as before.
+        required: false
+        type: boolean
+        default: false
+      workspace_compile_max_cpu:
+        description: >-
+          With workspace_compile: compiler processes per wave, passed as
+          altool's --maxcpucount. 0 (default) = altool's default, the number of
+          processors. Lower it when several jobs share one machine.
+        required: false
+        type: number
+        default: 0
       al_tool_version:
         description: >-
           Which Linux AL compiler to use
@@ -1019,6 +1040,8 @@ jobs:
           ENABLE_CODE_ANALYZERS_ON_TEST_APPS: ${{ inputs.enable_code_analyzers_on_test_apps }}
           PREPROCESSOR_SYMBOLS: ${{ inputs.preprocessor_symbols }}
           ASSEMBLY_PROBING_PATHS: ${{ inputs.assembly_probing_paths }}
+          WORKSPACE_COMPILE: ${{ inputs.workspace_compile }}
+          WORKSPACE_COMPILE_MAX_CPU: ${{ inputs.workspace_compile_max_cpu }}
         run: |
           set -e
           # shellcheck disable=SC1091
@@ -1153,6 +1176,64 @@ jobs:
               AL compile "/project:$src" "/packagecachepath:$src/.alpackages" "/out:$out" "${PP_FLAG[@]}"
             fi
           }
+
+          # workspace_compile: every app dir in one altool run per dependency wave.
+          # Apps land in build/ under the same names compile_dir gives them, so
+          # publish and test do not change. altool takes the analyzers as one
+          # list, so app and test apps compile together only when both get the
+          # same analyzers; otherwise production apps go first.
+          compile_workspace() {
+            local altool="$AL_TOOL_DIR/altool"
+            [ -x "$altool" ] || altool="$AL_TOOL_DIR/altool.dll"
+            [ -e "$altool" ] || { echo "ERROR: no altool in $AL_TOOL_DIR" >&2; return 1; }
+            local cmd=(python3 bc-linux/scripts/compile-workspace.py --altool "$altool")
+            [ "${altool##*.}" = "dll" ] && cmd=(python3 bc-linux/scripts/compile-workspace.py --altool-dll "$altool")
+            local opts=()
+            local cops=() ruleset=""
+            for f in "${ANALYZER_FLAGS[@]}"; do
+              case "$f" in
+                /analyzer:*) IFS=',' read -r -a parts <<< "${f#/analyzer:}"; cops+=("${parts[@]}") ;;
+                /ruleset:*) ruleset="${f#/ruleset:}" ;;
+              esac
+            done
+            [ ${#cops[@]} -gt 0 ] && opts+=(--customanalyzers "$(IFS=,; echo "${cops[*]}")")
+            [ -n "$ruleset" ] && opts+=(--ruleset "$ruleset")
+            [ -n "$PREPROCESSOR_SYMBOLS" ] && opts+=(--define "$PREPROCESSOR_SYMBOLS")
+            [ -n "${PROBE_JOINED:-}" ] && opts+=(--assemblyprobingpaths "$PROBE_JOINED")
+            local cpu=()
+            [ "${WORKSPACE_COMPILE_MAX_CPU:-0}" -gt 0 ] && cpu=(--max-cpu "$WORKSPACE_COMPILE_MAX_CPU")
+            mkdir -p build symbols compile-logs
+            local apps=() tests=()
+            mapfile -t apps < <(printf '%s\n' "$APP_DIRS" | sed '/^$/d; s|^|project/|')
+            mapfile -t tests < <(printf '%s\n' "$TEST_APP_DIRS" | sed '/^$/d; s|^|project/|')
+            if [ "$ENABLE_CODE_ANALYZERS_ON_TEST_APPS" = "true" ] || [ ${#opts[@]} -eq 0 ]; then
+              "${cmd[@]}" --package-cache symbols --out-dir build --log-dir compile-logs \
+                --name-from-dir "${cpu[@]}" "${apps[@]}" "${tests[@]}" -- "${opts[@]}" || return 1
+            else
+              if [ ${#apps[@]} -gt 0 ]; then
+                "${cmd[@]}" --package-cache symbols --out-dir build --log-dir compile-logs \
+                  --name-from-dir "${cpu[@]}" "${apps[@]}" -- "${opts[@]}" || return 1
+              fi
+              local test_opts=()
+              [ -n "$PREPROCESSOR_SYMBOLS" ] && test_opts+=(--define "$PREPROCESSOR_SYMBOLS")
+              [ -n "${PROBE_JOINED:-}" ] && test_opts+=(--assemblyprobingpaths "$PROBE_JOINED")
+              if [ ${#tests[@]} -gt 0 ]; then
+                "${cmd[@]}" --package-cache symbols --out-dir build --log-dir compile-logs \
+                  --name-from-dir "${cpu[@]}" "${tests[@]}" -- "${test_opts[@]}" || return 1
+              fi
+            fi
+            if [ ${#cops[@]} -gt 0 ] && grep -rqE "$ANALYZER_LOAD_FAIL_PATTERN" compile-logs; then
+              echo "ERROR: analyzer load failure detected in the compile logs" >&2
+              grep -rhE "$ANALYZER_LOAD_FAIL_PATTERN" compile-logs >&2
+              return 1
+            fi
+          }
+
+          if [ "$WORKSPACE_COMPILE" = "true" ]; then
+            compile_workspace
+            bash bc-linux/scripts/workflow-summary.sh end COMPILE
+            exit 0
+          fi
 
           # Compile production apps first so test apps can resolve them as deps.
           # Production apps always get the analyzer flags (when configured).
