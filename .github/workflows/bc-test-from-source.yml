@@ -1268,12 +1268,22 @@ jobs:
           if [ -n "$EXTRA_SYMBOLS_ARTIFACT_NAME" ]; then
             EXTRA_SRC="extra-symbols"
             [ -n "$EXTRA_SYMBOLS_ARTIFACT_SUBDIR" ] && EXTRA_SRC="extra-symbols/$EXTRA_SYMBOLS_ARTIFACT_SUBDIR"
-            for app in "$EXTRA_SRC"/*.app; do
-              [ -f "$app" ] || continue
-              echo ">>> Publishing dependency $app"
-              bc_publish_app "$app" "$DEV" "$AUTH" || exit 1
-              PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
-            done
+            # In dependency order, not glob order: an app whose dependency sorts
+            # after it would be published first and fail with AL1024.
+            shopt -s nullglob
+            EXTRA_APPS_FOUND=("$EXTRA_SRC"/*.app)
+            shopt -u nullglob
+            if [ ${#EXTRA_APPS_FOUND[@]} -gt 0 ]; then
+              mapfile -t EXTRA_APPS_ORDERED < <(
+                python3 bc-linux/scripts/sort-apps-for-publish.py "${EXTRA_APPS_FOUND[@]}" \
+                  || echo "SORT_FAILED")
+              [ "${EXTRA_APPS_ORDERED[-1]}" = "SORT_FAILED" ] && exit 1
+              for app in "${EXTRA_APPS_ORDERED[@]}"; do
+                echo ">>> Publishing dependency $app"
+                bc_publish_app "$app" "$DEV" "$AUTH" || exit 1
+                PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
+              done
+            fi
           fi
           while IFS= read -r d; do
             [ -z "$d" ] && continue

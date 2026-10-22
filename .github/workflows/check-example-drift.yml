@@ -51,6 +51,9 @@ jobs:
       - name: Compiled app names are unique per app dir
         run: bash scripts/test-app-artifact-name.sh
 
+      - name: Third-party dependencies publish in dependency order
+        run: python3 scripts/test-sort-apps-for-publish.py
+
       - name: Codeunit id batching is total
         run: python3 scripts/chunk-codeunit-ids.py --self-test
 
