@@ -1482,6 +1482,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+
+      # Which tests failed and why, on the run page and as annotations on the pull
+      # request, instead of somewhere in the job log. Reporting only: the test step
+      # decides whether the job passes, and this one never fails it.
+      - name: Test report
+        if: always()
+        continue-on-error: true
+        env:
+          REPORT_TITLE: "Tests (BC ${{ inputs.bc_version }}${{ inputs.artifact_name_suffix != '' && format(', {0}', inputs.artifact_name_suffix) || '' }})"
+        run: |
+          shopt -s nullglob
+          python3 bc-linux/scripts/junit-report.py --title "$REPORT_TITLE" \
+            --summary-file "$GITHUB_STEP_SUMMARY" build/junit-*.xml
       - name: Workflow timing summary + telemetry
         if: always()
         env:
