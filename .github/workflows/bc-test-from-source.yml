@@ -274,6 +274,9 @@ on:
           Needs altool's workspace command, which ships with AL 17 and newer
           (the AL 16 compiler BC 27 resolves to by default has none): on
           BC 27 set al_tool_version to "latest" or an AL 17+ version.
+          The package cache is the staged symbols/ folder plus the apps
+          compiled before, so apps committed in an app dir's .alpackages are
+          NOT seen: a dependency found only there fails with AL1022/AL1024.
           Default false: one `alc` per app dir, as before.
         required: false
         type: boolean
