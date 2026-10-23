@@ -77,9 +77,14 @@ on:
           Pool size for self-hosted machines shared by several jobs: the job
           takes the first free of slots 0..instance_slots-1 when it reserves the
           stack, and waits only when all are in use. Overrides instance_slot.
-          Set it to the number of BC stacks the machine has the RAM for; jobs
-          with a fixed instance_slot on the same machine are skipped by the
-          pool, since both hold the same per-slot lease.
+          N must fit the machine's RAM: budget a full BC service tier plus a
+          SQL Server per slot. Jobs with a fixed instance_slot on the same
+          machine are skipped by the pool, since both hold the same per-slot
+          lease.
+
+          Snapshot mode runs bc on host networking, where the port offsets do
+          nothing, so on a snapshot machine only slot 0 is used and jobs
+          queue as with instance_slots 0.
 
           0 (default) keeps the fixed instance_slot.
         required: false
