@@ -42,6 +42,15 @@ jobs:
       - name: Check examples against the reusable workflows
         run: python3 scripts/check-example-drift.py
 
+      # Self-tests for the helpers that name compiled apps and order
+      # third-party dependencies for publishing. Both run in seconds and
+      # need no BC.
+      - name: Compiled app names are unique per app dir
+        run: bash scripts/test-app-artifact-name.sh
+
+      - name: Third-party dependencies publish in dependency order
+        run: python3 scripts/test-sort-apps-for-publish.py
+
       # run-tests.sh batches its codeunit list across several suite-setup
       # requests once the joined ids pass BC's 2048-character CodeunitIds
       # field. A batch lost in that loop does not look like an error — it

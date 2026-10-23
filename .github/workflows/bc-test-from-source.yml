@@ -1021,6 +1021,9 @@ jobs:
           ASSEMBLY_PROBING_PATHS: ${{ inputs.assembly_probing_paths }}
         run: |
           set -e
+          # shellcheck disable=SC1091
+          . bc-linux/scripts/app-artifact-name.sh
+          mapfile -t ALL_APP_DIRS <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
           bash bc-linux/scripts/workflow-summary.sh begin COMPILE "Compile AL apps"
 
           # ─── Resolve analyzer flags via the helper ─────────────────────
@@ -1111,14 +1114,16 @@ jobs:
             printf '  %s\n' "${PROBE_DIRS[@]}"
           fi
 
+          # Takes the dir as the consumer listed it, so the file name matches
+          # the one publish and test derive from the same dir.
           compile_dir() {
-            local src="$1"
+            local d="$1" src="project/$1"
             shift
             [ -f "$src/app.json" ] || { echo "skip $src (no app.json)" >&2; return 0; }
             mkdir -p "$src/.alpackages"
             cp symbols/*.app "$src/.alpackages/" 2>/dev/null || true
             local out
-            out="$(pwd)/build/$(basename "$src").app"
+            out="$(pwd)/build/$(app_artifact_name "$d" "${ALL_APP_DIRS[@]}").app"
             mkdir -p build
             echo ">>> Compiling $src → $out"
             # Remaining args ($@) are the analyzer flag fragments — may be empty.
@@ -1155,7 +1160,7 @@ jobs:
             [ -z "$d" ] && continue
             mkdir -p "project/$d/.alpackages"
             cp build/*.app "project/$d/.alpackages/" 2>/dev/null || true
-            compile_dir "project/$d" "${ANALYZER_FLAGS[@]}"
+            compile_dir "$d" "${ANALYZER_FLAGS[@]}"
           done <<< "$APP_DIRS"
 
           # Test apps get analyzer flags only when explicitly opted in via
@@ -1167,9 +1172,9 @@ jobs:
             mkdir -p "project/$d/.alpackages"
             cp build/*.app "project/$d/.alpackages/" 2>/dev/null || true
             if [ "$ENABLE_CODE_ANALYZERS_ON_TEST_APPS" = "true" ]; then
-              compile_dir "project/$d" "${ANALYZER_FLAGS[@]}"
+              compile_dir "$d" "${ANALYZER_FLAGS[@]}"
             else
-              compile_dir "project/$d"
+              compile_dir "$d"
             fi
           done <<< "$TEST_APP_DIRS"
 
@@ -1190,15 +1195,18 @@ jobs:
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
         run: |
           set -e
+          # shellcheck disable=SC1091
+          . bc-linux/scripts/app-artifact-name.sh
+          mapfile -t ALL_APP_DIRS <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
           mkdir -p artifact-staging/Apps artifact-staging/TestApps
           while IFS= read -r d; do
             [ -z "$d" ] && continue
-            f="build/$(basename "$d").app"
+            f="build/$(app_artifact_name "$d" "${ALL_APP_DIRS[@]}").app"
             [ -f "$f" ] && cp "$f" artifact-staging/Apps/
           done <<< "$APP_DIRS"
           while IFS= read -r d; do
             [ -z "$d" ] && continue
-            f="build/$(basename "$d").app"
+            f="build/$(app_artifact_name "$d" "${ALL_APP_DIRS[@]}").app"
             [ -f "$f" ] && cp "$f" artifact-staging/TestApps/
           done <<< "$TEST_APP_DIRS"
           echo "Staged files:"
@@ -1240,6 +1248,9 @@ jobs:
           EXTRA_SYMBOLS_ARTIFACT_SUBDIR: ${{ inputs.extra_symbols_artifact_subdir }}
         run: |
           set -e
+          # shellcheck disable=SC1091
+          . bc-linux/scripts/app-artifact-name.sh
+          mapfile -t ALL_APP_DIRS <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
           bash bc-linux/scripts/workflow-summary.sh begin PUBLISH "Publish AL apps"
           DEV="http://localhost:${BC_DEV_PORT}/BC/dev"
           # Source the canonical publish helper from bc-linux. Previously
@@ -1262,16 +1273,24 @@ jobs:
           if [ -n "$EXTRA_SYMBOLS_ARTIFACT_NAME" ]; then
             EXTRA_SRC="extra-symbols"
             [ -n "$EXTRA_SYMBOLS_ARTIFACT_SUBDIR" ] && EXTRA_SRC="extra-symbols/$EXTRA_SYMBOLS_ARTIFACT_SUBDIR"
-            for app in "$EXTRA_SRC"/*.app; do
-              [ -f "$app" ] || continue
-              echo ">>> Publishing dependency $app"
-              bc_publish_app "$app" "$DEV" "$AUTH" || exit 1
-              PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
-            done
+            # In dependency order, not glob order: an app whose dependency sorts
+            # after it would be published first and fail with AL1024.
+            shopt -s nullglob
+            EXTRA_APPS_FOUND=("$EXTRA_SRC"/*.app)
+            shopt -u nullglob
+            if [ ${#EXTRA_APPS_FOUND[@]} -gt 0 ]; then
+              EXTRA_APPS_SORTED=$(python3 bc-linux/scripts/sort-apps-for-publish.py "${EXTRA_APPS_FOUND[@]}") || exit 1
+              mapfile -t EXTRA_APPS_ORDERED <<< "$EXTRA_APPS_SORTED"
+              for app in "${EXTRA_APPS_ORDERED[@]}"; do
+                echo ">>> Publishing dependency $app"
+                bc_publish_app "$app" "$DEV" "$AUTH" || exit 1
+                PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
+              done
+            fi
           fi
           while IFS= read -r d; do
             [ -z "$d" ] && continue
-            app="build/$(basename "$d").app"
+            app="build/$(app_artifact_name "$d" "${ALL_APP_DIRS[@]}").app"
             [ -f "$app" ] || { echo "missing: $app"; exit 1; }
             echo ">>> Publishing $app"
             bc_publish_app "$app" "$DEV" "$AUTH" || exit 1
@@ -1286,10 +1305,14 @@ jobs:
       - name: Run AL tests
         working-directory: bc-linux
         env:
+          APP_DIRS: ${{ inputs.app_dirs }}
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
           TEST_COMPANY: ${{ inputs.test_company }}
         run: |
           set -e
+          # shellcheck disable=SC1091
+          . scripts/app-artifact-name.sh
+          mapfile -t ALL_APP_DIRS <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
           bash scripts/workflow-summary.sh begin TESTS "Run AL tests"
           # Iterate only the test apps (we know which ones from TEST_APP_DIRS).
           # Production apps in APP_DIRS are already published but their .app
@@ -1338,16 +1361,24 @@ jobs:
           # via the upload-artifact step below OR via their own steps that read
           # the workspace path. AL-Go's AnalyzeTests post-step looks for these
           # files at consumer-controlled paths, so we put them somewhere
-          # predictable: ../build/junit-<test-app-basename>.xml relative to
-          # the bc-linux working dir (= ./build/junit-* relative to the
-          # consumer's repo root after the workflow finishes).
+          # predictable: ../build/junit-<name>.xml relative to the bc-linux
+          # working dir, where <name> is the test app's folder name, or its
+          # path when another app dir shares that folder name (see
+          # scripts/app-artifact-name.sh). That is ./build/junit-* relative to the
+          # consumer's repo root after the workflow finishes.
           mkdir -p ../build
-          while IFS= read -r d; do
+          # The loop reads the app list from fd 3, not stdin: a runner child
+          # that reads stdin (al runtests, docker compose exec without -T)
+          # would otherwise eat the rest of the list, the loop would stop
+          # after the first app and the job would still go green.
+          APPS_RUN=0
+          while IFS= read -r d <&3; do
             [ -z "$d" ] && continue
-            app="../build/$(basename "$d").app"
+            app="../build/$(app_artifact_name "$d" "${ALL_APP_DIRS[@]}").app"
             [ -f "$app" ] || { echo "skip: $app (not built)"; continue; }
+            APPS_RUN=$((APPS_RUN + 1))
             base=$(basename "$app")
-            junit_file="../build/junit-$(basename "$d").xml"
+            junit_file="../build/junit-$(app_artifact_name "$d" "${ALL_APP_DIRS[@]}").xml"
             echo "=== Running tests in $base ==="
             # Capture output so we can parse the totals for telemetry.
             tmplog=$(mktemp)
@@ -1429,7 +1460,13 @@ jobs:
               CODEUNITS_TOTAL=$((CODEUNITS_TOTAL + n))
             fi
             rm -f "$tmplog"
-          done <<< "$TEST_APP_DIRS"
+          done 3<<< "$TEST_APP_DIRS"
+          APPS_LISTED=$(grep -c . <<< "$TEST_APP_DIRS" || true)
+          echo "Test apps: $APPS_RUN run of $APPS_LISTED listed"
+          if [ "$APPS_RUN" -lt "$APPS_LISTED" ]; then
+            echo "ERROR: only $APPS_RUN of $APPS_LISTED test apps ran; see the skip lines above, or the loop ended early"
+            exit 1
+          fi
           bash scripts/workflow-summary.sh count tests_total    "$TESTS_TOTAL"
           bash scripts/workflow-summary.sh count tests_passed   "$TESTS_PASSED"
           bash scripts/workflow-summary.sh count tests_failed   "$TESTS_FAILED"

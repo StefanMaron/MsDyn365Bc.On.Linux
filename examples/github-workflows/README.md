@@ -67,6 +67,13 @@ reproducible CI runs swap it for a release tag once one exists
 | `enable_code_analyzers_on_test_apps` | no | `false` | When `false` (default — matches AL-Go), test app compiles skip the analyzer flags entirely. Production apps still get them. |
 | `artifact_name_suffix` | no | `""` | When set, uploads the compiled production + test `.app` files as a workflow-run artifact named `bc-linux-build-<suffix>`, staged under `Apps/`/`TestApps/` subfolders. Blank (default) skips the upload entirely. Must be unique within the run if you call this workflow more than once (e.g. a matrix). |
 
+Each compiled app is named after its folder: `src/MyApp` becomes
+`MyApp.app` (and `junit-MyApp.xml` for a test app). When two dirs in
+`app_dirs` / `test_app_dirs` end in the same folder name, as in
+`apps/Sales/app` and `apps/Shipping/app`, those two are named after the
+whole path instead (`apps-Sales-app.app`, `apps-Shipping-app.app`) so
+neither overwrites the other.
+
 ### Inputs (prebuilt)
 
 Same as above but with `app_files` / `test_app_files` (paths to `.app`

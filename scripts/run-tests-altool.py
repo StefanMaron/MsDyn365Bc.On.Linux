@@ -366,6 +366,7 @@ def run_codeunit(
     try:
         proc = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,  # never the caller's: a workflow loop reads its list from it
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,  # failure summaries go to stderr; merge
             env=env,

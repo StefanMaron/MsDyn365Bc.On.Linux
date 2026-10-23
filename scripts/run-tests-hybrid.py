@@ -152,7 +152,8 @@ def _run_altool(args, codeunit_ids: list[int], junit_path: str) -> _RunnerResult
     ]
     if args.company:
         cmd += ["--company", args.company]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True)
     r.rc = proc.returncode
     r.stdout = proc.stdout or ""
     r.junit_path = junit_path if os.path.isfile(junit_path) else None
@@ -177,7 +178,8 @@ def _run_websocket(args, codeunit_ids: list[int], junit_path: str) -> _RunnerRes
     ]
     if args.company:
         cmd += ["--company", args.company]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True)
     r.rc = proc.returncode
     r.stdout = proc.stdout or ""
     r.junit_path = junit_path if os.path.isfile(junit_path) else None
