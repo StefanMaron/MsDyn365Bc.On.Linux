@@ -271,6 +271,9 @@ on:
           preprocessor symbols apply as with the default compile;
           enable_external_rulesets is rejected, as altool has no option
           for it.
+          Needs altool's workspace command, which ships with AL 17 and newer
+          (the AL 16 compiler BC 27 resolves to by default has none): on
+          BC 27 set al_tool_version to "latest" or an AL 17+ version.
           Default false: one `alc` per app dir, as before.
         required: false
         type: boolean
@@ -1187,7 +1190,11 @@ jobs:
           compile_workspace() {
             local altool="$AL_TOOL_DIR/altool"
             [ -x "$altool" ] || altool="$AL_TOOL_DIR/altool.dll"
-            [ -e "$altool" ] || { echo "ERROR: no altool in $AL_TOOL_DIR" >&2; return 1; }
+            if [ ! -e "$altool" ]; then
+              echo "ERROR: workspace_compile: no altool in $AL_TOOL_DIR. Set al_tool_version" >&2
+              echo "       to 'latest' or an AL 17+ version, or turn workspace_compile off." >&2
+              return 1
+            fi
             local cmd=(python3 bc-linux/scripts/compile-workspace.py --altool "$altool")
             [ "${altool##*.}" = "dll" ] && cmd=(python3 bc-linux/scripts/compile-workspace.py --altool-dll "$altool")
             local opts=()
