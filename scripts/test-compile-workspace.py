@@ -21,6 +21,12 @@ SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "compile-works
 FAKE_ALTOOL = r'''#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
+if args[:2] != ["workspace", "compile"] or os.environ.get("FAKE_NO_WORKSPACE"):
+    print("ERROR(S):\n  Verb 'workspace' is not recognized.")
+    sys.exit(1)
+if "--help" in args:
+    print("Usage:\n  altool workspace compile <workspaceFile> [options]")
+    sys.exit(0)
 ws = json.load(open(args[2]))
 opt = {args[i]: args[i + 1] for i in range(3, len(args) - 1, 2)}
 with open(os.environ["FAKE_ALTOOL_CALLS"], "a") as log:
@@ -177,6 +183,13 @@ class CompileWorkspaceTests(unittest.TestCase):
         os.makedirs(empty)
         r = self.run_script(empty)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.altool_calls(), [])
+
+    def test_altool_without_workspace_compile_fails_with_the_fix(self):
+        # AL 16's altool has no workspace verb
+        r = self.run_script(self.core, env={"FAKE_NO_WORKSPACE": "1"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("al_tool_version", r.stderr)
         self.assertEqual(self.altool_calls(), [])
 
     def test_dependency_cycle_fails_before_compiling(self):

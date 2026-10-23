@@ -98,6 +98,20 @@ def compile_wave(altool: list[str], wave: list[dict], package_cache: str, stagin
         os.unlink(ws.name)
 
 
+NO_WORKSPACE_COMPILE = (
+    "compile-workspace: this altool has no 'workspace compile' command. It needs "
+    "AL 17 or newer (AL 16's altool has none): set al_tool_version to 'latest' "
+    "or to an AL 17+ version, or turn workspace_compile off.")
+
+
+def has_workspace_compile(altool: list[str]) -> bool:
+    env = dict(os.environ)
+    env.setdefault("TERM", "dumb")
+    probe = subprocess.run([*altool, "workspace", "compile", "--help"], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+    return probe.returncode == 0 and "workspace compile" in probe.stdout
+
+
 def main(argv: list[str]) -> int:
     if "--" in argv:
         split = argv.index("--")
@@ -132,6 +146,9 @@ def main(argv: list[str]) -> int:
         return 1
 
     altool = [args.altool] if args.altool else ["dotnet", args.altool_dll]
+    if apps and not has_workspace_compile(altool):
+        print(NO_WORKSPACE_COMPILE, file=sys.stderr)
+        return 1
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.package_cache, exist_ok=True)
     print(f"compile-workspace: {len(apps)} apps in {len(plan)} waves")
