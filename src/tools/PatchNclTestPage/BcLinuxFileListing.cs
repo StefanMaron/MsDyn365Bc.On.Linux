@@ -13,9 +13,9 @@ using System.Reflection;
 /// and System.IO.DirectoryInfo (GetFiles, GetDirectories, GetFileSystemEntries/Infos and the
 /// Enumerate variants):
 ///  * the pattern is matched case-insensitively, so '*.xml' finds 'b.XML' as it does on Windows;
-///  * the result is sorted by full path, ignoring case, which is the order NTFS keeps its folder
-///    entries in. Recursive listings are sorted the same way, which is not the exact
-///    traversal order of a Windows listing but is stable.
+///  * the entries of a folder come in name order, ignoring case, which is the order NTFS keeps
+///    its folder entries in. A recursive listing lists a folder first and then its subfolders,
+///    first in, first out, which is how .NET's own enumerator walks a tree.
 /// Overloads that take an EnumerationOptions, and every other method, run unchanged.
 /// A lazy Enumerate result comes back as an array of the same element type.
 /// </summary>
@@ -62,63 +62,80 @@ internal static class BcLinuxFileListing
         }
 
         // The same lookup rules as the legacy overloads (EnumerationOptions.Compatible), except
-        // for the case of the pattern.
+        // for the case of the pattern. Each folder is listed on its own (no recursion in the
+        // options), so the folder order below is ours to choose.
         EnumerationOptions options = new EnumerationOptions();
         options.MatchType = MatchType.Win32;
         options.MatchCasing = MatchCasing.CaseInsensitive;
         options.AttributesToSkip = (FileAttributes)0;
         options.IgnoreInaccessible = false;
-        options.RecurseSubdirectories = searchOption == SearchOption.AllDirectories;
+        options.RecurseSubdirectories = false;
 
         Type[] signature = isDirectory
             ? new Type[] { typeof(string), typeof(string), typeof(EnumerationOptions) }
             : new Type[] { typeof(string), typeof(EnumerationOptions) };
         MethodInfo target = declaring.GetMethod(name, signature);
-        if (target == null)
+        MethodInfo subfolders = typeof(Directory).GetMethod("GetDirectories",
+            new Type[] { typeof(string), typeof(string), typeof(EnumerationOptions) });
+        if (target == null || subfolders == null)
             return method.Invoke(instance, args);
 
-        object[] targetArgs = isDirectory
-            ? new object[] { args[0], pattern, options }
-            : new object[] { pattern, options };
-        object result = target.Invoke(instance, targetArgs);
-        if (result == null)
-            return null;
-
-        // Collect the elements. A lazy result is enumerated here, so an error such as a missing
-        // folder is raised from the same call as for the eager methods.
-        Array array = result as Array;
-        object[] items;
-        if (array != null)
+        // The order .NET itself walks a tree with SearchOption.AllDirectories: the entries of a
+        // folder first, then its subfolders in a first-in-first-out queue. Within a folder the
+        // entries are in NTFS order (by name, ignoring case).
+        string root = isDirectory ? (string)args[0] : ((DirectoryInfo)instance).FullName;
+        ArrayList folders = new ArrayList();
+        folders.Add(root);
+        if (searchOption == SearchOption.AllDirectories)
         {
-            items = new object[array.Length];
-            for (int i = 0; i < items.Length; i++)
-                items[i] = array.GetValue(i);
+            for (int f = 0; f < folders.Count; f++)
+            {
+                string[] children = (string[])subfolders.Invoke(null, new object[] { (string)folders[f], "*", options });
+                Array.Sort(children, StringComparer.OrdinalIgnoreCase);
+                for (int c = 0; c < children.Length; c++)
+                    folders.Add(children[c]);
+            }
         }
-        else
+
+        ArrayList items = new ArrayList();
+        for (int f = 0; f < folders.Count; f++)
         {
+            string folder = (string)folders[f];
+            object[] targetArgs = isDirectory
+                ? new object[] { folder, pattern, options }
+                : new object[] { pattern, options };
+            object folderInstance = isDirectory ? null : (f == 0 ? instance : new DirectoryInfo(folder));
+            object result = target.Invoke(folderInstance, targetArgs);
+            if (result == null)
+                continue;
+
+            // A lazy result is enumerated here, so an error such as a missing folder is raised
+            // from the same call as for the eager methods.
             IEnumerable sequence = result as IEnumerable;
             if (sequence == null)
                 return result;
-            ArrayList collected = new ArrayList();
+            ArrayList inFolder = new ArrayList();
             IEnumerator walker = sequence.GetEnumerator();
             while (walker.MoveNext())
-                collected.Add(walker.Current);
-            items = collected.ToArray();
-        }
+                inFolder.Add(walker.Current);
 
-        string[] keys = new string[items.Length];
-        for (int i = 0; i < items.Length; i++)
-        {
-            string text = items[i] as string;
-            FileSystemInfo entry = items[i] as FileSystemInfo;
-            keys[i] = text != null ? text : (entry != null ? entry.FullName : "");
+            object[] entries = inFolder.ToArray();
+            string[] keys = new string[entries.Length];
+            for (int i = 0; i < entries.Length; i++)
+            {
+                string text = entries[i] as string;
+                FileSystemInfo entry = entries[i] as FileSystemInfo;
+                keys[i] = text != null ? text : (entry != null ? entry.FullName : "");
+            }
+            Array.Sort(keys, entries, StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < entries.Length; i++)
+                items.Add(entries[i]);
         }
-        Array.Sort(keys, items, StringComparer.OrdinalIgnoreCase);
 
         Type returnType = info.ReturnType;
         Type elementType = returnType.IsArray ? returnType.GetElementType() : returnType.GetGenericArguments()[0];
-        Array sorted = Array.CreateInstance(elementType, items.Length);
-        for (int i = 0; i < items.Length; i++)
+        Array sorted = Array.CreateInstance(elementType, items.Count);
+        for (int i = 0; i < items.Count; i++)
             sorted.SetValue(items[i], i);
         return sorted;
     }

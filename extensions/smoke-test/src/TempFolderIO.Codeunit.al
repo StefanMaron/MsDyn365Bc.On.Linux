@@ -19,6 +19,7 @@ dotnet
         type("System.IO.Directory"; BcLinuxDirectory) { }
         type("System.IO.DirectoryInfo"; BcLinuxDirectoryInfo) { }
         type("System.IO.FileInfo"; BcLinuxFileInfo) { }
+        type("System.IO.SearchOption"; BcLinuxSearchOption) { }
     }
 }
 
@@ -77,6 +78,33 @@ codeunit 70075 "BC Linux Temp Folder IO"
         LibraryAssert.IsTrue(Format(Files.GetValue(0)).EndsWith('a.XML'), 'first: ' + Format(Files.GetValue(0)));
         LibraryAssert.IsTrue(Format(Files.GetValue(1)).EndsWith('B.xml'), 'second: ' + Format(Files.GetValue(1)));
         LibraryAssert.IsTrue(Format(Files.GetValue(2)).EndsWith('c.xml'), 'third: ' + Format(Files.GetValue(2)));
+    end;
+
+    // .NET walks a tree folder by folder: the entries of a folder first, then its subfolders in
+    // the order they were found. A sort of the full paths would put 'sub1\m.xml' between
+    // 'a.xml' and 'z.xml'.
+    [Test]
+    procedure RecursiveListingListsAFolderBeforeItsSubfolders()
+    var
+        Directory: DotNet BcLinuxDirectory;
+        Option: DotNet BcLinuxSearchOption;
+        Folder: Text;
+        Files: DotNet Array;
+    begin
+        Folder := TemporaryPath() + 'bclinux-io-' + DelChr(Format(CreateGuid()), '=', '{}-');
+        WriteFile(Folder + '\z.xml');
+        WriteFile(Folder + '\a.xml');
+        WriteFile(Folder + '\sub2\a.xml');
+        WriteFile(Folder + '\sub1\M.xml');
+        WriteFile(Folder + '\sub1\deeper\k.xml');
+
+        Files := Directory.GetFiles(Folder, '*.xml', Option.AllDirectories);
+        LibraryAssert.AreEqual(5, Files.Length, 'count');
+        LibraryAssert.IsTrue(Format(Files.GetValue(0)).EndsWith('a.xml'), '1: ' + Format(Files.GetValue(0)));
+        LibraryAssert.IsTrue(Format(Files.GetValue(1)).EndsWith('z.xml'), '2: ' + Format(Files.GetValue(1)));
+        LibraryAssert.IsTrue(Format(Files.GetValue(2)).EndsWith('sub1/M.xml') or Format(Files.GetValue(2)).EndsWith('sub1\M.xml'), '3: ' + Format(Files.GetValue(2)));
+        LibraryAssert.IsTrue(Format(Files.GetValue(3)).EndsWith('sub2/a.xml') or Format(Files.GetValue(3)).EndsWith('sub2\a.xml'), '4: ' + Format(Files.GetValue(3)));
+        LibraryAssert.IsTrue(Format(Files.GetValue(4)).EndsWith('deeper/k.xml') or Format(Files.GetValue(4)).EndsWith('deeper\k.xml'), '5: ' + Format(Files.GetValue(4)));
     end;
 
     [Test]
