@@ -172,6 +172,9 @@ services:
       BC_PROFILE_NST: ${BC_PROFILE_NST:-0}
       BC_ARTIFACT_URL: ${BC_ARTIFACT_URL:-}
       BC_TEST_APPS: ${BC_TEST_APPS:-}
+      # Backup path inside the sql container to restore instead of the artifact's
+      # database, e.g. one baked into BC_SQL_IMAGE.
+      BC_DATABASE_BAK: ${BC_DATABASE_BAK:-}
       # Seconds each dev-endpoint publish at boot may take (default 600).
       BC_PUBLISH_TIMEOUT: ${BC_PUBLISH_TIMEOUT:-}
       # Opt-in: self-host Microsoft's real BC web client on Kestrel (port 8080).

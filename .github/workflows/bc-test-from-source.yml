@@ -180,6 +180,41 @@ on:
         required: false
         type: string
         default: ""
+      database_bak:
+        description: >-
+          Path of a backup inside sql_image, e.g. a prebuilt database baked into
+          your own SQL image: a backup of a BC database of exactly this
+          bc_version. BC restores it instead of the artifact's database and
+          keeps every app in it (no clearing, no test framework republish), so
+          its apps need no publish. Private images need registry_username and
+          the registry_password secret. Empty (default) = the artifact's
+          database.
+        required: false
+        type: string
+        default: ""
+      registry_username:
+        description: >-
+          User for docker login to the registry of sql_image; the login is
+          kept inside this job. Needs the registry_password secret.
+        required: false
+        type: string
+        default: ""
+      skip_publish_app_ids:
+        description: >-
+          Comma-separated app IDs from app_dirs/test_app_dirs that are compiled
+          but not published, because the prebuilt database already has them in
+          this version. Only used together with database_bak.
+        required: false
+        type: string
+        default: ""
+      backup_database:
+        description: >-
+          After publishing, back up the BC database to database.bak and upload
+          it as artifact database-<artifact_name_suffix>. Used to build a
+          prebuilt database for database_bak.
+        required: false
+        type: boolean
+        default: false
       extra_apps:
         description: >-
           Newline-separated names of Microsoft apps from the BC artifact to
@@ -513,6 +548,11 @@ on:
         default: false
 
     secrets:
+      registry_password:
+        description: >-
+          Password or token for registry_username (docker login to the
+          registry of sql_image).
+        required: false
       bc_license:
         description: >-
           Optional ISV/developer BC license, base64-encoded.
@@ -597,6 +637,23 @@ jobs:
           echo "::error::rdlc_renderer: true also needs rdlc_trust_layouts: true. RDLC layout code runs unsandboxed as root in the bc container (see CLAUDE.md, RDLC rendering)."
           exit 1
 
+      # Job-local docker config: a login in ~/.docker/config.json outlives the
+      # token and breaks later pulls on a self-hosted runner. Every later
+      # docker call in this job reads DOCKER_CONFIG from $GITHUB_ENV.
+      - name: Log in to the registry of sql_image
+        if: ${{ inputs.registry_username != '' }}
+        env:
+          REGISTRY_USERNAME: ${{ inputs.registry_username }}
+          REGISTRY_PASSWORD: ${{ secrets.registry_password }}
+          SQL_IMAGE: ${{ inputs.sql_image }}
+        run: |
+          set -e
+          [ -n "$REGISTRY_PASSWORD" ] || { echo "::error::registry_username needs the registry_password secret"; exit 1; }
+          export DOCKER_CONFIG="$RUNNER_TEMP/docker-config"
+          mkdir -p "$DOCKER_CONFIG"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          echo "$REGISTRY_PASSWORD" | docker login "${SQL_IMAGE%%/*}" -u "$REGISTRY_USERNAME" --password-stdin
+
       - name: Download BC artifacts + pull docker images (parallel)
         env:
           BC_RUNNER_IMAGE: ${{ inputs.runner_image || (inputs.rdlc_renderer && format('ghcr.io/{0}/bc-runner:rdlc', vars.IMAGE_NAMESPACE || 'aldevtools/msdyn365bc.on.linux')) || (vars.IMAGE_NAMESPACE && format('ghcr.io/{0}/bc-runner:latest', vars.IMAGE_NAMESPACE)) || '' }}
@@ -639,7 +696,24 @@ jobs:
       # ─── Phase 3: figure out the BC_KEEP_APP_IDS for the entrypoint ──
       # Must run BEFORE 'docker compose up' so the env propagates into
       # the container's selective filter step at DB setup time.
+      - name: Use the prebuilt database
+        if: ${{ inputs.database_bak != '' }}
+        env:
+          DATABASE_BAK: ${{ inputs.database_bak }}
+        run: |
+          # The released bc-runner image predates BC_DATABASE_BAK: use this
+          # checkout's entrypoint until an image with it is released.
+          printf 'services:\n  bc:\n    volumes:\n      - ./scripts/entrypoint.sh:/bc/scripts/entrypoint.sh:ro\n' \
+            > bc-linux/prebuilt.override.yml
+          {
+            echo "COMPOSE_FILE=docker-compose.yml:prebuilt.override.yml"
+            echo "BC_DATABASE_BAK=$DATABASE_BAK"
+            echo "BC_CLEAR_ALL_APPS=none"
+            echo "BC_SKIP_APP_PUBLISH=true"
+          } >> "$GITHUB_ENV"
+
       - name: Resolve apps to keep in BC database
+        if: ${{ inputs.database_bak == '' }}
         env:
           APP_DIRS: ${{ inputs.app_dirs }}
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
@@ -1222,6 +1296,13 @@ jobs:
       # Opt-in (see verify_authentication input below). When enabled, this
       # must run before the positive-only publish/smoke path: the former
       # Patch #16b made every later step green even with a wrong password.
+      - name: Check that BC restored the prebuilt database
+        if: ${{ inputs.database_bak != '' }}
+        working-directory: bc-linux
+        run: |
+          docker compose logs bc 2>&1 | grep -q "Restoring .* from the prebuilt database" \
+            || { echo "::error::BC did not restore the prebuilt database (entrypoint without BC_DATABASE_BAK?)"; exit 1; }
+
       - name: Verify NavUserPassword authentication
         if: ${{ inputs.verify_authentication }}
         working-directory: bc-linux
@@ -1238,6 +1319,8 @@ jobs:
           TEST_APP_DIRS: ${{ inputs.test_app_dirs }}
           EXTRA_SYMBOLS_ARTIFACT_NAME: ${{ inputs.extra_symbols_artifact_name }}
           EXTRA_SYMBOLS_ARTIFACT_SUBDIR: ${{ inputs.extra_symbols_artifact_subdir }}
+          DATABASE_BAK: ${{ inputs.database_bak }}
+          SKIP_PUBLISH_APP_IDS: ${{ inputs.skip_publish_app_ids }}
         run: |
           set -e
           bash bc-linux/scripts/workflow-summary.sh begin PUBLISH "Publish AL apps"
@@ -1259,7 +1342,7 @@ jobs:
           # AL1024 ("Symbols for the requested app X could not be found in the
           # database") even though compile succeeded. Publish them first so the
           # consumer's apps can depend on them.
-          if [ -n "$EXTRA_SYMBOLS_ARTIFACT_NAME" ]; then
+          if [ -n "$EXTRA_SYMBOLS_ARTIFACT_NAME" ] && [ -z "$DATABASE_BAK" ]; then
             EXTRA_SRC="extra-symbols"
             [ -n "$EXTRA_SYMBOLS_ARTIFACT_SUBDIR" ] && EXTRA_SRC="extra-symbols/$EXTRA_SYMBOLS_ARTIFACT_SUBDIR"
             for app in "$EXTRA_SRC"/*.app; do
@@ -1269,19 +1352,49 @@ jobs:
               PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
             done
           fi
+          SKIPPED_COUNT=0
           while IFS= read -r d; do
             [ -z "$d" ] && continue
             app="build/$(basename "$d").app"
             [ -f "$app" ] || { echo "missing: $app"; exit 1; }
+            if [ -n "$DATABASE_BAK" ] && [ -n "$SKIP_PUBLISH_APP_IDS" ]; then
+              app_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["id"].lower())' "project/$d/app.json")
+              if [[ ",${SKIP_PUBLISH_APP_IDS,,}," == *",$app_id,"* ]]; then
+                echo ">>> Skipping $app (unchanged in the prebuilt database)"
+                SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+                continue
+              fi
+            fi
             echo ">>> Publishing $app"
             bc_publish_app "$app" "$DEV" "$AUTH" || exit 1
             PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
           done <<< "$APP_DIRS"$'\n'"$TEST_APP_DIRS"
           bash bc-linux/scripts/workflow-summary.sh count apps_published "$PUBLISHED_COUNT"
+          bash bc-linux/scripts/workflow-summary.sh count apps_skipped "$SKIPPED_COUNT"
           # Track compile count too — same loop iteration shape, runs after compile.
           COMPILED_COUNT=$(ls build/*.app 2>/dev/null | wc -l)
           bash bc-linux/scripts/workflow-summary.sh count apps_compiled "$COMPILED_COUNT"
           bash bc-linux/scripts/workflow-summary.sh end PUBLISH
+
+      - name: Back up the BC database
+        if: ${{ inputs.backup_database }}
+        working-directory: bc-linux
+        run: |
+          mkdir -p ../database
+          docker compose exec -T sql bash -c '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$SA_PASSWORD" -C -No -b -Q "BACKUP DATABASE [CRONUS] TO DISK=N'"'"'/var/opt/mssql/data/database.bak'"'"' WITH COPY_ONLY, COMPRESSION, INIT"'
+          # tmpfs: docker cp cannot read it, stream the file instead
+          docker compose exec -T sql cat /var/opt/mssql/data/database.bak > ../database/database.bak
+          docker compose exec -T sql rm -f /var/opt/mssql/data/database.bak
+          ls -l ../database/database.bak
+
+      - name: Upload the BC database
+        if: ${{ inputs.backup_database }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-${{ inputs.artifact_name_suffix }}
+          path: database/database.bak
+          retention-days: 1
+          compression-level: 0
 
       - name: Run AL tests
         working-directory: bc-linux
