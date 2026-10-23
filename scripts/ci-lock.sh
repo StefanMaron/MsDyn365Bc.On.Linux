@@ -37,8 +37,17 @@
 #
 # USAGE
 #   scripts/ci-lock.sh acquire <name> [--wait-minutes N] [--max-hold-minutes N]
+#   scripts/ci-lock.sh acquire-slot <base> --slots N [--wait-minutes N] [--max-hold-minutes N]
 #   scripts/ci-lock.sh release <name>
 #   scripts/ci-lock.sh status  <name>
+#
+# `acquire-slot` takes the first free stack of a pool of N: slot 0 is <base>,
+# slot k is <base>-k, the same names a fixed instance_slot uses, so fixed and
+# pooled jobs on one machine never share a stack. It writes the slot, the
+# compose project name and the ports that go with them to $GITHUB_ENV.
+# N is how many BC stacks the machine has the RAM for. Under snapshot mode
+# (COMPOSE_FILE names docker-compose.snapshot.yml) bc uses host networking,
+# so only slot 0 is used.
 #
 # `acquire` blocks until the lease is free, then prints — and, under GitHub
 # Actions, appends to $GITHUB_ENV — the token that `release` needs:
@@ -114,6 +123,15 @@ describe_holder() {
     printf '    since   : %s (%ss ago)\n' "$(lease_field "$lease" started)" "${age:-?}"
 }
 
+describe_holders() {
+    local n
+    for n in "$@"; do
+        [ -f "$LOCK_DIR/$n.lease" ] || continue
+        printf '  %s\n' "'$n'"
+        describe_holder "$LOCK_DIR/$n.lease"
+    done
+}
+
 lease_age() {
     local mtime now
     mtime=$(lease_mtime "$1")
@@ -152,18 +170,43 @@ start_heartbeat() {
 }
 
 cmd_acquire() {
-    local name="$1"; shift
-    local wait_minutes=30 max_hold_minutes=120
+    local mode="$1" name="$2"; shift 2
+    local wait_minutes=30 max_hold_minutes=120 slots=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --wait-minutes)     wait_minutes="$2"; shift 2 ;;
             --max-hold-minutes) max_hold_minutes="$2"; shift 2 ;;
+            --slots)            slots="$2"; shift 2 ;;
             *) echo "ci-lock: unknown option '$1'" >&2; usage ;;
         esac
     done
 
-    local lease="$LOCK_DIR/$name.lease"
-    local token who run started
+    if [ "$mode" = slot ]; then
+        case "$slots" in
+            ''|*[!0-9]*|0*) echo "ci-lock: --slots needs a whole number of at least 1, got '$slots'" >&2; usage ;;
+        esac
+        # Snapshot mode puts bc on host networking, where the slot's port
+        # offsets do nothing: a second stack would collide on the ports.
+        case "${COMPOSE_FILE:-}" in
+            *docker-compose.snapshot.yml*)
+                if [ "$slots" -gt 1 ]; then
+                    echo "ci-lock: snapshot mode (host networking) — using slot 0 only, not a pool of $slots"
+                    slots=1
+                fi ;;
+        esac
+    fi
+
+    # A plain acquire is a pool of one: just <name>.
+    local -a names=("$name")
+    if [ "$mode" = slot ]; then
+        names=()
+        local k
+        for (( k = 0; k < slots; k++ )); do
+            if [ "$k" -eq 0 ]; then names+=("$name"); else names+=("$name-$k"); fi
+        done
+    fi
+
+    local lease token who run started
     token="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     who="${RUNNER_NAME:-$(hostname)}${GITHUB_JOB:+ / job $GITHUB_JOB}"
     run="${GITHUB_SERVER_URL:-}${GITHUB_REPOSITORY:+/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID}"
@@ -179,82 +222,113 @@ run=$run
 started=$started
 pid=$$"
 
-    local announced=0 last_progress=$start
+    local announced=0 last_progress=$start slot
     while :; do
-        if try_create "$lease" "$payload"; then
-            # Verify after the fact. A waiter that judged this lease stale can
-            # have deleted it in the window between our create and now, then
-            # created its own — in which case we do NOT hold the stack and have
-            # to go back to waiting. Cheap insurance against a double steal.
-            sleep 1
-            if [ "$(lease_field "$lease" token)" != "$token" ]; then
+        for (( slot = 0; slot < ${#names[@]}; slot++ )); do
+            name="${names[$slot]}"
+            lease="$LOCK_DIR/$name.lease"
+            if try_create "$lease" "$payload"; then
+                # Verify after the fact. A waiter that judged this lease stale can
+                # have deleted it in the window between our create and now, then
+                # created its own — in which case we do NOT hold the stack and have
+                # to go back to waiting. Cheap insurance against a double steal.
+                sleep 1
+                if [ "$(lease_field "$lease" token)" != "$token" ]; then
+                    continue
+                fi
+                local hb
+                hb=$(start_heartbeat "$lease" "$token" "$hold_deadline")
+                printf 'hb=%s\n' "$hb" >> "$lease"
+                local waited=$(( $(date +%s) - start ))
+                if [ "$waited" -ge "$POLL_SECONDS" ]; then
+                    echo "ci-lock: acquired '$name' after ${waited}s"
+                else
+                    echo "ci-lock: acquired '$name'"
+                fi
+                echo "BC_CI_LOCK_TOKEN=$token"
+                [ -n "${GITHUB_ENV:-}" ] && echo "BC_CI_LOCK_TOKEN=$token" >> "$GITHUB_ENV"
+                [ "$mode" = slot ] && write_slot_env "$slot" "$name"
+                return 0
+            fi
+
+            # Somebody holds it. Decide whether they are still alive.
+            local age
+            age=$(lease_age "$lease")
+            if [ -z "$age" ] && [ ! -f "$lease" ]; then
+                # It vanished between the create attempt and the stat — retry
+                # immediately rather than sleeping out a whole poll interval.
+                (( slot-- ))
                 continue
             fi
-            local hb
-            hb=$(start_heartbeat "$lease" "$token" "$hold_deadline")
-            printf 'hb=%s\n' "$hb" >> "$lease"
-            local waited=$(( $(date +%s) - start ))
-            if [ "$waited" -ge "$POLL_SECONDS" ]; then
-                echo "ci-lock: acquired '$name' after ${waited}s"
-            else
-                echo "ci-lock: acquired '$name'"
-            fi
-            echo "BC_CI_LOCK_TOKEN=$token"
-            [ -n "${GITHUB_ENV:-}" ] && echo "BC_CI_LOCK_TOKEN=$token" >> "$GITHUB_ENV"
-            return 0
-        fi
 
-        # Somebody holds it. Decide whether they are still alive.
-        local age
-        age=$(lease_age "$lease")
-        if [ -z "$age" ] && [ ! -f "$lease" ]; then
-            # It vanished between the create attempt and the stat — retry
-            # immediately rather than sleeping out a whole poll interval.
-            continue
-        fi
-
-        if [ -n "$age" ] && [ "$age" -gt "$STALE_SECONDS" ]; then
-            # Re-read after a pause and only steal if nothing moved. A holder
-            # whose heartbeat is merely late gets a second chance; one whose
-            # job was killed does not touch the file again, ever.
-            local token_before
-            token_before=$(lease_field "$lease" token)
-            sleep "$POLL_SECONDS"
-            if [ "$(lease_field "$lease" token)" = "$token_before" ]; then
-                age=$(lease_age "$lease")
-                if [ -n "$age" ] && [ "$age" -gt "$STALE_SECONDS" ]; then
-                    echo "ci-lock: lease '$name' has not been refreshed for ${age}s — treating it as abandoned"
-                    describe_holder "$lease"
-                    rm -f "$lease"
+            if [ -n "$age" ] && [ "$age" -gt "$STALE_SECONDS" ]; then
+                # Re-read after a pause and only steal if nothing moved. A holder
+                # whose heartbeat is merely late gets a second chance; one whose
+                # job was killed does not touch the file again, ever.
+                local token_before
+                token_before=$(lease_field "$lease" token)
+                sleep "$POLL_SECONDS"
+                if [ "$(lease_field "$lease" token)" = "$token_before" ]; then
+                    age=$(lease_age "$lease")
+                    if [ -n "$age" ] && [ "$age" -gt "$STALE_SECONDS" ]; then
+                        echo "ci-lock: lease '$name' has not been refreshed for ${age}s — treating it as abandoned"
+                        describe_holder "$lease"
+                        rm -f "$lease"
+                        (( slot-- ))
+                    fi
                 fi
+                continue
             fi
-            continue
-        fi
+        done
 
         now=$(date +%s)
         if [ "$now" -ge "$deadline" ]; then
-            echo "ci-lock: ERROR — timed out after ${wait_minutes} min waiting for '$name'." >&2
+            echo "ci-lock: ERROR — timed out after ${wait_minutes} min waiting for $(IFS=,; echo "${names[*]}")." >&2
             echo "         The BC/SQL container stack on this machine is in use by another job:" >&2
-            describe_holder "$lease" >&2
+            describe_holders "${names[@]}" >&2
             echo "" >&2
             echo "         Jobs sharing a docker host share the compose project name and the" >&2
             echo "         host ports, so they cannot run at once (issue #24). To run them in" >&2
-            echo "         parallel, give each job its own stack with the reusable workflow's" >&2
-            echo "         'instance_slot' input, and make sure the machine has the RAM for" >&2
-            echo "         two BC service tiers." >&2
+            echo "         parallel, let jobs take a free stack with the reusable workflow's" >&2
+            echo "         'instance_slots' input (or give each job its own 'instance_slot')," >&2
+            echo "         and make sure the machine has the RAM for one BC service tier and" >&2
+            echo "         one SQL Server per stack." >&2
             return 2
         fi
 
         if [ "$announced" -eq 0 ]; then
-            echo "ci-lock: '$name' is held — waiting up to ${wait_minutes} min."
-            describe_holder "$lease"
+            if [ "${#names[@]}" -gt 1 ]; then
+                echo "ci-lock: all ${#names[@]} stacks ($(IFS=,; echo "${names[*]}")) are held — waiting up to ${wait_minutes} min."
+                describe_holders "${names[@]}"
+            else
+                echo "ci-lock: '$name' is held — waiting up to ${wait_minutes} min."
+                describe_holder "$lease"
+            fi
             announced=1
         elif [ $(( now - last_progress )) -ge 60 ]; then
-            echo "ci-lock:   still waiting for '$name' ($(( (now - start) / 60 )) min elapsed)"
+            echo "ci-lock:   still waiting for $(IFS=,; echo "${names[*]}") ($(( (now - start) / 60 )) min elapsed)"
             last_progress=$now
         fi
         sleep "$POLL_SECONDS"
     done
+}
+
+# The stack a slot stands for, for the steps after acquire-slot. Slot k moves
+# every published port by k*100 (docker-compose.yml's defaults at slot 0).
+write_slot_env() {
+    local slot="$1" project="$2" off=$(( $1 * 100 ))
+    echo "ci-lock: slot $slot → project $project, dev endpoint $(( 7049 + off ))"
+    [ -n "${GITHUB_ENV:-}" ] || return 0
+    {
+        echo "COMPOSE_PROJECT_NAME=$project"
+        echo "SQL_PORT=$(( 11433 + off ))"
+        echo "BC_DEV_PORT=$(( 7049 + off ))"
+        echo "BC_ODATA_PORT=$(( 7048 + off ))"
+        echo "BC_API_PORT=$(( 7052 + off ))"
+        echo "BC_MGMT_PORT=$(( 7045 + off ))"
+        echo "BC_CLIENT_PORT=$(( 7085 + off ))"
+        echo "BC_WEBCLIENT_PORT=$(( 8080 + off ))"
+    } >> "$GITHUB_ENV"
 }
 
 cmd_release() {
@@ -328,7 +402,8 @@ main() {
     chmod 1777 "$LOCK_DIR" 2>/dev/null || true
 
     case "$cmd" in
-        acquire) cmd_acquire "$name" "$@" ;;
+        acquire) cmd_acquire plain "$name" "$@" ;;
+        acquire-slot) cmd_acquire slot "$name" "$@" ;;
         release) cmd_release "$name" ;;
         status)  cmd_status  "$name" ;;
         *) echo "ci-lock: unknown command '$cmd'" >&2; usage ;;

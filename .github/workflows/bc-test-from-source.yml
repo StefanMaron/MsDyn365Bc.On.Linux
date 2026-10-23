@@ -72,6 +72,24 @@ on:
         required: false
         type: number
         default: 0
+      instance_slots:
+        description: >
+          Pool size for self-hosted machines shared by several jobs: the job
+          takes the first free of slots 0..instance_slots-1 when it reserves the
+          stack, and waits only when all are in use. Overrides instance_slot.
+          N must fit the machine's RAM: budget a full BC service tier plus a
+          SQL Server per slot. Jobs with a fixed instance_slot on the same
+          machine are skipped by the pool, since both hold the same per-slot
+          lease.
+
+          Snapshot mode runs bc on host networking, where the port offsets do
+          nothing, so on a snapshot machine only slot 0 is used and jobs
+          queue as with instance_slots 0.
+
+          0 (default) keeps the fixed instance_slot.
+        required: false
+        type: number
+        default: 0
       bc_version:
         description: "BC platform version (e.g. 27.5)"
         required: false
@@ -747,6 +765,7 @@ jobs:
       # agree: docker compose, wait-for-bc-healthy.sh and run-tests.sh's
       # `docker compose exec` each run in their own step.
       - name: Resolve the container stack ports
+        if: inputs.instance_slots == 0
         run: |
           set -e
           SLOT=${{ inputs.instance_slot }}
@@ -767,9 +786,18 @@ jobs:
           set -e
           WAIT=$(( ${{ inputs.timeout_minutes }} - 10 ))
           [ "$WAIT" -lt 5 ] && WAIT=5
-          bash bc-linux/scripts/ci-lock.sh acquire "$COMPOSE_PROJECT_NAME" \
-            --wait-minutes "$WAIT" \
-            --max-hold-minutes ${{ inputs.timeout_minutes }}
+          SLOTS=${{ inputs.instance_slots }}
+          if [ "$SLOTS" -gt 0 ]; then
+            # takes a free slot and writes its project name and ports to $GITHUB_ENV
+            bash bc-linux/scripts/ci-lock.sh acquire-slot bc-linux \
+              --slots "$SLOTS" \
+              --wait-minutes "$WAIT" \
+              --max-hold-minutes ${{ inputs.timeout_minutes }}
+          else
+            bash bc-linux/scripts/ci-lock.sh acquire "$COMPOSE_PROJECT_NAME" \
+              --wait-minutes "$WAIT" \
+              --max-hold-minutes ${{ inputs.timeout_minutes }}
+          fi
 
       # ─── Phase 4: kick off BC startup in the background ──────────────
       # docker compose up -d returns immediately. BC then takes ~5 minutes
