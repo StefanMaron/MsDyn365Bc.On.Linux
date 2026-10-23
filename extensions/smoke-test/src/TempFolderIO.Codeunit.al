@@ -1,11 +1,11 @@
 // Regression guard for issues #175, #176 and #181: AL's File functions and .NET System.IO
 // must see the same folder under TemporaryPath().
 //
-// BC builds TemporaryPath() as Path.Combine(userFolder, 'TEMP\'). Off Windows that left a
-// folder literally named 'TEMP\' that AL's File functions never used (they turn '\' into '/'),
-// so a DotNet DirectoryInfo / Directory.GetFiles on the same string found nothing, and
-// MediaSet.ImportFile stored 'TEMP\name.png' as the file name because Path.GetFileName only
-// splits at '/'. The NavFile.GetUserTempFolder IL patch (PatchTempPath) ends the path in '/'.
+// BC builds TemporaryPath() as Path.Combine(userFolder, 'TEMP\'), which ends in a backslash on
+// every system. AL's File functions turn '\' into '/', but a DotNet DirectoryInfo or
+// Directory.GetFiles got the raw string on Linux and found nothing, and MediaSet.ImportFile
+// stored 'TEMP\name.png' as the file name because Path.GetFileName only splits at '/'. The
+// PatchTempPath IL patch fixes both and leaves TemporaryPath() as it is.
 //
 // Expected values are what Windows BC 27.5, 28.5 and 29.0 containers reported, except that the
 // files here are all lower case and the order is not checked: Windows matches '*.xml' against
@@ -54,6 +54,15 @@ codeunit 70075 "BC Linux Temp Folder IO"
             Names += '|' + Found.Name;
         end;
         LibraryAssert.IsTrue(Names.Contains('|a.xml') and Names.Contains('|b.xml') and Names.Contains('|c.xml'), 'file names ' + Names);
+    end;
+
+    [Test]
+    procedure TemporaryPathStillEndsInABackslash()
+    var
+        Temp: Text;
+    begin
+        Temp := TemporaryPath();
+        LibraryAssert.IsTrue(Temp.EndsWith('TEMP\'), 'TemporaryPath() ends with TEMP\, got ' + Temp);
     end;
 
     [Test]

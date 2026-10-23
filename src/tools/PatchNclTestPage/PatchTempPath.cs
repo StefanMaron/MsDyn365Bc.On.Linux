@@ -5,22 +5,33 @@ using System.IO;
 using System.Linq;
 
 /// <summary>
-/// NavFile.GetUserTempFolder: the folder AL's TemporaryPath() returns (issues #175, #176, #181).
+/// Paths under the session's user folder that BC builds with '\' (issues #175, #176, #181).
 ///
-/// BC builds it as Path.Combine(userFolder, "TEMP\"). On Windows that is "...\TEMP\". On Linux
-/// Path.Combine keeps the backslash as an ordinary character, so TemporaryPath() was
-/// "/user/folder/TEMP\" and BC created a real directory literally named "TEMP\". AL's File
-/// functions normalize '\' to '/' (Patch #28), so a file written to TemporaryPath() + 'sub\a.xml'
-/// landed in "TEMP/sub". Anything that reaches System.IO with the raw string (a DotNet
-/// DirectoryInfo or Directory.GetFiles, the MediaSet file name taken with Path.GetFileName)
-/// looked in "TEMP\sub" instead and found nothing, or kept "TEMP\" as part of the file name.
+/// BC builds TemporaryPath() as Path.Combine(userFolder, "TEMP\"). On Windows that is
+/// "...\TEMP\", and AL code sees that value. On Linux Path.Combine keeps the backslash as an
+/// ordinary character. AL's File functions turn '\' into '/' (Patch #28), so they work, but two
+/// places hand the raw string to System.IO and get a different answer than on Windows:
 ///
-/// The fix is the constant: "TEMP/" combines to "/user/folder/TEMP/", which AL and System.IO
-/// resolve to the same directory. Only that one string changes, so no branch or length moves.
-/// Idempotent: once patched there is no "TEMP\" left to find.
+///  * DotNet calls. A DotNet DirectoryInfo or Directory.GetFiles given "...\TEMP\sub" looks for
+///    a file whose name contains backslashes and finds nothing. The AL value is converted to a
+///    .NET argument in NavDotNet.GetDotNetObjectFromNavObject; the text results there go through
+///    <c>NewDotNetPathArgument</c>, which turns '\' into '/' when the text starts with the
+///    session's user folder. Text that is not under the user folder is passed on unchanged.
+///  * MediaSet.ImportFile takes the file name with Path.GetFileName, which on Linux only splits
+///    at '/', so "TEMP\name.jpg" was stored as the name. Windows splits at both. The calls in
+///    NavMediaSet go through <c>FileNameAtEitherSeparator</c>.
+///
+/// TemporaryPath() itself is left alone: AL code sees the Windows value ("...TEMP\").
+/// Idempotent. Exits with an error when a place to patch is not found, because that means a BC
+/// update moved the code and the fix would otherwise stop working without a sign.
 /// </summary>
 static class PatchTempPath
 {
+    const string HelperType = "<BcLinuxWindowsText>";
+    const string ArgumentHelper = "NewDotNetPathArgument";
+    const string FileNameHelper = "FileNameAtEitherSeparator";
+    static readonly string[] TextTypes = { "NavStringValue" };
+
     public static int Run(string inputPath, string outputPath)
     {
         if (!File.Exists(inputPath))
@@ -34,20 +45,63 @@ static class PatchTempPath
             resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(inputPath)) ?? ".");
             using var assembly = AssemblyDefinition.ReadAssembly(inputPath,
                 new ReaderParameters { AssemblyResolver = resolver, ReadWrite = inputPath == outputPath });
+            var module = assembly.MainModule;
 
-            int rewritten = 0;
-            var navFile = assembly.MainModule.GetTypes().FirstOrDefault(t => t.Name == "NavFile");
-            var method = navFile?.Methods.FirstOrDefault(m => m.Name == "GetUserTempFolder" && m.HasBody);
-            if (method != null)
-                foreach (var ins in method.Body.Instructions)
-                    if (ins.OpCode.Code == Code.Ldstr && ins.Operand is string s && s == "TEMP\\")
+            var dotNet = module.GetTypes().FirstOrDefault(t => t.FullName == "Microsoft.Dynamics.Nav.Runtime.NavDotNet");
+            var convert = dotNet?.Methods.FirstOrDefault(m => m.Name == "GetDotNetObjectFromNavObject" && m.HasBody);
+            if (convert == null)
+            {
+                Console.WriteLine("ERROR: NavDotNet.GetDotNetObjectFromNavObject not found; the DotNet path fix cannot be applied");
+                return 1;
+            }
+
+            MethodDefinition? argumentHelper = null, fileNameHelper = null;
+            int arguments = 0, alreadyArguments = 0, fileNames = 0, alreadyFileNames = 0;
+
+            var ins = convert.Body.Instructions;
+            for (int i = 0; i < ins.Count; i++)
+            {
+                if (ins[i].OpCode.Code != Code.Call && ins[i].OpCode.Code != Code.Callvirt) continue;
+                if (ins[i].Operand is not MethodReference mr || mr.Name != "get_Value"
+                    || !TextTypes.Contains(mr.DeclaringType?.Name)) continue;
+                if (ins[i + 1].Operand is MethodReference next && next.Name == ArgumentHelper)
+                {
+                    alreadyArguments++;
+                    continue;
+                }
+                argumentHelper ??= AddArgumentHelper(module);
+                convert.Body.GetILProcessor().InsertAfter(ins[i], Instruction.Create(OpCodes.Call, argumentHelper));
+                arguments++;
+            }
+            if (arguments > 0) IlHelpers.LengthenShortBranches(convert.Body);
+
+            var mediaSet = module.GetTypes().Where(t => OuterName(t) == "NavMediaSet").ToList();
+            foreach (var type in mediaSet)
+                foreach (var method in type.Methods.Where(m => m.HasBody))
+                {
+                    bool grown = false;
+                    foreach (var call in method.Body.Instructions)
                     {
-                        ins.Operand = "TEMP/";
-                        rewritten++;
+                        if (call.OpCode.Code != Code.Call || call.Operand is not MethodReference mr) continue;
+                        if (mr.Name == FileNameHelper) { alreadyFileNames++; continue; }
+                        if (mr.Name != "GetFileName" || mr.DeclaringType?.FullName != "System.IO.Path"
+                            || mr.Parameters.Count != 1 || mr.Parameters[0].ParameterType.FullName != "System.String") continue;
+                        fileNameHelper ??= AddFileNameHelper(module);
+                        call.Operand = fileNameHelper;
+                        fileNames++;
+                        grown = true;
                     }
+                    if (grown) IlHelpers.LengthenShortBranches(method.Body);
+                }
 
-            Console.WriteLine($"Rewrote {rewritten} TEMP\\ in NavFile.GetUserTempFolder of {Path.GetFileName(inputPath)}");
-            if (rewritten == 0) return 0;
+            Console.WriteLine($"Patched {arguments} DotNet text argument(s) and {fileNames} MediaSet GetFileName call(s) in {Path.GetFileName(inputPath)} "
+                + $"(already patched: {alreadyArguments} and {alreadyFileNames})");
+            if (arguments + alreadyArguments == 0 || fileNames + alreadyFileNames == 0)
+            {
+                Console.WriteLine("ERROR: a place to patch was not found; BC moved the code and the temp path fix is not applied");
+                return 1;
+            }
+            if (arguments + fileNames == 0) return 0;
             if (inputPath == outputPath) assembly.Write(); else assembly.Write(outputPath);
             return 0;
         }
@@ -56,5 +110,130 @@ static class PatchTempPath
             Console.WriteLine($"ERROR: {ex.GetType().Name}: {ex.Message}");
             return 1;
         }
+    }
+
+    static string OuterName(TypeDefinition type)
+    {
+        while (type.DeclaringType != null) type = type.DeclaringType;
+        return type.Name;
+    }
+
+    static TypeDefinition Holder(ModuleDefinition module)
+    {
+        var holder = module.Types.FirstOrDefault(t => t.Name == HelperType);
+        if (holder != null) return holder;
+        holder = new TypeDefinition("", HelperType,
+            TypeAttributes.Class | TypeAttributes.Sealed | TypeAttributes.Abstract | TypeAttributes.NotPublic,
+            module.TypeSystem.Object);
+        module.Types.Add(holder);
+        return holder;
+    }
+
+    /// <summary>
+    /// static string NewDotNetPathArgument(string s): s with '\' turned into '/' when it starts
+    /// with the session's user folder, else s.
+    /// </summary>
+    static MethodDefinition AddArgumentHelper(ModuleDefinition module)
+    {
+        var holder = Holder(module);
+        var existing = holder.Methods.FirstOrDefault(m => m.Name == ArgumentHelper);
+        if (existing != null) return existing;
+
+        var currentThread = module.GetTypes().First(t => t.FullName == "Microsoft.Dynamics.Nav.Runtime.NavCurrentThread");
+        var session = module.GetTypes().First(t => t.FullName == "Microsoft.Dynamics.Nav.Runtime.NavSession");
+        var getSession = module.ImportReference(currentThread.Methods.First(m => m.Name == "get_Session"));
+        var getUserFolder = module.ImportReference(session.Methods.First(m => m.Name == "get_UserFolder"));
+        var indexOf = module.ImportReference(typeof(string).GetMethod("IndexOf", new[] { typeof(char) }));
+        var isNullOrEmpty = module.ImportReference(typeof(string).GetMethod("IsNullOrEmpty", new[] { typeof(string) }));
+        var startsWith = module.ImportReference(typeof(string).GetMethod("StartsWith", new[] { typeof(string), typeof(StringComparison) }));
+        var replace = module.ImportReference(typeof(string).GetMethod("Replace", new[] { typeof(char), typeof(char) }));
+
+        var m = new MethodDefinition(ArgumentHelper,
+            MethodAttributes.Static | MethodAttributes.Assembly | MethodAttributes.HideBySig, module.TypeSystem.String);
+        m.Parameters.Add(new ParameterDefinition("s", ParameterAttributes.None, module.TypeSystem.String));
+        holder.Methods.Add(m);
+        m.Body.InitLocals = true;
+        m.Body.Variables.Add(new VariableDefinition(module.ImportReference(session)));
+        m.Body.Variables.Add(new VariableDefinition(module.TypeSystem.String));
+
+        var il = m.Body.GetILProcessor();
+        var unchanged = il.Create(OpCodes.Ldarg_0);
+        il.Append(il.Create(OpCodes.Ldarg_0));
+        il.Append(il.Create(OpCodes.Brfalse, unchanged));
+        il.Append(il.Create(OpCodes.Ldarg_0));
+        il.Append(il.Create(OpCodes.Ldc_I4, (int)'\\'));
+        il.Append(il.Create(OpCodes.Callvirt, indexOf));
+        il.Append(il.Create(OpCodes.Ldc_I4_0));
+        il.Append(il.Create(OpCodes.Blt, unchanged));
+        il.Append(il.Create(OpCodes.Call, getSession));
+        il.Append(il.Create(OpCodes.Stloc_0));
+        il.Append(il.Create(OpCodes.Ldloc_0));
+        il.Append(il.Create(OpCodes.Brfalse, unchanged));
+        il.Append(il.Create(OpCodes.Ldloc_0));
+        il.Append(il.Create(OpCodes.Callvirt, getUserFolder));
+        il.Append(il.Create(OpCodes.Stloc_1));
+        il.Append(il.Create(OpCodes.Ldloc_1));
+        il.Append(il.Create(OpCodes.Call, isNullOrEmpty));
+        il.Append(il.Create(OpCodes.Brtrue, unchanged));
+        il.Append(il.Create(OpCodes.Ldarg_0));
+        il.Append(il.Create(OpCodes.Ldloc_1));
+        il.Append(il.Create(OpCodes.Ldc_I4_4)); // StringComparison.Ordinal
+        il.Append(il.Create(OpCodes.Callvirt, startsWith));
+        il.Append(il.Create(OpCodes.Brfalse, unchanged));
+        il.Append(il.Create(OpCodes.Ldarg_0));
+        il.Append(il.Create(OpCodes.Ldc_I4, (int)'\\'));
+        il.Append(il.Create(OpCodes.Ldc_I4, (int)'/'));
+        il.Append(il.Create(OpCodes.Callvirt, replace));
+        il.Append(il.Create(OpCodes.Ret));
+        il.Append(unchanged);
+        il.Append(il.Create(OpCodes.Ret));
+        return m;
+    }
+
+    /// <summary>static string FileNameAtEitherSeparator(string s): the part after the last '/' or '\'.</summary>
+    static MethodDefinition AddFileNameHelper(ModuleDefinition module)
+    {
+        var holder = Holder(module);
+        var existing = holder.Methods.FirstOrDefault(m => m.Name == FileNameHelper);
+        if (existing != null) return existing;
+
+        var lastIndexOf = module.ImportReference(typeof(string).GetMethod("LastIndexOf", new[] { typeof(char) }));
+        var substring = module.ImportReference(typeof(string).GetMethod("Substring", new[] { typeof(int) }));
+
+        var m = new MethodDefinition(FileNameHelper,
+            MethodAttributes.Static | MethodAttributes.Assembly | MethodAttributes.HideBySig, module.TypeSystem.String);
+        m.Parameters.Add(new ParameterDefinition("s", ParameterAttributes.None, module.TypeSystem.String));
+        holder.Methods.Add(m);
+        m.Body.InitLocals = true;
+        m.Body.Variables.Add(new VariableDefinition(module.TypeSystem.Int32));
+        m.Body.Variables.Add(new VariableDefinition(module.TypeSystem.Int32));
+
+        var il = m.Body.GetILProcessor();
+        var nullResult = il.Create(OpCodes.Ldnull);
+        var keep = il.Create(OpCodes.Ldarg_0);
+        il.Append(il.Create(OpCodes.Ldarg_0));
+        il.Append(il.Create(OpCodes.Brfalse, nullResult));
+        il.Append(il.Create(OpCodes.Ldarg_0));
+        il.Append(il.Create(OpCodes.Ldc_I4, (int)'/'));
+        il.Append(il.Create(OpCodes.Callvirt, lastIndexOf));
+        il.Append(il.Create(OpCodes.Stloc_0));
+        il.Append(il.Create(OpCodes.Ldarg_0));
+        il.Append(il.Create(OpCodes.Ldc_I4, (int)'\\'));
+        il.Append(il.Create(OpCodes.Callvirt, lastIndexOf));
+        il.Append(il.Create(OpCodes.Stloc_1));
+        il.Append(il.Create(OpCodes.Ldloc_0));
+        il.Append(il.Create(OpCodes.Ldloc_1));
+        il.Append(il.Create(OpCodes.Bge, keep));
+        il.Append(il.Create(OpCodes.Ldloc_1));
+        il.Append(il.Create(OpCodes.Stloc_0));
+        il.Append(keep);
+        il.Append(il.Create(OpCodes.Ldloc_0));
+        il.Append(il.Create(OpCodes.Ldc_I4_1));
+        il.Append(il.Create(OpCodes.Add));
+        il.Append(il.Create(OpCodes.Callvirt, substring));
+        il.Append(il.Create(OpCodes.Ret));
+        il.Append(nullResult);
+        il.Append(il.Create(OpCodes.Ret));
+        return m;
     }
 }
