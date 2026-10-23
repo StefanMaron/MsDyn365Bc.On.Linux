@@ -1279,10 +1279,8 @@ jobs:
             EXTRA_APPS_FOUND=("$EXTRA_SRC"/*.app)
             shopt -u nullglob
             if [ ${#EXTRA_APPS_FOUND[@]} -gt 0 ]; then
-              mapfile -t EXTRA_APPS_ORDERED < <(
-                python3 bc-linux/scripts/sort-apps-for-publish.py "${EXTRA_APPS_FOUND[@]}" \
-                  || echo "SORT_FAILED")
-              [ "${EXTRA_APPS_ORDERED[-1]}" = "SORT_FAILED" ] && exit 1
+              EXTRA_APPS_SORTED=$(python3 bc-linux/scripts/sort-apps-for-publish.py "${EXTRA_APPS_FOUND[@]}") || exit 1
+              mapfile -t EXTRA_APPS_ORDERED <<< "$EXTRA_APPS_SORTED"
               for app in "${EXTRA_APPS_ORDERED[@]}"; do
                 echo ">>> Publishing dependency $app"
                 bc_publish_app "$app" "$DEV" "$AUTH" || exit 1
