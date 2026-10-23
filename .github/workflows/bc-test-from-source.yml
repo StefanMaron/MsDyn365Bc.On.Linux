@@ -1215,6 +1215,8 @@ jobs:
             done
             [ ${#cops[@]} -gt 0 ] && opts+=(--customanalyzers "$(IFS=,; echo "${cops[*]}")")
             [ -n "$ruleset" ] && opts+=(--ruleset "$ruleset")
+            # altool hands --define to alc unchanged as -define:<value>, so the
+            # comma-separated list means what it does with /define:
             [ -n "$PREPROCESSOR_SYMBOLS" ] && opts+=(--define "$PREPROCESSOR_SYMBOLS")
             [ -n "${PROBE_JOINED:-}" ] && opts+=(--assemblyprobingpaths "$PROBE_JOINED")
             local cpu=()
