@@ -57,9 +57,8 @@ codeunit 70071 "BC Linux Format Region"
         LibraryAssert.AreEqual('01/31/2025', ColumnValue(UnknownRegionDataset(), 'D1Col'), 'zz-ZZ short date');
     end;
 
-#if BCLINUX_DOTNET_FRAMEWORK
-    // Issue #167: on BC 29 a Windows container groups fr-FR thousands with U+00A0 (CLDR: U+202F).
-    // Compiled with the BC 29+ legs' symbol only; BC 28 already matched Windows.
+    // Issues #167 and #174: a Windows container groups fr-FR thousands with U+00A0 on BC 27.5,
+    // 28.5 and 29.0 (CLDR: U+202F).
     [Test]
     procedure FrenchGroupSeparatorIsNoBreakSpace()
     var
@@ -68,7 +67,6 @@ codeunit 70071 "BC Linux Format Region"
         Formatted := Part(Run('fr-FR'), 2);
         LibraryAssert.IsTrue(Formatted[2] = 160, 'fr-FR group separator is U+00A0, got ' + Formatted);
     end;
-#endif
 
     local procedure UnknownRegionDataset(): Text
     var

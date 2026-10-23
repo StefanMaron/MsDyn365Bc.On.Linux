@@ -529,6 +529,11 @@ if [ -f /bc/tools/patcher/PatchNclTestPage.dll ]; then
     if $PATCHER types "$SERVICE_DIR/Microsoft.Dynamics.Nav.Types.dll" 2>&1 | tail -1; then
         log_step "Patched Nav.Types.dll (TestClientProxy Assembly.Load → LoadFrom)"
     fi
+    # TemporaryPath() is "<user folder>/TEMP\" here, a directory literally named "TEMP\" that
+    # System.IO sees and AL's File functions do not (issues #175, #176, #181). One constant.
+    if $PATCHER temppath "$SERVICE_DIR/Microsoft.Dynamics.Nav.Ncl.dll" 2>&1 | tail -1; then
+        log_step "Patched Nav.Ncl.dll (TemporaryPath() ends in / instead of a literal backslash)"
+    fi
     # Text behaviour a Windows tier has and Linux does not (issue #113). Both are constants
     # inside CoreLib's precompiled code, so no runtime hook can reach them; BC's own call
     # sites are rewritten in the IL instead.

@@ -54,6 +54,8 @@ class Program
             return PatchEncoding.Run(inputPath, outputPath);
         if (command == "newline")
             return PatchNewline.Run(inputPath, outputPath);
+        if (command == "temppath")
+            return PatchTempPath.Run(inputPath, outputPath);
 
         // Default: patch Nav.Ncl.dll
 
