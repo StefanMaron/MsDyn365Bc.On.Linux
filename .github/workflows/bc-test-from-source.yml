@@ -498,6 +498,11 @@ on:
           value that is unique per call. bc-linux does not invent one for
           you — it uses whatever string you pass verbatim, so make sure
           it's artifact-name-safe.
+
+          The suffix is also appended to the test result and container log
+          artifacts: junit-test-results-<bc_version>-<suffix> and
+          bc-container-log-<bc_version>-<suffix>. Blank keeps their old
+          names.
         required: false
         type: string
         default: ""
