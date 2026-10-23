@@ -7,13 +7,16 @@
 // stored 'TEMP\name.png' as the file name because Path.GetFileName only splits at '/'. The
 // PatchTempPath IL patch fixes both and leaves TemporaryPath() as it is.
 //
-// Expected values are what Windows BC 27.5, 28.5 and 29.0 containers reported, except that the
-// files here are all lower case and the order is not checked: Windows matches '*.xml' against
-// 'b.XML' and lists in name order, System.IO on Linux does neither (see KNOWN-LIMITATIONS.md).
+// Issue #183: Windows matches '*.xml' against 'b.XML' and lists in name order. The listing
+// methods of Directory and DirectoryInfo are routed through BcLinuxFileListing (the filelisting
+// patch) to do the same.
+//
+// Expected values are what Windows BC 27.5, 28.5 and 29.0 containers reported.
 dotnet
 {
     assembly("mscorlib")
     {
+        type("System.IO.Directory"; BcLinuxDirectory) { }
         type("System.IO.DirectoryInfo"; BcLinuxDirectoryInfo) { }
         type("System.IO.FileInfo"; BcLinuxFileInfo) { }
     }
@@ -38,9 +41,9 @@ codeunit 70075 "BC Linux Temp Folder IO"
         i: Integer;
         Names: Text;
     begin
-        Folder := TemporaryPath() + 'bclinux-io-175';
+        Folder := TemporaryPath() + 'bclinux-io-' + DelChr(Format(CreateGuid()), '=', '{}-');
         WriteFile(Folder + '\a.xml');
-        WriteFile(Folder + '\b.xml');
+        WriteFile(Folder + '\b.XML');
         WriteFile(Folder + '\c.xml');
         WriteFile(Folder + '\d.txt');
         WriteFile(Folder + '\e.xml.bak');
@@ -53,7 +56,27 @@ codeunit 70075 "BC Linux Temp Folder IO"
             Found := Files.GetValue(i);
             Names += '|' + Found.Name;
         end;
-        LibraryAssert.IsTrue(Names.Contains('|a.xml') and Names.Contains('|b.xml') and Names.Contains('|c.xml'), 'file names ' + Names);
+        LibraryAssert.AreEqual('|a.xml|b.XML|c.xml', Names, 'GetFiles(*.xml) names in order');
+    end;
+
+    [Test]
+    procedure DirectoryGetFilesIsCaseInsensitiveAndSorted()
+    var
+        Directory: DotNet BcLinuxDirectory;
+        Folder: Text;
+        Files: DotNet Array;
+    begin
+        Folder := TemporaryPath() + 'bclinux-io-' + DelChr(Format(CreateGuid()), '=', '{}-');
+        WriteFile(Folder + '\c.xml');
+        WriteFile(Folder + '\B.xml');
+        WriteFile(Folder + '\a.XML');
+        WriteFile(Folder + '\d.txt');
+
+        Files := Directory.GetFiles(Folder, '*.xml');
+        LibraryAssert.AreEqual(3, Files.Length, 'Directory.GetFiles(*.xml) count');
+        LibraryAssert.IsTrue(Format(Files.GetValue(0)).EndsWith('a.XML'), 'first: ' + Format(Files.GetValue(0)));
+        LibraryAssert.IsTrue(Format(Files.GetValue(1)).EndsWith('B.xml'), 'second: ' + Format(Files.GetValue(1)));
+        LibraryAssert.IsTrue(Format(Files.GetValue(2)).EndsWith('c.xml'), 'third: ' + Format(Files.GetValue(2)));
     end;
 
     [Test]

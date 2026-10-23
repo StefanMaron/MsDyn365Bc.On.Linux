@@ -540,6 +540,15 @@ if [ -f /bc/tools/patcher/PatchNclTestPage.dll ]; then
         exit 1
     fi
     log_step "Patched Nav.Ncl.dll (DotNet path arguments and MediaSet file name under the user folder)"
+    # DotNet directory listings: case-insensitive patterns and name order, as on NTFS (issue #183).
+    # Same rule as above: a failure means BC moved the code, so stop instead of running without it.
+    LISTING_PATCH_OUT=$($PATCHER filelisting "$SERVICE_DIR/Microsoft.Dynamics.Nav.Ncl.dll" 2>&1) && LISTING_PATCH_RC=0 || LISTING_PATCH_RC=$?
+    echo "$LISTING_PATCH_OUT" | tail -2
+    if [ "$LISTING_PATCH_RC" != "0" ]; then
+        log_step "ERROR: file listing patch for Nav.Ncl.dll failed (exit $LISTING_PATCH_RC)"
+        exit 1
+    fi
+    log_step "Patched Nav.Ncl.dll (DotNet directory listings match case-insensitively and sort by name)"
     # Text behaviour a Windows tier has and Linux does not (issue #113). Both are constants
     # inside CoreLib's precompiled code, so no runtime hook can reach them; BC's own call
     # sites are rewritten in the IL instead.
