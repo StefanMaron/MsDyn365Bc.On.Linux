@@ -1213,7 +1213,7 @@ jobs:
             local apps=() tests=()
             mapfile -t apps < <(printf '%s\n' "$APP_DIRS" | sed '/^$/d; s|^|project/|')
             mapfile -t tests < <(printf '%s\n' "$TEST_APP_DIRS" | sed '/^$/d; s|^|project/|')
-            if [ "$ENABLE_CODE_ANALYZERS_ON_TEST_APPS" = "true" ] || [ ${#opts[@]} -eq 0 ]; then
+            if [ "$ENABLE_CODE_ANALYZERS_ON_TEST_APPS" = "true" ] || { [ ${#cops[@]} -eq 0 ] && [ -z "$ruleset" ]; }; then
               "${cmd[@]}" --package-cache symbols --out-dir build --log-dir compile-logs \
                 --name-from-dir "${cpu[@]}" "${apps[@]}" "${tests[@]}" -- "${opts[@]}" || return 1
             else
