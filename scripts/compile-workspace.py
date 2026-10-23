@@ -70,9 +70,19 @@ def read_app_id(app_file: str) -> str:
     return (info or {}).get("id", "")
 
 
-def dir_name(folder: str) -> str:
-    """The name the per-dir compile gives an app: build/<basename of its dir>.app."""
-    return os.path.basename(os.path.normpath(folder))
+def dir_name(folder: str, root: str | None = None, peers: list[str] = ()) -> str:
+    """The name the per-dir compile gives an app (scripts/app-artifact-name.sh): the
+    folder name, or the path relative to root with "/" as "-" when another dir of
+    the run (peers, relative to root) has the same folder name."""
+    if root is None:
+        return os.path.basename(os.path.normpath(folder))
+    rel = os.path.relpath(os.path.abspath(folder), os.path.abspath(root)).replace(os.sep, "/")
+    norm = lambda d: d.rstrip("/").removeprefix("./")
+    base = rel.rsplit("/", 1)[-1]
+    for other in map(norm, peers):
+        if other and other != rel and other.rsplit("/", 1)[-1] == base:
+            return rel.replace("/", "-")
+    return base
 
 
 def compile_wave(altool: list[str], wave: list[dict], package_cache: str, staging: str,
@@ -125,6 +135,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--name-from-dir", action="store_true",
                     help="name each .app in --out-dir after its dir, like the per-dir compile "
                          "(build/<dir basename>.app); default keeps altool's file name")
+    ap.add_argument("--name-root", help="with --name-from-dir: the consumer repo root; names "
+                    "then follow scripts/app-artifact-name.sh (path when folder names collide)")
+    ap.add_argument("--name-peer", action="append", default=[],
+                    help="with --name-root: every app and test app dir of the run, relative to it")
     ap.add_argument("--package-cache", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--max-cpu", type=int)
@@ -169,7 +183,8 @@ def main(argv: list[str]) -> int:
                 path = built.get(app["id"])
                 if path is None:
                     continue
-                target = dir_name(app["dir"]) + ".app" if args.name_from_dir \
+                target = dir_name(app["dir"], args.name_root, args.name_peer) + ".app" \
+                    if args.name_from_dir \
                     else os.path.basename(path)
                 shutil.move(path, os.path.join(args.out_dir, target))
         finally:

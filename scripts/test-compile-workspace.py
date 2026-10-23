@@ -153,6 +153,35 @@ class CompileWorkspaceTests(unittest.TestCase):
         self.run_script(self.test, flags=("--name-from-dir",))
         self.assertIn("Sales_Test.app", os.listdir(self.out))
 
+    def test_name_from_dir_uses_the_path_only_when_folder_names_collide(self):
+        # the same rule as scripts/app-artifact-name.sh, so publish finds the files
+        root = os.path.join(self.root, "repo")
+        a = self.app_in(root, "apps/Core/app", "Core")
+        b = self.app_in(root, "apps/Sales/app", "Sales", deps=("Core",))
+        t = self.app_in(root, "apps/Sales/test", "Sales Test", deps=("Sales",))
+        peers = ["apps/Core/app", "apps/Sales/app", "apps/Sales/test"]
+        flags = ["--name-from-dir", "--name-root", root]
+        for p in peers:
+            flags += ["--name-peer", p]
+        r = self.run_script(a, b, t, flags=tuple(flags))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(sorted(os.listdir(self.out)),
+                         ["apps-Core-app.app", "apps-Sales-app.app", "test.app"])
+        helper = os.path.join(os.path.dirname(SCRIPT), "app-artifact-name.sh")
+        for d, got in (("apps/Core/app", "apps-Core-app"), ("apps/Sales/test", "test")):
+            want = subprocess.run(["bash", "-c", f'. "{helper}"; app_artifact_name "$@"', "_", d, *peers],
+                                  capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(want, got)
+
+    def app_in(self, root, rel, name, deps=()):
+        folder = os.path.join(root, rel)
+        os.makedirs(folder)
+        with open(os.path.join(folder, "app.json"), "w") as f:
+            json.dump({"id": name.lower(), "name": name, "publisher": "P", "version": "1.0.0.0",
+                       "dependencies": [{"id": d.lower(), "name": d, "publisher": "P",
+                                         "version": "1.0.0.0"} for d in deps]}, f)
+        return folder
+
     def test_altool_dll_runs_through_dotnet(self):
         fake_dotnet_dir = os.path.join(self.root, "bin")
         os.mkdir(fake_dotnet_dir)

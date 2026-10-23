@@ -1225,20 +1225,23 @@ jobs:
             local apps=() tests=()
             mapfile -t apps < <(printf '%s\n' "$APP_DIRS" | sed '/^$/d; s|^|project/|')
             mapfile -t tests < <(printf '%s\n' "$TEST_APP_DIRS" | sed '/^$/d; s|^|project/|')
+            # the same file names as app_artifact_name, so publish and test find them
+            local naming=(--name-from-dir --name-root project) peer
+            for peer in "${ALL_APP_DIRS[@]}"; do [ -n "$peer" ] && naming+=(--name-peer "$peer"); done
             if [ "$ENABLE_CODE_ANALYZERS_ON_TEST_APPS" = "true" ] || { [ ${#cops[@]} -eq 0 ] && [ -z "$ruleset" ]; }; then
               "${cmd[@]}" --package-cache symbols --out-dir build --log-dir compile-logs \
-                --name-from-dir "${cpu[@]}" "${apps[@]}" "${tests[@]}" -- "${opts[@]}" || return 1
+                "${naming[@]}" "${cpu[@]}" "${apps[@]}" "${tests[@]}" -- "${opts[@]}" || return 1
             else
               if [ ${#apps[@]} -gt 0 ]; then
                 "${cmd[@]}" --package-cache symbols --out-dir build --log-dir compile-logs \
-                  --name-from-dir "${cpu[@]}" "${apps[@]}" -- "${opts[@]}" || return 1
+                  "${naming[@]}" "${cpu[@]}" "${apps[@]}" -- "${opts[@]}" || return 1
               fi
               local test_opts=()
               [ -n "$PREPROCESSOR_SYMBOLS" ] && test_opts+=(--define "$PREPROCESSOR_SYMBOLS")
               [ -n "${PROBE_JOINED:-}" ] && test_opts+=(--assemblyprobingpaths "$PROBE_JOINED")
               if [ ${#tests[@]} -gt 0 ]; then
                 "${cmd[@]}" --package-cache symbols --out-dir build --log-dir compile-logs \
-                  --name-from-dir "${cpu[@]}" "${tests[@]}" -- "${test_opts[@]}" || return 1
+                  "${naming[@]}" "${cpu[@]}" "${tests[@]}" -- "${test_opts[@]}" || return 1
               fi
             fi
             if [ ${#cops[@]} -gt 0 ] && grep -rqE "$ANALYZER_LOAD_FAIL_PATTERN" compile-logs; then
