@@ -268,7 +268,9 @@ on:
           app's in-repo dependencies to be listed in app_dirs/test_app_dirs.
           The apps are compiled in dependency waves (see
           scripts/compile-workspace.py for why). Analyzers, the ruleset and
-          preprocessor symbols apply as with the default compile.
+          preprocessor symbols apply as with the default compile;
+          enable_external_rulesets is rejected, as altool has no option
+          for it.
           Default false: one `alc` per app dir, as before.
         required: false
         type: boolean
@@ -1194,6 +1196,11 @@ jobs:
               case "$f" in
                 /analyzer:*) IFS=',' read -r -a parts <<< "${f#/analyzer:}"; cops+=("${parts[@]}") ;;
                 /ruleset:*) ruleset="${f#/ruleset:}" ;;
+                /enableexternalrulesets)
+                  # altool has no such option; dropping it would change the diagnostics
+                  echo "ERROR: enable_external_rulesets is not supported with workspace_compile" >&2
+                  echo "       (altool workspace compile has no option for it). Turn one off." >&2
+                  return 1 ;;
               esac
             done
             [ ${#cops[@]} -gt 0 ] && opts+=(--customanalyzers "$(IFS=,; echo "${cops[*]}")")
