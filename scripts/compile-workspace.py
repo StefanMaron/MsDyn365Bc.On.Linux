@@ -118,8 +118,14 @@ def main(argv: list[str]) -> int:
     ap.add_argument("dirs", nargs="+")
     args = ap.parse_args(argv)
 
+    dirs = []
+    for d in args.dirs:
+        if os.path.isfile(os.path.join(d, "app.json")):
+            dirs.append(d)
+        else:
+            print(f"skip {d} (no app.json)", file=sys.stderr)
     try:
-        apps = [read_app(d) for d in args.dirs]
+        apps = [read_app(d) for d in dirs]
         plan = waves(apps)
     except (OSError, ValueError) as exc:
         print(f"compile-workspace: {exc}", file=sys.stderr)

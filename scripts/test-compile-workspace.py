@@ -162,6 +162,23 @@ class CompileWorkspaceTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(len(self.altool_calls()), 1)
 
+    def test_dir_without_app_json_is_skipped(self):
+        # as the per-dir compile does ("skip <dir> (no app.json)")
+        empty = os.path.join(self.root, "apps", "Docs")
+        os.makedirs(empty)
+        r = self.run_script(self.core, empty)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"skip {empty} (no app.json)", r.stderr)
+        self.assertEqual([os.path.basename(p) for p in self.altool_calls()[0]["folders"]],
+                         ["Core"])
+
+    def test_only_dirs_without_app_json_compiles_nothing(self):
+        empty = os.path.join(self.root, "apps", "Docs")
+        os.makedirs(empty)
+        r = self.run_script(empty)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.altool_calls(), [])
+
     def test_dependency_cycle_fails_before_compiling(self):
         a = self.app("A", deps=("B",))
         b = self.app("B", deps=("A",))
