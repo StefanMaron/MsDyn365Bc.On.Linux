@@ -806,10 +806,17 @@ ALTER SERVER ROLE sysadmin ADD MEMBER [$BC_DB_USER];
 DB_EXISTS=$($SQLCMD -h -1 -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.databases WHERE name='$BC_DATABASE'" 2>/dev/null | tr -d '[:space:]')
 if [ "$DB_EXISTS" != "1" ]; then
     log_step "Restoring $BC_DATABASE database..."
-    BAK_PATH="$ARTIFACTS/app/$DB_FILE"
-    if [ ! -f "$BAK_PATH" ]; then
-        log_step "ERROR: Database backup not found at $BAK_PATH"
-        exit 1
+    if [ -n "${BC_DATABASE_BAK:-}" ]; then
+        # A path inside the sql container (e.g. baked into BC_SQL_IMAGE): SQL
+        # Server restores it, this container never sees the file.
+        BAK_PATH="$BC_DATABASE_BAK"
+        log_step "Restoring $BC_DATABASE from the prebuilt database $BC_DATABASE_BAK"
+    else
+        BAK_PATH="$ARTIFACTS/app/$DB_FILE"
+        if [ ! -f "$BAK_PATH" ]; then
+            log_step "ERROR: Database backup not found at $BAK_PATH"
+            exit 1
+        fi
     fi
 
     # Get logical file names (may contain spaces, e.g. "Demo Database BC (29-0)_Data")
@@ -898,6 +905,13 @@ fi
 # With tenantid set, real encryption works with Patch #26 disabled: measured on
 # BC 28.4, EnableEncryption succeeds and EncryptText returns 344 bytes of real
 # ciphertext instead of the pass-through proxy's 16.
+# A prebuilt database records the key file name of the machine that made it;
+# the file is not here, so every decrypt would fail. Forget it, so the Test
+# Runner Extension's install codeunit (or BC) creates a new key.
+if [ -n "${BC_DATABASE_BAK:-}" ]; then
+    $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET encryptionkeyfilename = NULL;" 2>/dev/null
+    log_step "Prebuilt database: cleared the tenant encryption key of the machine that built it"
+fi
 $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1;" 2>/dev/null
 $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenantid = N'default' WHERE ISNULL(tenantid, N'') = N'';" 2>/dev/null
 log_step "Tenant property row keyed to tenant 'default' (was blank; every tenant-property write matched 0 rows)"
