@@ -89,8 +89,13 @@ on:
           OUTSIDE the workspace (e.g. /var/cache/bc-artifacts) to share one
           cache across every job and runner on the host. Concurrent jobs are
           safe: download-artifacts.sh locks the directory, so the second job
-          waits and then hits the cache the first one wrote. Budget ~3.1 GB
-          per BC version kept.
+          waits and then hits the cache the first one wrote. Each BC version
+          and country gets its own subfolder, <dir>/<bc_version>-<bc_country>;
+          budget ~3.1 GB per version and country kept.
+
+          Caches from before the country was part of the folder name
+          (<dir>/<bc_version>) are not reused: each version downloads once
+          more, and the old folders can be deleted.
         required: false
         type: string
         default: ""
