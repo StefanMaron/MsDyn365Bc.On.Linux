@@ -107,7 +107,7 @@ select_dotnet_alc() {
     tfm=$(basename "$(dirname "$(dirname "$candidate")")")
     major=${tfm#net}
     major=${major%%.*}
-    if dotnet --list-runtimes 2>/dev/null | grep -q "Microsoft\.NETCore\.App ${major}\."; then
+    if dotnet --list-runtimes 2>/dev/null 9>&- | grep -q "Microsoft\.NETCore\.App ${major}\."; then
       echo "$candidate"
       return 0
     fi
@@ -127,18 +127,21 @@ AL_TOOL_DIR=""
 # corrupt compiler behind ("invalid compressed data to inflate"). A folder
 # without .complete is from an install that did not finish and is replaced.
 mkdir -p "$HOME/.al-tool-cache"
-# Commands run under the lock get so a process that outlives this
+# Commands run under the lock get 9>&- so a process that outlives this
 # script (e.g. a dotnet build server) does not keep holding it.
 exec 9> "$HOME/.al-tool-cache/.lock"
-flock 9
+if ! flock -w 600 9; then
+  echo "::error::waited 10 minutes for another AL compiler install on this machine ($HOME/.al-tool-cache/.lock)" >&2
+  exit 1
+fi
 
 # extract_nupkg <url> <dir>: download and unzip once; later calls reuse it
 extract_nupkg() {
   [ -f "$2/.complete" ] && return 0
   rm -rf "$2"
   mkdir -p "$2"
-  curl -fsSL "$1" -o "$2/pkg.zip" || return 1
-  unzip -q -o "$2/pkg.zip" -d "$2" || return 1
+  curl -fsSL --connect-timeout 30 --max-time 300 "$1" -o "$2/pkg.zip" 9>&- || return 1
+  unzip -q -o "$2/pkg.zip" -d "$2" 9>&- || return 1
   rm -f "$2/pkg.zip"
   touch "$2/.complete"
 }
@@ -149,10 +152,10 @@ extract_nupkg() {
 # `dotnet tool install` rejects it; fall through to extraction below.
 if dotnet tool install -g \
     Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-    --version "$AL_TOOL" >&2 \
+    --version "$AL_TOOL" >&2 9>&- \
 || dotnet tool update -g \
     Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-    --version "$AL_TOOL" >&2; then
+    --version "$AL_TOOL" >&2 9>&-; then
   echo "Installed as dotnet global tool" >&2
   ALC_PATH=$(find "$HOME/.dotnet/tools/.store/$LINUX_PKG" -type f -name alc 2>/dev/null | sort | tail -1)
   if [ -n "$ALC_PATH" ]; then

@@ -32,7 +32,13 @@ while [ \$# -gt 0 ]; do
 done
 exit 1
 EOF
-printf '#!/bin/bash\nexit 1\n' > "$work/bin/dotnet"
+# records the fds it inherits: a child that keeps the lock fd open would
+# hold the lock after the install exits
+cat > "$work/bin/dotnet" <<EOF
+#!/bin/bash
+ls /proc/\$\$/fd >> "$work/dotnet-fds"
+exit 1
+EOF
 chmod +x "$work/bin/curl" "$work/bin/dotnet"
 
 install() {
@@ -75,6 +81,12 @@ if [ "$(sha256sum "$cache/lib/net8.0/big.dll" | cut -d' ' -f1)" = "$sha" ]; then
   echo "ok   an install without its completion mark is replaced"
 else
   echo "FAIL an incomplete install was kept"; fail=1
+fi
+
+if [ -s "$work/dotnet-fds" ] && ! grep -qx 9 "$work/dotnet-fds"; then
+  echo "ok   child processes do not inherit the lock"
+else
+  echo "FAIL a child process inherited the lock fd"; fail=1
 fi
 
 install 7 17.0.34.45391 & install 8 16.0.1.1 & wait
