@@ -11,9 +11,19 @@ codeunit, test, line, and the expected and actual values Library Assert puts
 in its message. Then one row per test app, then each failure's message and AL
 call stack.
 
+Reads what every runner here writes: the altool runner's "AL Callstack:" body
+(also what run-tests-hybrid.py and merge-junit-batches.py pass through), the
+websocket runner's "Call stack:" body (tools/TestRunner), and the altool
+runner's "(codeunit run)" errors and "(codeunit)" rollups.
+
+Stays readable at any size: the details stop after MAX_DETAILS failures and the
+whole report stays under GitHub's 1 MiB step summary limit; annotations stop
+after GitHub's 10 errors per step, with a notice saying how many more failed.
+
 It only reports and always exits 0: whether the job passes is decided by the
-test step, not here. JUnit files with a DOCTYPE are refused, since they come
-from test code a pull request controls.
+test step, not here. A file that cannot be read is listed as unreadable and
+the others are still reported. JUnit files with a DOCTYPE are refused, since
+they come from test code a pull request controls.
 
 Tests: python3 scripts/test-junit-report.py
 """
@@ -28,6 +38,13 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
+MAX_DETAILS = 50          # failures with a details block; the table lists more
+MAX_TABLE_ROWS = 500      # rows in the failed-tests table
+MAX_ANNOTATIONS = 10      # GitHub shows 10 error annotations per step
+SUMMARY_BUDGET = 900_000  # bytes; GitHub rejects a step summary over 1 MiB
+
+# "AL Callstack:" (altool runner) or "Call stack:" (websocket runner)
+_STACK_HEADER = re.compile(r"^\s*(?:AL Callstack|Call stack):\s*$", re.M)
 # "Sales Test"(CodeUnit 50100).PostOrder line 24 - Sales Tests by Contoso version 1.0.0.0
 _FRAME = re.compile(r'^(?P<frame>"(?P<name>[^"]+)"\(CodeUnit (?P<id>\d+)\)\.\S+ line (?P<line>\d+))')
 # Assert.AreEqual failed. Expected:<1> (Integer). Actual:<0> (Integer). The item must ...
@@ -51,6 +68,7 @@ class Failure:
 @dataclass
 class AppResult:
     name: str
+    unreadable: str = ""
     passed: int = 0
     failed: int = 0
     skipped: int = 0
@@ -81,11 +99,12 @@ def _parse(path: Path) -> ET.Element:
 
 def _failure(case: ET.Element, node: ET.Element) -> Failure:
     codeunit = re.sub(r"^Codeunit\s+", "", case.get("classname", ""))
-    body = node.text or ""
-    message = (node.get("message") or body.split("AL Callstack:", 1)[0]).strip()
+    body = (node.text or "").replace("\r\n", "\n").replace("\r", "\n")
+    parts = _STACK_HEADER.split(body, maxsplit=1)
+    message = (node.get("message") or parts[0]).strip()
     frames, name, line = [], "", ""
-    if "AL Callstack:" in body:
-        for text in body.split("AL Callstack:", 1)[1].strip().splitlines():
+    if len(parts) == 2:
+        for text in parts[1].strip().splitlines():
             m = _FRAME.match(text.strip())
             if m:
                 frames.append(m.group("frame"))
@@ -117,17 +136,28 @@ def read_app(path: Path) -> AppResult:
 
 
 def read_apps(paths: list[Path]) -> list[AppResult]:
-    return [read_app(p) for p in sorted(paths)]
+    apps = []
+    for path in sorted(paths):
+        try:
+            apps.append(read_app(path))
+        except (OSError, ValueError, ET.ParseError) as exc:
+            name = path.name.removesuffix(".xml").removeprefix("junit-")
+            apps.append(AppResult(name, unreadable=" ".join(str(exc).split())))
+    return apps
 
 
 def _cell(text: str) -> str:
-    return html.escape(text).replace("|", "\\|")
+    return html.escape(" ".join(text.split())).replace("|", "\\|")
 
 
 def _value(v: str | None) -> str:
     if v is None:
         return ""
-    return f"`{_cell(v)}`" if v else "*(empty)*"
+    return f"<code>{_cell(v)}</code>" if v else "*(empty)*"
+
+
+def _codeunit(f: Failure) -> str:
+    return f"{f.codeunit_name} ({f.codeunit})" if f.codeunit_name else f"Codeunit {f.codeunit}"
 
 
 def _duration(seconds: float) -> str:
@@ -141,14 +171,15 @@ def markdown(apps: list[AppResult], title: str) -> str:
     passed = sum(a.passed for a in apps)
     failed = sum(a.failed for a in apps)
     skipped = sum(a.skipped for a in apps)
-    out = [f"## {'❌' if failed else '✅'} {title}: "
+    bad = any(a.unreadable for a in apps)
+    out = [f"## {'❌' if failed else '⚠️' if bad else '✅'} {title}: "
            f"{passed:,} passed, {failed:,} failed, {skipped:,} skipped", ""]
     failures = [(a, f) for a in apps for f in a.failures]
     if failures:
         out += ["### Failed tests", "",
                 "| Test app | Codeunit | Test | Line | Expected | Actual | Message |",
                 "|---|---|---|---:|---|---|---|"]
-        for a, f in failures:
+        for a, f in failures[:MAX_TABLE_ROWS]:
             codeunit = f"{f.codeunit} {f.codeunit_name}".strip()
             out.append(f"| {_cell(a.name)} | {_cell(codeunit)} | {_cell(f.method)} | {f.line} | "
                        f"{_value(f.expected)} | {_value(f.actual)} | {_cell(f.reason)} |")
@@ -156,34 +187,58 @@ def markdown(apps: list[AppResult], title: str) -> str:
     out += ["| | Test app | Passed | Failed | Skipped | Time |",
             "|---|---|---:|---:|---:|---:|"]
     for a in apps:
+        if a.unreadable:
+            out.append(f"| ⚠️ | {_cell(a.name)} | unreadable: {_cell(a.unreadable)} | | | |")
+            continue
         out.append(f"| {'❌' if a.failed else '✅'} | {_cell(a.name)} | {a.passed} | "
                    f"{a.failed} | {a.skipped} | {_duration(a.seconds)} |")
     out.append("")
+    shown = 0
     if failures:
         out += ["### Failure details", ""]
-        for a, f in failures:
-            head = f"{f.codeunit_name or 'Codeunit'} ({f.codeunit}) · {f.method}"
-            out += [f"<details><summary>❌ {html.escape(head)}</summary>", "",
-                    "<pre>" + html.escape(f.message, quote=False), ""]
-            out += [html.escape(frame, quote=False) for frame in f.callstack]
-            out += ["</pre>", "</details>", ""]
-    return "\n".join(out)
+        size = len("\n".join(out).encode("utf-8"))
+        for a, f in failures[:MAX_DETAILS]:
+            block = [f"<details><summary>❌ {html.escape(_codeunit(f))} · "
+                     f"{html.escape(f.method)}</summary>", "",
+                     "<pre>" + html.escape(f.message, quote=False), ""]
+            block += [html.escape(frame, quote=False) for frame in f.callstack]
+            block += ["</pre>", "</details>", ""]
+            size += len("\n".join(block).encode("utf-8")) + 1
+            if size > SUMMARY_BUDGET:
+                break
+            out += block
+            shown += 1
+    if len(failures) > shown or len(failures) > MAX_TABLE_ROWS:
+        out.append(f"{len(failures) - shown:,} more failed tests are not listed here; "
+                   "the JUnit files have all of them.")
+    text = "\n".join(out)
+    if len(text.encode("utf-8")) > SUMMARY_BUDGET:
+        text = text.encode("utf-8")[:SUMMARY_BUDGET].decode("utf-8", "ignore")
+        text += "\n\n… cut to stay under GitHub's summary limit.\n"
+    return text
 
 
 def annotations(apps: list[AppResult]) -> list[str]:
     def esc(text: str) -> str:
         return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
+    def esc_property(text: str) -> str:
+        return esc(text).replace(":", "%3A").replace(",", "%2C")
+
+    failures = [f for a in apps for f in a.failures]
     lines = []
+    for f in failures[:MAX_ANNOTATIONS]:
+        text = f.message
+        if f.expected is not None:
+            text = f"Expected {f.expected or '(empty)'}, actual {f.actual or '(empty)'}."
+            text += f" {f.reason}" if f.reason else ""
+        lines.append(f"::error title={esc_property(f'{_codeunit(f)} {f.method}')}::{esc(text)}")
+    if len(failures) > MAX_ANNOTATIONS:
+        lines.append(f"::notice::{len(failures) - MAX_ANNOTATIONS} more failed tests; "
+                     "see the job summary.")
     for a in apps:
-        for f in a.failures:
-            title = f"{f.codeunit_name or 'Codeunit'} ({f.codeunit}) {f.method}"
-            title = esc(title).replace(",", "%2C").replace("::", "%3A%3A")
-            text = f.message
-            if f.expected is not None:
-                text = f"Expected {f.expected or '(empty)'}, actual {f.actual or '(empty)'}."
-                text += f" {f.reason}" if f.reason else ""
-            lines.append(f"::error title={title}::{esc(text)}")
+        if a.unreadable:
+            lines.append(f"::warning::junit-report: {esc(a.name)} is unreadable: {esc(a.unreadable)}")
     return lines
 
 
@@ -193,11 +248,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--summary-file", help="append the Markdown here (e.g. $GITHUB_STEP_SUMMARY)")
     ap.add_argument("files", nargs="*", type=Path)
     args = ap.parse_args(argv)
-    try:
-        apps = read_apps([f for f in args.files if f.is_file()])
-    except (OSError, ValueError, ET.ParseError) as exc:
-        print(f"::warning::junit-report: {exc}")
-        return 0
+    apps = read_apps([f for f in args.files if f.is_file()])
     md = markdown(apps, args.title)
     if args.summary_file:
         with open(args.summary_file, "a", encoding="utf-8") as fh:
