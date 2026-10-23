@@ -17,6 +17,10 @@ using System.Linq;
 ///    .NET argument in NavDotNet.GetDotNetObjectFromNavObject; the text results there go through
 ///    <c>NewDotNetPathArgument</c>, which turns '\' into '/' when the text starts with the
 ///    session's user folder. Text that is not under the user folder is passed on unchanged.
+///  * Text that DotNet returns to AL goes the other way: a path under the user folder comes back
+///    with '\' after the user folder, as on Windows (<c>NewDotNetPathResult</c>, called first in
+///    NavDotNet.GetNavObjectFromDotNetObject). The separator right after the user folder stays as
+///    Path.Combine wrote it, so a path DotNet returns equals TemporaryPath() + 'sub\a.xml'.
 ///  * MediaSet.ImportFile takes the file name with Path.GetFileName, which on Linux only splits
 ///    at '/', so "TEMP\name.jpg" was stored as the name. Windows splits at both. The calls in
 ///    NavMediaSet go through <c>FileNameAtEitherSeparator</c>.
@@ -30,6 +34,7 @@ static class PatchTempPath
     const string HelperType = "<BcLinuxWindowsText>";
     const string ArgumentHelper = "NewDotNetPathArgument";
     const string FileNameHelper = "FileNameAtEitherSeparator";
+    const string ResultHelper = "NewDotNetPathResult";
     static readonly string[] TextTypes = { "NavStringValue" };
 
     public static int Run(string inputPath, string outputPath)
@@ -75,6 +80,30 @@ static class PatchTempPath
             }
             if (arguments > 0) IlHelpers.LengthenShortBranches(convert.Body);
 
+            var toNav = dotNet.Methods.FirstOrDefault(m => m.Name == "GetNavObjectFromDotNetObject" && m.HasBody
+                && m.Parameters.Count == 2 && m.Parameters[1].ParameterType.FullName == "System.Object");
+            if (toNav == null)
+            {
+                Console.WriteLine("ERROR: NavDotNet.GetNavObjectFromDotNetObject not found; the DotNet path result fix cannot be applied");
+                return 1;
+            }
+            int results = 0, alreadyResults = 0;
+            var firstIns = toNav.Body.Instructions[0];
+            if (firstIns.Operand is MethodReference firstRef && firstRef.Name == ResultHelper
+                || toNav.Body.Instructions.Take(4).Any(i => i.Operand is MethodReference r && r.Name == ResultHelper))
+                alreadyResults++;
+            else
+            {
+                var resultHelper = AddResultHelper(module);
+                var il = toNav.Body.GetILProcessor();
+                var valueParam = toNav.Parameters[1];
+                il.InsertBefore(firstIns, il.Create(OpCodes.Ldarg, valueParam));
+                il.InsertBefore(firstIns, il.Create(OpCodes.Call, resultHelper));
+                il.InsertBefore(firstIns, il.Create(OpCodes.Starg, valueParam));
+                IlHelpers.LengthenShortBranches(toNav.Body);
+                results++;
+            }
+
             var mediaSet = module.GetTypes().Where(t => OuterName(t) == "NavMediaSet").ToList();
             foreach (var type in mediaSet)
                 foreach (var method in type.Methods.Where(m => m.HasBody))
@@ -94,14 +123,14 @@ static class PatchTempPath
                     if (grown) IlHelpers.LengthenShortBranches(method.Body);
                 }
 
-            Console.WriteLine($"Patched {arguments} DotNet text argument(s) and {fileNames} MediaSet GetFileName call(s) in {Path.GetFileName(inputPath)} "
-                + $"(already patched: {alreadyArguments} and {alreadyFileNames})");
+            Console.WriteLine($"Patched {arguments} DotNet text argument(s), {results} DotNet result conversion and {fileNames} MediaSet GetFileName call(s) in {Path.GetFileName(inputPath)} "
+                + $"(already patched: {alreadyArguments}, {alreadyResults} and {alreadyFileNames})");
             if (arguments + alreadyArguments == 0 || fileNames + alreadyFileNames == 0)
             {
                 Console.WriteLine("ERROR: a place to patch was not found; BC moved the code and the temp path fix is not applied");
                 return 1;
             }
-            if (arguments + fileNames == 0) return 0;
+            if (arguments + fileNames + results == 0) return 0;
             if (inputPath == outputPath) assembly.Write(); else assembly.Write(outputPath);
             return 0;
         }
@@ -184,6 +213,104 @@ static class PatchTempPath
         il.Append(il.Create(OpCodes.Ldc_I4, (int)'\\'));
         il.Append(il.Create(OpCodes.Ldc_I4, (int)'/'));
         il.Append(il.Create(OpCodes.Callvirt, replace));
+        il.Append(il.Create(OpCodes.Ret));
+        il.Append(unchanged);
+        il.Append(il.Create(OpCodes.Ret));
+        return m;
+    }
+
+    /// <summary>
+    /// static object NewDotNetPathResult(object value): when value is text that starts with the
+    /// session's user folder, every '/' after the user folder (and the separator right after it)
+    /// becomes '\\'; anything else is returned as it came.
+    /// </summary>
+    static MethodDefinition AddResultHelper(ModuleDefinition module)
+    {
+        var holder = Holder(module);
+        var existing = holder.Methods.FirstOrDefault(m => m.Name == ResultHelper);
+        if (existing != null) return existing;
+
+        var currentThread = module.GetTypes().First(t => t.FullName == "Microsoft.Dynamics.Nav.Runtime.NavCurrentThread");
+        var session = module.GetTypes().First(t => t.FullName == "Microsoft.Dynamics.Nav.Runtime.NavSession");
+        var getSession = module.ImportReference(currentThread.Methods.First(m => m.Name == "get_Session"));
+        var getUserFolder = module.ImportReference(session.Methods.First(m => m.Name == "get_UserFolder"));
+        var isNullOrEmpty = module.ImportReference(typeof(string).GetMethod("IsNullOrEmpty", new[] { typeof(string) }));
+        var startsWith = module.ImportReference(typeof(string).GetMethod("StartsWith", new[] { typeof(string), typeof(StringComparison) }));
+        var getLength = module.ImportReference(typeof(string).GetMethod("get_Length"));
+        var getChars = module.ImportReference(typeof(string).GetMethod("get_Chars", new[] { typeof(int) }));
+        var substring1 = module.ImportReference(typeof(string).GetMethod("Substring", new[] { typeof(int) }));
+        var substring2 = module.ImportReference(typeof(string).GetMethod("Substring", new[] { typeof(int), typeof(int) }));
+        var replace = module.ImportReference(typeof(string).GetMethod("Replace", new[] { typeof(char), typeof(char) }));
+        var concat = module.ImportReference(typeof(string).GetMethod("Concat", new[] { typeof(string), typeof(string) }));
+
+        var m = new MethodDefinition(ResultHelper,
+            MethodAttributes.Static | MethodAttributes.Assembly | MethodAttributes.HideBySig, module.TypeSystem.Object);
+        m.Parameters.Add(new ParameterDefinition("value", ParameterAttributes.None, module.TypeSystem.Object));
+        holder.Methods.Add(m);
+        m.Body.InitLocals = true;
+        m.Body.Variables.Add(new VariableDefinition(module.TypeSystem.String));          // 0: s
+        m.Body.Variables.Add(new VariableDefinition(module.ImportReference(session)));  // 1: session
+        m.Body.Variables.Add(new VariableDefinition(module.TypeSystem.String));          // 2: folder
+        m.Body.Variables.Add(new VariableDefinition(module.TypeSystem.Int32));           // 3: keep
+
+        var il = m.Body.GetILProcessor();
+        var unchanged = il.Create(OpCodes.Ldarg_0);
+        il.Append(il.Create(OpCodes.Ldarg_0));
+        il.Append(il.Create(OpCodes.Isinst, module.TypeSystem.String));
+        il.Append(il.Create(OpCodes.Stloc_0));
+        il.Append(il.Create(OpCodes.Ldloc_0));
+        il.Append(il.Create(OpCodes.Brfalse, unchanged));
+        il.Append(il.Create(OpCodes.Call, getSession));
+        il.Append(il.Create(OpCodes.Stloc_1));
+        il.Append(il.Create(OpCodes.Ldloc_1));
+        il.Append(il.Create(OpCodes.Brfalse, unchanged));
+        il.Append(il.Create(OpCodes.Ldloc_1));
+        il.Append(il.Create(OpCodes.Callvirt, getUserFolder));
+        il.Append(il.Create(OpCodes.Stloc_2));
+        il.Append(il.Create(OpCodes.Ldloc_2));
+        il.Append(il.Create(OpCodes.Call, isNullOrEmpty));
+        il.Append(il.Create(OpCodes.Brtrue, unchanged));
+        il.Append(il.Create(OpCodes.Ldloc_0));
+        il.Append(il.Create(OpCodes.Ldloc_2));
+        il.Append(il.Create(OpCodes.Ldc_I4_4)); // StringComparison.Ordinal
+        il.Append(il.Create(OpCodes.Callvirt, startsWith));
+        il.Append(il.Create(OpCodes.Brfalse, unchanged));
+        // keep = folder.Length; if (keep < s.Length && (s[keep] == '/' || s[keep] == '\\')) keep++;
+        var convert = il.Create(OpCodes.Ldloc_0);
+        var bump = il.Create(OpCodes.Ldloc_3);
+        il.Append(il.Create(OpCodes.Ldloc_2));
+        il.Append(il.Create(OpCodes.Callvirt, getLength));
+        il.Append(il.Create(OpCodes.Stloc_3));
+        il.Append(il.Create(OpCodes.Ldloc_3));
+        il.Append(il.Create(OpCodes.Ldloc_0));
+        il.Append(il.Create(OpCodes.Callvirt, getLength));
+        il.Append(il.Create(OpCodes.Bge, convert));
+        il.Append(il.Create(OpCodes.Ldloc_0));
+        il.Append(il.Create(OpCodes.Ldloc_3));
+        il.Append(il.Create(OpCodes.Callvirt, getChars));
+        il.Append(il.Create(OpCodes.Ldc_I4, (int)'/'));
+        il.Append(il.Create(OpCodes.Beq, bump));
+        il.Append(il.Create(OpCodes.Ldloc_0));
+        il.Append(il.Create(OpCodes.Ldloc_3));
+        il.Append(il.Create(OpCodes.Callvirt, getChars));
+        il.Append(il.Create(OpCodes.Ldc_I4, (int)'\\'));
+        il.Append(il.Create(OpCodes.Bne_Un, convert));
+        il.Append(bump);
+        il.Append(il.Create(OpCodes.Ldc_I4_1));
+        il.Append(il.Create(OpCodes.Add));
+        il.Append(il.Create(OpCodes.Stloc_3));
+        // return s.Substring(0, keep) + s.Substring(keep).Replace('/', '\\');
+        il.Append(convert);
+        il.Append(il.Create(OpCodes.Ldc_I4_0));
+        il.Append(il.Create(OpCodes.Ldloc_3));
+        il.Append(il.Create(OpCodes.Callvirt, substring2));
+        il.Append(il.Create(OpCodes.Ldloc_0));
+        il.Append(il.Create(OpCodes.Ldloc_3));
+        il.Append(il.Create(OpCodes.Callvirt, substring1));
+        il.Append(il.Create(OpCodes.Ldc_I4, (int)'/'));
+        il.Append(il.Create(OpCodes.Ldc_I4, (int)'\\'));
+        il.Append(il.Create(OpCodes.Callvirt, replace));
+        il.Append(il.Create(OpCodes.Call, concat));
         il.Append(il.Create(OpCodes.Ret));
         il.Append(unchanged);
         il.Append(il.Create(OpCodes.Ret));

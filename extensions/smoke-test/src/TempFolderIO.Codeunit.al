@@ -57,6 +57,9 @@ codeunit 70075 "BC Linux Temp Folder IO"
             Found := Files.GetValue(i);
             Names += '|' + Found.Name;
         end;
+        Found := Files.GetValue(0);
+        LibraryAssert.AreEqual(Folder + '\a.xml', Found.FullName, 'FileInfo.FullName');
+        LibraryAssert.AreEqual(Folder, Dir.FullName, 'DirectoryInfo.FullName');
         LibraryAssert.AreEqual('|a.xml|b.XML|c.xml', Names, 'GetFiles(*.xml) names in order');
     end;
 
@@ -75,9 +78,9 @@ codeunit 70075 "BC Linux Temp Folder IO"
 
         Files := Directory.GetFiles(Folder, '*.xml');
         LibraryAssert.AreEqual(3, Files.Length, 'Directory.GetFiles(*.xml) count');
-        LibraryAssert.IsTrue(Format(Files.GetValue(0)).EndsWith('a.XML'), 'first: ' + Format(Files.GetValue(0)));
-        LibraryAssert.IsTrue(Format(Files.GetValue(1)).EndsWith('B.xml'), 'second: ' + Format(Files.GetValue(1)));
-        LibraryAssert.IsTrue(Format(Files.GetValue(2)).EndsWith('c.xml'), 'third: ' + Format(Files.GetValue(2)));
+        LibraryAssert.AreEqual(Folder + '\a.XML', Format(Files.GetValue(0)), 'first');
+        LibraryAssert.AreEqual(Folder + '\B.xml', Format(Files.GetValue(1)), 'second');
+        LibraryAssert.AreEqual(Folder + '\c.xml', Format(Files.GetValue(2)), 'third');
     end;
 
     // .NET walks a tree folder by folder: the entries of a folder first, then its subfolders in
@@ -100,11 +103,11 @@ codeunit 70075 "BC Linux Temp Folder IO"
 
         Files := Directory.GetFiles(Folder, '*.xml', Option.AllDirectories);
         LibraryAssert.AreEqual(5, Files.Length, 'count');
-        LibraryAssert.IsTrue(Format(Files.GetValue(0)).EndsWith('a.xml'), '1: ' + Format(Files.GetValue(0)));
-        LibraryAssert.IsTrue(Format(Files.GetValue(1)).EndsWith('z.xml'), '2: ' + Format(Files.GetValue(1)));
-        LibraryAssert.IsTrue(Format(Files.GetValue(2)).EndsWith('sub1/M.xml') or Format(Files.GetValue(2)).EndsWith('sub1\M.xml'), '3: ' + Format(Files.GetValue(2)));
-        LibraryAssert.IsTrue(Format(Files.GetValue(3)).EndsWith('sub2/a.xml') or Format(Files.GetValue(3)).EndsWith('sub2\a.xml'), '4: ' + Format(Files.GetValue(3)));
-        LibraryAssert.IsTrue(Format(Files.GetValue(4)).EndsWith('deeper/k.xml') or Format(Files.GetValue(4)).EndsWith('deeper\k.xml'), '5: ' + Format(Files.GetValue(4)));
+        LibraryAssert.AreEqual(Folder + '\a.xml', Format(Files.GetValue(0)), '1');
+        LibraryAssert.AreEqual(Folder + '\z.xml', Format(Files.GetValue(1)), '2');
+        LibraryAssert.AreEqual(Folder + '\sub1\M.xml', Format(Files.GetValue(2)), '3');
+        LibraryAssert.AreEqual(Folder + '\sub2\a.xml', Format(Files.GetValue(3)), '4');
+        LibraryAssert.AreEqual(Folder + '\sub1\deeper\k.xml', Format(Files.GetValue(4)), '5');
     end;
 
     [Test]
