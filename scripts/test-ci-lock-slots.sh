@@ -76,9 +76,7 @@ take 2 "$work/job5"
 BC_CI_LOCK_TOKEN=$(sed -n 's/^BC_CI_LOCK_TOKEN=//p' "$work/fixed.env") lock release bc-linux > /dev/null
 
 # nothing reads a slot number, so only the project name and ports are written
-for f in "$work"/job5; do
-  grep -q '^BC_CI_SLOT=' "$f.env" && bad "BC_CI_SLOT is written but unused" || ok "no unused BC_CI_SLOT"
-done
+grep -q '^BC_CI_SLOT=' "$work/job5.env" && bad "BC_CI_SLOT is written but unused" || ok "no unused BC_CI_SLOT"
 
 # a timeout names every held lease, not just the last one tried
 release "$work/job5"; rm -f "$work/job5.env"
