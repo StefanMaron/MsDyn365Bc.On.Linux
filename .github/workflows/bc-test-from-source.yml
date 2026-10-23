@@ -1361,9 +1361,11 @@ jobs:
           # via the upload-artifact step below OR via their own steps that read
           # the workspace path. AL-Go's AnalyzeTests post-step looks for these
           # files at consumer-controlled paths, so we put them somewhere
-          # predictable: ../build/junit-<app_artifact_name of the test app dir>.xml relative to
-          # the bc-linux working dir (= ./build/junit-* relative to the
-          # consumer's repo root after the workflow finishes).
+          # predictable: ../build/junit-<name>.xml relative to the bc-linux
+          # working dir, where <name> is the test app's folder name, or its
+          # path when another app dir shares that folder name (see
+          # scripts/app-artifact-name.sh). That is ./build/junit-* relative to the
+          # consumer's repo root after the workflow finishes.
           mkdir -p ../build
           # The loop reads the app list from fd 3, not stdin: a runner child
           # that reads stdin (al runtests, docker compose exec without -T)
