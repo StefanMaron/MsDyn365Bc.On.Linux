@@ -370,6 +370,9 @@ steps:
 
   - bash: |
       set -e
+      # shellcheck disable=SC1091
+      . "$(Agent.BuildDirectory)/bc-linux/scripts/app-artifact-name.sh"
+      read -ra ALL_APP_DIRS <<< "$(APP_DIRS) $(TEST_APP_DIRS)"
       bash "$(Agent.BuildDirectory)/bc-linux/scripts/workflow-summary.sh" begin COMPILE "Compile AL apps"
       SYMBOLS="$(Pipeline.Workspace)/symbols"
       BUILD_DIR="$(Pipeline.Workspace)/build"
@@ -435,7 +438,7 @@ steps:
         [ -f "$src/app.json" ] || { echo "skip $src (no app.json)" >&2; return 0; }
         mkdir -p "$src/.alpackages"
         cp "$SYMBOLS"/*.app "$src/.alpackages/" 2>/dev/null || true
-        local out="$BUILD_DIR/$(basename "$src").app"
+        local out="$BUILD_DIR/$(app_artifact_name "$src" "${ALL_APP_DIRS[@]}").app"
         echo ">>> Compiling $src → $out"
         # Remaining args ($@) are the analyzer flag fragments — may be empty.
         if [ "$#" -gt 0 ]; then
@@ -503,6 +506,9 @@ steps:
 
   - bash: |
       set -e
+      # shellcheck disable=SC1091
+      . "$(Agent.BuildDirectory)/bc-linux/scripts/app-artifact-name.sh"
+      read -ra ALL_APP_DIRS <<< "$(APP_DIRS) $(TEST_APP_DIRS)"
       bash "$(Agent.BuildDirectory)/bc-linux/scripts/workflow-summary.sh" begin PUBLISH "Publish AL apps"
       AUTH="BCRUNNER:Admin123!"
       DEV="http://localhost:7049/BC/dev"
@@ -518,7 +524,7 @@ steps:
       PUBLISHED_COUNT=0
       for d in $(APP_DIRS) $(TEST_APP_DIRS); do
         [ -z "$d" ] && continue
-        app="$BUILD_DIR/$(basename "$d").app"
+        app="$BUILD_DIR/$(app_artifact_name "$d" "${ALL_APP_DIRS[@]}").app"
         [ -f "$app" ] || { echo "missing: $app"; exit 1; }
         echo ">>> Publishing $app"
         bc_publish_app "$app" "$DEV" "$AUTH" || exit 1
@@ -538,12 +544,15 @@ steps:
   # need the faster hybrid path and are pinned to BC 28+.
   - bash: |
       set -e
+      # shellcheck disable=SC1091
+      . "$(Agent.BuildDirectory)/bc-linux/scripts/app-artifact-name.sh"
+      read -ra ALL_APP_DIRS <<< "$(APP_DIRS) $(TEST_APP_DIRS)"
       bash "$(Agent.BuildDirectory)/bc-linux/scripts/workflow-summary.sh" begin TESTS "Run AL tests"
       cd "$(Agent.BuildDirectory)/bc-linux"
       TESTS_TOTAL=0; TESTS_PASSED=0; TESTS_FAILED=0; CODEUNITS_TOTAL=0
       for d in $(TEST_APP_DIRS); do
         [ -z "$d" ] && continue
-        app="$(Pipeline.Workspace)/build/$(basename "$d").app"
+        app="$(Pipeline.Workspace)/build/$(app_artifact_name "$d" "${ALL_APP_DIRS[@]}").app"
         [ -f "$app" ] || { echo "skip: $app (not built)"; continue; }
         base=$(basename "$app")
         echo "=== Running tests in $base ==="

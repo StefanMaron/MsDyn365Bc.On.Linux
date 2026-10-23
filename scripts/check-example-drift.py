@@ -64,6 +64,12 @@ PAIRS = {
 # intentionally do less than the reusable workflow, not a place to silence
 # the check.
 EXEMPT = {
+    "scripts/sort-apps-for-publish.py":
+        "orders the extra_symbols_artifact_name dependencies before they are "
+        "published; the examples have no third-party dependency input",
+    "scripts/compile-workspace.py":
+        "only used with the opt-in workspace_compile input; the examples "
+        "show the default per-dir compile",
     "scripts/run-tests-altool.py":
         "the altool runner is opt-in and BC 28+ only; the examples "
         "deliberately show the websocket runner, which works everywhere",

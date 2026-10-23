@@ -53,6 +53,8 @@ reproducible CI runs swap it for a release tag once one exists
 | `preprocessor_symbols` | no | `""` | Comma-separated preprocessor symbols for `/preprocessorsymbols` (e.g. `"BC27PLUS,BC28PLUS"`). |
 | `extra_apps` | no | `""` | Newline-separated names of Microsoft apps from the BC artifact to keep installed with their dependencies, although none of your apps declares them, e.g. `Tests-TestLibraries` and `Data Archive`, which a Windows container has installed. A name that matches no app fails the job. Each app not already installed costs a publish at boot (Tests-TestLibraries: about 17s). Also on `bc-test-prebuilt.yml`. |
 | `assembly_probing_paths` | no | `""` | Newline-separated folders passed to the compiler as `/assemblyprobingpaths`, for OnPrem apps that declare DotNet assemblies from the BC artifact. Relative entries resolve against the job's artifact folder and may use globs, e.g. `platform/Test Assemblies` (Newtonsoft.Json) and `platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/*/Service` (NavUserAccount, Timer, NavEtwReceiver, ClientExtensions). Subfolders are searched too. |
+| `workspace_compile` | no | `false` | Opt-in. Compile all app dirs with `altool workspace compile` in dependency waves instead of one `alc` per dir; much faster with many apps. Needs AL 17+ (on BC 27 set `al_tool_version: latest`). Apps committed in an app dir's `.alpackages` are not seen, and `enable_external_rulesets` is rejected. |
+| `workspace_compile_max_cpu` | no | `0` | With `workspace_compile`: compiler processes per wave (`--maxcpucount`). `0` = number of processors. |
 | `runtime_version` | no | `""` (no rewrite) | Opt-in rewrite of `app.json` `runtime` before compile. Blank (default): your declared runtime is respected as-is. `auto`: derive from bc_version (BC 27 → `16.0`, BC 28 → `17.0`). Explicit value: patch to exactly that. |
 | `runner_image` | no | public ghcr.io tag | Override the bc-runner image |
 | `bc_linux_ref` | no | `master` | Git ref of `MsDyn365Bc.On.Linux` to check out for scripts |
@@ -66,6 +68,13 @@ reproducible CI runs swap it for a release tag once one exists
 | `enable_external_rulesets` | no | `false` | Required when your `ruleset_file` includes remote rulesets via `includedRuleSets[].path` URL entries (e.g. shared org-wide rulesets). |
 | `enable_code_analyzers_on_test_apps` | no | `false` | When `false` (default — matches AL-Go), test app compiles skip the analyzer flags entirely. Production apps still get them. |
 | `artifact_name_suffix` | no | `""` | When set, uploads the compiled production + test `.app` files as a workflow-run artifact named `bc-linux-build-<suffix>`, staged under `Apps/`/`TestApps/` subfolders. Blank (default) skips the upload entirely. Must be unique within the run if you call this workflow more than once (e.g. a matrix). |
+
+Each compiled app is named after its folder: `src/MyApp` becomes
+`MyApp.app` (and `junit-MyApp.xml` for a test app). When two dirs in
+`app_dirs` / `test_app_dirs` end in the same folder name, as in
+`apps/Sales/app` and `apps/Shipping/app`, those two are named after the
+whole path instead (`apps-Sales-app.app`, `apps-Shipping-app.app`) so
+neither overwrites the other.
 
 ### Inputs (prebuilt)
 
