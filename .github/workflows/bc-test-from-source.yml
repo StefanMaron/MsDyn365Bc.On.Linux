@@ -1371,11 +1371,9 @@ jobs:
           # that reads stdin (al runtests, docker compose exec without -T)
           # would otherwise eat the rest of the list, the loop would stop
           # after the first app and the job would still go green.
-          APPS_EXPECTED=0
           APPS_RUN=0
           while IFS= read -r d <&3; do
             [ -z "$d" ] && continue
-            APPS_EXPECTED=$((APPS_EXPECTED + 1))
             app="../build/$(app_artifact_name "$d" "${ALL_APP_DIRS[@]}").app"
             [ -f "$app" ] || { echo "skip: $app (not built)"; continue; }
             APPS_RUN=$((APPS_RUN + 1))
@@ -1465,8 +1463,8 @@ jobs:
           done 3<<< "$TEST_APP_DIRS"
           APPS_LISTED=$(grep -c . <<< "$TEST_APP_DIRS" || true)
           echo "Test apps: $APPS_RUN run of $APPS_LISTED listed"
-          if [ "$APPS_EXPECTED" -ne "$APPS_LISTED" ]; then
-            echo "ERROR: the test loop saw $APPS_EXPECTED of $APPS_LISTED test apps; it ended early"
+          if [ "$APPS_RUN" -lt "$APPS_LISTED" ]; then
+            echo "ERROR: only $APPS_RUN of $APPS_LISTED test apps ran; see the skip lines above, or the loop ended early"
             exit 1
           fi
           bash scripts/workflow-summary.sh count tests_total    "$TESTS_TOTAL"
