@@ -289,9 +289,10 @@ pid=$$"
             echo "" >&2
             echo "         Jobs sharing a docker host share the compose project name and the" >&2
             echo "         host ports, so they cannot run at once (issue #24). To run them in" >&2
-            echo "         parallel, give each job its own stack with the reusable workflow's" >&2
-            echo "         'instance_slot' input, and make sure the machine has the RAM for" >&2
-            echo "         two BC service tiers." >&2
+            echo "         parallel, let jobs take a free stack with the reusable workflow's" >&2
+            echo "         'instance_slots' input (or give each job its own 'instance_slot')," >&2
+            echo "         and make sure the machine has the RAM for one BC service tier and" >&2
+            echo "         one SQL Server per stack." >&2
             return 2
         fi
 
