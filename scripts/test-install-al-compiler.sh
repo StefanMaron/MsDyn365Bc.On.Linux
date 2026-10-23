@@ -36,8 +36,9 @@ printf '#!/bin/bash\nexit 1\n' > "$work/bin/dotnet"
 chmod +x "$work/bin/curl" "$work/bin/dotnet"
 
 install() {
-  HOME="$work/home" PATH="$work/bin:$PATH" \
-    bash "$here/install-al-compiler.sh" 28.3 17.0.34.45391 > "$work/out.$1" 2> "$work/err.$1"
+  mkdir -p "$work/job$1"
+  HOME="$work/home" PATH="$work/bin:$PATH" RUNNER_TEMP="$work/job$1" \
+    bash "$here/install-al-compiler.sh" 28.3 "${2:-17.0.34.45391}" > "$work/out.$1" 2> "$work/err.$1"
 }
 
 mkdir -p "$work/home"
@@ -74,6 +75,16 @@ if [ "$(sha256sum "$cache/lib/net8.0/big.dll" | cut -d' ' -f1)" = "$sha" ]; then
   echo "ok   an install without its completion mark is replaced"
 else
   echo "FAIL an incomplete install was kept"; fail=1
+fi
+
+install 7 17.0.34.45391 & install 8 16.0.1.1 & wait
+w7=$(sed -n 's/^AL_BIN_DIR=//p' "$work/out.7")
+w8=$(sed -n 's/^AL_BIN_DIR=//p' "$work/out.8")
+if [ -n "$w7" ] && [ "$w7" != "$w8" ] \
+   && grep -q 17.0.34.45391 "$w7/AL" && grep -q 16.0.1.1 "$w8/AL"; then
+  echo "ok   each job gets its own AL wrapper"
+else
+  echo "FAIL two jobs share one AL wrapper ($w7, $w8)"; fail=1
 fi
 
 exit $fail

@@ -67,8 +67,10 @@ echo "Installing AL compiler $AL_TOOL" >&2
 LINUX_PKG="microsoft.dynamics.businesscentral.development.tools.linux"
 BASE_PKG="microsoft.dynamics.businesscentral.development.tools"
 
-AL_BIN_DIR="$HOME/.al-bin"
-mkdir -p "$AL_BIN_DIR"
+# One wrapper dir per install: the job runs `AL compile` after the lock
+# below is released, so a shared wrapper could be repointed to another
+# job's compiler version in between.
+AL_BIN_DIR=$(mktemp -d "${RUNNER_TEMP:-${AGENT_TEMPDIRECTORY:-${TMPDIR:-/tmp}}}/al-bin.XXXXXX")
 
 # Every install path below converges on one of these two wrapper shapes,
 # so downstream steps (`AL compile ...`) never need to know whether alc
@@ -78,14 +80,16 @@ mkdir -p "$AL_BIN_DIR"
 # wrappers strip it.
 write_native_wrapper() {
   # $1 = dir containing a self-contained, executable `alc`
-  printf '#!/bin/bash\n[ "$1" = compile ] && shift\nexec "%s/alc" "$@"\n' "$1" > "$AL_BIN_DIR/AL"
-  chmod +x "$AL_BIN_DIR/AL"
+  printf '#!/bin/bash\n[ "$1" = compile ] && shift\nexec "%s/alc" "$@"\n' "$1" > "$AL_BIN_DIR/AL.tmp"
+  chmod +x "$AL_BIN_DIR/AL.tmp"
+  mv -f "$AL_BIN_DIR/AL.tmp" "$AL_BIN_DIR/AL"
 }
 
 write_dotnet_wrapper() {
   # $1 = full path to a framework-dependent alc.dll
-  printf '#!/bin/bash\n[ "$1" = compile ] && shift\nexec dotnet "%s" "$@"\n' "$1" > "$AL_BIN_DIR/AL"
-  chmod +x "$AL_BIN_DIR/AL"
+  printf '#!/bin/bash\n[ "$1" = compile ] && shift\nexec dotnet "%s" "$@"\n' "$1" > "$AL_BIN_DIR/AL.tmp"
+  chmod +x "$AL_BIN_DIR/AL.tmp"
+  mv -f "$AL_BIN_DIR/AL.tmp" "$AL_BIN_DIR/AL"
 }
 
 # Pick the alc.dll build whose target framework matches an installed
@@ -123,6 +127,8 @@ AL_TOOL_DIR=""
 # corrupt compiler behind ("invalid compressed data to inflate"). A folder
 # without .complete is from an install that did not finish and is replaced.
 mkdir -p "$HOME/.al-tool-cache"
+# Commands run under the lock get so a process that outlives this
+# script (e.g. a dotnet build server) does not keep holding it.
 exec 9> "$HOME/.al-tool-cache/.lock"
 flock 9
 
