@@ -65,7 +65,7 @@ reproducible CI runs swap it for a release tag once one exists
 | `ruleset_file` | no | `""` | Local path or `https://` URL to a JSON ruleset file. Note: AL compiler accepts JSON only, not the classic Visual Studio XML `.ruleset` format. |
 | `enable_external_rulesets` | no | `false` | Required when your `ruleset_file` includes remote rulesets via `includedRuleSets[].path` URL entries (e.g. shared org-wide rulesets). |
 | `enable_code_analyzers_on_test_apps` | no | `false` | When `false` (default — matches AL-Go), test app compiles skip the analyzer flags entirely. Production apps still get them. |
-| `artifact_name_suffix` | no | `""` | When set, uploads the compiled production + test `.app` files as a workflow-run artifact named `bc-linux-build-<suffix>`, staged under `Apps/`/`TestApps/` subfolders. Blank (default) skips the upload entirely. Must be unique within the run if you call this workflow more than once (e.g. a matrix). |
+| `artifact_name_suffix` | no | `""` | When set, uploads the compiled production + test `.app` files as a workflow-run artifact named `bc-linux-build-<suffix>`, staged under `Apps/`/`TestApps/` subfolders. Blank (default) skips the upload entirely. When set, it is also appended to the test result and container log artifacts (`junit-test-results-<bc_version>-<suffix>`, `bc-container-log-<bc_version>-<suffix>`); blank keeps those names unchanged. Must be unique within the run if you call this workflow more than once (e.g. a matrix). |
 
 ### Inputs (prebuilt)
 

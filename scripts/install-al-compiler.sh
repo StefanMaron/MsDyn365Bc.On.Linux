@@ -67,8 +67,10 @@ echo "Installing AL compiler $AL_TOOL" >&2
 LINUX_PKG="microsoft.dynamics.businesscentral.development.tools.linux"
 BASE_PKG="microsoft.dynamics.businesscentral.development.tools"
 
-AL_BIN_DIR="$HOME/.al-bin"
-mkdir -p "$AL_BIN_DIR"
+# One wrapper dir per install: the job runs `AL compile` after the lock
+# below is released, so a shared wrapper could be repointed to another
+# job's compiler version in between.
+AL_BIN_DIR=$(mktemp -d "${RUNNER_TEMP:-${AGENT_TEMPDIRECTORY:-${TMPDIR:-/tmp}}}/al-bin.XXXXXX")
 
 # Every install path below converges on one of these two wrapper shapes,
 # so downstream steps (`AL compile ...`) never need to know whether alc
@@ -78,14 +80,16 @@ mkdir -p "$AL_BIN_DIR"
 # wrappers strip it.
 write_native_wrapper() {
   # $1 = dir containing a self-contained, executable `alc`
-  printf '#!/bin/bash\n[ "$1" = compile ] && shift\nexec "%s/alc" "$@"\n' "$1" > "$AL_BIN_DIR/AL"
-  chmod +x "$AL_BIN_DIR/AL"
+  printf '#!/bin/bash\n[ "$1" = compile ] && shift\nexec "%s/alc" "$@"\n' "$1" > "$AL_BIN_DIR/AL.tmp"
+  chmod +x "$AL_BIN_DIR/AL.tmp"
+  mv -f "$AL_BIN_DIR/AL.tmp" "$AL_BIN_DIR/AL"
 }
 
 write_dotnet_wrapper() {
   # $1 = full path to a framework-dependent alc.dll
-  printf '#!/bin/bash\n[ "$1" = compile ] && shift\nexec dotnet "%s" "$@"\n' "$1" > "$AL_BIN_DIR/AL"
-  chmod +x "$AL_BIN_DIR/AL"
+  printf '#!/bin/bash\n[ "$1" = compile ] && shift\nexec dotnet "%s" "$@"\n' "$1" > "$AL_BIN_DIR/AL.tmp"
+  chmod +x "$AL_BIN_DIR/AL.tmp"
+  mv -f "$AL_BIN_DIR/AL.tmp" "$AL_BIN_DIR/AL"
 }
 
 # Pick the alc.dll build whose target framework matches an installed
@@ -103,7 +107,7 @@ select_dotnet_alc() {
     tfm=$(basename "$(dirname "$(dirname "$candidate")")")
     major=${tfm#net}
     major=${major%%.*}
-    if dotnet --list-runtimes 2>/dev/null | grep -q "Microsoft\.NETCore\.App ${major}\."; then
+    if dotnet --list-runtimes 2>/dev/null 9>&- | grep -q "Microsoft\.NETCore\.App ${major}\."; then
       echo "$candidate"
       return 0
     fi
@@ -118,16 +122,40 @@ select_dotnet_alc() {
 
 AL_TOOL_DIR=""
 
+# Jobs on one machine under one user share ~/.al-tool-cache. Without the lock,
+# two jobs download and unzip into the same folder at once and leave a
+# corrupt compiler behind ("invalid compressed data to inflate"). A folder
+# without .complete is from an install that did not finish and is replaced.
+mkdir -p "$HOME/.al-tool-cache"
+# Commands run under the lock get 9>&- so a process that outlives this
+# script (e.g. a dotnet build server) does not keep holding it.
+exec 9> "$HOME/.al-tool-cache/.lock"
+if ! flock -w 600 9; then
+  echo "::error::waited 10 minutes for another AL compiler install on this machine ($HOME/.al-tool-cache/.lock)" >&2
+  exit 1
+fi
+
+# extract_nupkg <url> <dir>: download and unzip once; later calls reuse it
+extract_nupkg() {
+  [ -f "$2/.complete" ] && return 0
+  rm -rf "$2"
+  mkdir -p "$2"
+  curl -fsSL --connect-timeout 30 --max-time 300 "$1" -o "$2/pkg.zip" 9>&- || return 1
+  unzip -q -o "$2/pkg.zip" -d "$2" 9>&- || return 1
+  rm -f "$2/pkg.zip"
+  touch "$2/.complete"
+}
+
 # --- Attempt 1: dotnet global tool (BC 27 / v16 packages ship with
 # DotnetToolSettings.xml and install correctly this way). BC 28+ dropped
 # the tool manifest — the package is now a plain library nupkg and
 # `dotnet tool install` rejects it; fall through to extraction below.
 if dotnet tool install -g \
     Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-    --version "$AL_TOOL" >&2 \
+    --version "$AL_TOOL" >&2 9>&- \
 || dotnet tool update -g \
     Microsoft.Dynamics.BusinessCentral.Development.Tools.Linux \
-    --version "$AL_TOOL" >&2; then
+    --version "$AL_TOOL" >&2 9>&-; then
   echo "Installed as dotnet global tool" >&2
   ALC_PATH=$(find "$HOME/.dotnet/tools/.store/$LINUX_PKG" -type f -name alc 2>/dev/null | sort | tail -1)
   if [ -n "$ALC_PATH" ]; then
@@ -144,12 +172,9 @@ fi
 if [ -z "$AL_TOOL_DIR" ]; then
   echo "Looking for alc in the $LINUX_PKG nupkg" >&2
   EXTRACT_DIR="$HOME/.al-tool-cache/$AL_TOOL"
-  mkdir -p "$EXTRACT_DIR"
-  if curl -fsSL \
+  if extract_nupkg \
       "https://api.nuget.org/v3-flatcontainer/${LINUX_PKG}/${AL_TOOL}/${LINUX_PKG}.${AL_TOOL}.nupkg" \
-      -o "$EXTRACT_DIR/pkg.zip"; then
-    unzip -q -o "$EXTRACT_DIR/pkg.zip" -d "$EXTRACT_DIR"
-    rm -f "$EXTRACT_DIR/pkg.zip"
+      "$EXTRACT_DIR"; then
     ALC_PATH=$(find "$EXTRACT_DIR" -type f -name alc 2>/dev/null | sort | tail -1)
     if [ -n "$ALC_PATH" ]; then
       AL_TOOL_DIR=$(dirname "$ALC_PATH")
@@ -167,12 +192,9 @@ fi
 if [ -z "$AL_TOOL_DIR" ]; then
   echo "$LINUX_PKG has no alc binary for $AL_TOOL; trying the base package $BASE_PKG" >&2
   BASE_EXTRACT_DIR="$HOME/.al-tool-cache/${AL_TOOL}-base"
-  mkdir -p "$BASE_EXTRACT_DIR"
-  if curl -fsSL \
+  if extract_nupkg \
       "https://api.nuget.org/v3-flatcontainer/${BASE_PKG}/${AL_TOOL}/${BASE_PKG}.${AL_TOOL}.nupkg" \
-      -o "$BASE_EXTRACT_DIR/pkg.zip"; then
-    unzip -q -o "$BASE_EXTRACT_DIR/pkg.zip" -d "$BASE_EXTRACT_DIR"
-    rm -f "$BASE_EXTRACT_DIR/pkg.zip"
+      "$BASE_EXTRACT_DIR"; then
     ALC_DLL=$(select_dotnet_alc "$BASE_EXTRACT_DIR")
     if [ -n "$ALC_DLL" ]; then
       AL_TOOL_DIR=$(dirname "$ALC_DLL")

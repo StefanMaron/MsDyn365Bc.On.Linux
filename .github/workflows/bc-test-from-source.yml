@@ -89,8 +89,13 @@ on:
           OUTSIDE the workspace (e.g. /var/cache/bc-artifacts) to share one
           cache across every job and runner on the host. Concurrent jobs are
           safe: download-artifacts.sh locks the directory, so the second job
-          waits and then hits the cache the first one wrote. Budget ~3.1 GB
-          per BC version kept.
+          waits and then hits the cache the first one wrote. Each BC version
+          and country gets its own subfolder, <dir>/<bc_version>-<bc_country>;
+          budget ~3.1 GB per version and country kept.
+
+          Caches from before the country was part of the folder name
+          (<dir>/<bc_version>) are not reused: each version downloads once
+          more, and the old folders can be deleted.
         required: false
         type: string
         default: ""
@@ -493,6 +498,11 @@ on:
           value that is unique per call. bc-linux does not invent one for
           you — it uses whatever string you pass verbatim, so make sure
           it's artifact-name-safe.
+
+          The suffix is also appended to the test result and container log
+          artifacts: junit-test-results-<bc_version>-<suffix> and
+          bc-container-log-<bc_version>-<suffix>. Blank keeps their old
+          names.
         required: false
         type: string
         default: ""
@@ -547,8 +557,10 @@ jobs:
       # Where the extracted artifacts live. Job-level so the download step and
       # docker-compose's bind mount cannot disagree about the path — which is
       # what makes a warm cache visible to the container instead of being
-      # re-downloaded into it.
-      BC_ARTIFACTS_DIR: ${{ inputs.artifact_cache_dir != '' && inputs.artifact_cache_dir || format('{0}/artifact-cache', github.workspace) }}/${{ inputs.bc_version }}
+      # re-downloaded into it. Keyed on the country too: one folder per
+      # version held one country, and a second country in the same run
+      # cleared it as a cache miss while the first job was still using it.
+      BC_ARTIFACTS_DIR: ${{ inputs.artifact_cache_dir != '' && inputs.artifact_cache_dir || format('{0}/artifact-cache', github.workspace) }}/${{ inputs.bc_version }}-${{ inputs.bc_country }}
       # Job-level for the same reason as BC_ARTIFACTS_DIR: the host downloads
       # from this URL and stamps the directory with it, and the container reads
       # that stamp. Step-scoped, only the download step saw it, so the container
@@ -569,6 +581,12 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ inputs.instance_slot == 0 && 'bc-linux' || format('bc-linux-{0}', inputs.instance_slot) }}
 
     steps:
+      # A self-hosted runner keeps its workspace between jobs. Without this, a
+      # previous job's extra-symbols/ (another project's third-party apps) or
+      # build/ would be merged into, published and tested with this one.
+      - name: Clear the previous job's files
+        run: rm -rf extra-symbols symbols build compile-logs bc-logs artifact-staging
+
       # ─── Phase 1: cheap parallel-friendly checkouts ──────────────────
       - name: Checkout your repo
         uses: actions/checkout@v4
@@ -1477,7 +1495,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-test-results-${{ inputs.bc_version }}
+          name: junit-test-results-${{ inputs.bc_version }}${{ inputs.artifact_name_suffix != '' && format('-{0}', inputs.artifact_name_suffix) || '' }}
           path: build/junit-*.xml
           if-no-files-found: ignore
           retention-days: 14
@@ -1521,13 +1539,13 @@ jobs:
           echo "=== last 500 lines of bc-1 ==="
           tail -500 "../bc-logs/bc-${{ inputs.bc_version }}.log"
           echo ""
-          echo "Full container log uploaded as artifact bc-container-log-${{ inputs.bc_version }} ($(wc -l < "../bc-logs/bc-${{ inputs.bc_version }}.log") lines)."
+          echo "Full container log uploaded as artifact bc-container-log-${{ inputs.bc_version }}${{ inputs.artifact_name_suffix != '' && format('-{0}', inputs.artifact_name_suffix) || '' }} ($(wc -l < "../bc-logs/bc-${{ inputs.bc_version }}.log") lines)."
 
       - name: Upload full BC container log (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: bc-container-log-${{ inputs.bc_version }}
+          name: bc-container-log-${{ inputs.bc_version }}${{ inputs.artifact_name_suffix != '' && format('-{0}', inputs.artifact_name_suffix) || '' }}
           path: bc-logs/
           retention-days: 14
           if-no-files-found: ignore

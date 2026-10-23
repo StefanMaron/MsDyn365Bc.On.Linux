@@ -89,8 +89,13 @@ on:
           OUTSIDE the workspace (e.g. /var/cache/bc-artifacts) to share one
           cache across every job and runner on the host. Concurrent jobs are
           safe: download-artifacts.sh locks the directory, so the second job
-          waits and then hits the cache the first one wrote. Budget ~3.1 GB
-          per BC version kept.
+          waits and then hits the cache the first one wrote. Each BC version
+          and country gets its own subfolder, <dir>/<bc_version>-<bc_country>;
+          budget ~3.1 GB per version and country kept.
+
+          Caches from before the country was part of the folder name
+          (<dir>/<bc_version>) are not reused: each version downloads once
+          more, and the old folders can be deleted.
         required: false
         type: string
         default: ""
@@ -219,8 +224,10 @@ jobs:
       # Where the extracted artifacts live. Job-level so the download step and
       # docker-compose's bind mount cannot disagree about the path — which is
       # what makes a warm cache visible to the container instead of being
-      # re-downloaded into it.
-      BC_ARTIFACTS_DIR: ${{ inputs.artifact_cache_dir != '' && inputs.artifact_cache_dir || format('{0}/artifact-cache', github.workspace) }}/${{ inputs.bc_version }}
+      # re-downloaded into it. Keyed on the country too: one folder per
+      # version held one country, and a second country in the same run
+      # cleared it as a cache miss while the first job was still using it.
+      BC_ARTIFACTS_DIR: ${{ inputs.artifact_cache_dir != '' && inputs.artifact_cache_dir || format('{0}/artifact-cache', github.workspace) }}/${{ inputs.bc_version }}-${{ inputs.bc_country }}
       # ─── Which container stack on this machine is ours (issue #24) ───
       # Slot 0 keeps the historical identity exactly: project `bc-linux`, the
       # default ports from docker-compose.yml, and therefore the same named
