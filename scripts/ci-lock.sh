@@ -45,6 +45,9 @@
 # slot k is <base>-k, the same names a fixed instance_slot uses, so fixed and
 # pooled jobs on one machine never share a stack. It writes the slot, the
 # compose project name and the ports that go with them to $GITHUB_ENV.
+# N is how many BC stacks the machine has the RAM for. Under snapshot mode
+# (COMPOSE_FILE names docker-compose.snapshot.yml) bc uses host networking,
+# so only slot 0 is used.
 #
 # `acquire` blocks until the lease is free, then prints — and, under GitHub
 # Actions, appends to $GITHUB_ENV — the token that `release` needs:
@@ -120,6 +123,15 @@ describe_holder() {
     printf '    since   : %s (%ss ago)\n' "$(lease_field "$lease" started)" "${age:-?}"
 }
 
+describe_holders() {
+    local n
+    for n in "$@"; do
+        [ -f "$LOCK_DIR/$n.lease" ] || continue
+        printf '  %s\n' "'$n'"
+        describe_holder "$LOCK_DIR/$n.lease"
+    done
+}
+
 lease_age() {
     local mtime now
     mtime=$(lease_mtime "$1")
@@ -158,7 +170,7 @@ start_heartbeat() {
 }
 
 cmd_acquire() {
-    local name="$1"; shift
+    local mode="$1" name="$2"; shift 2
     local wait_minutes=30 max_hold_minutes=120 slots=0
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -169,9 +181,24 @@ cmd_acquire() {
         esac
     done
 
+    if [ "$mode" = slot ]; then
+        case "$slots" in
+            ''|*[!0-9]*|0*) echo "ci-lock: --slots needs a whole number of at least 1, got '$slots'" >&2; usage ;;
+        esac
+        # Snapshot mode puts bc on host networking, where the slot's port
+        # offsets do nothing: a second stack would collide on the ports.
+        case "${COMPOSE_FILE:-}" in
+            *docker-compose.snapshot.yml*)
+                if [ "$slots" -gt 1 ]; then
+                    echo "ci-lock: snapshot mode (host networking) — using slot 0 only, not a pool of $slots"
+                    slots=1
+                fi ;;
+        esac
+    fi
+
     # A plain acquire is a pool of one: just <name>.
     local -a names=("$name")
-    if [ "$slots" -gt 0 ]; then
+    if [ "$mode" = slot ]; then
         names=()
         local k
         for (( k = 0; k < slots; k++ )); do
@@ -220,7 +247,7 @@ pid=$$"
                 fi
                 echo "BC_CI_LOCK_TOKEN=$token"
                 [ -n "${GITHUB_ENV:-}" ] && echo "BC_CI_LOCK_TOKEN=$token" >> "$GITHUB_ENV"
-                [ "$slots" -gt 0 ] && write_slot_env "$slot" "$name"
+                [ "$mode" = slot ] && write_slot_env "$slot" "$name"
                 return 0
             fi
 
@@ -256,9 +283,9 @@ pid=$$"
 
         now=$(date +%s)
         if [ "$now" -ge "$deadline" ]; then
-            echo "ci-lock: ERROR — timed out after ${wait_minutes} min waiting for '$name'." >&2
+            echo "ci-lock: ERROR — timed out after ${wait_minutes} min waiting for $(IFS=,; echo "${names[*]}")." >&2
             echo "         The BC/SQL container stack on this machine is in use by another job:" >&2
-            describe_holder "$lease" >&2
+            describe_holders "${names[@]}" >&2
             echo "" >&2
             echo "         Jobs sharing a docker host share the compose project name and the" >&2
             echo "         host ports, so they cannot run at once (issue #24). To run them in" >&2
@@ -271,13 +298,14 @@ pid=$$"
         if [ "$announced" -eq 0 ]; then
             if [ "${#names[@]}" -gt 1 ]; then
                 echo "ci-lock: all ${#names[@]} stacks ($(IFS=,; echo "${names[*]}")) are held — waiting up to ${wait_minutes} min."
+                describe_holders "${names[@]}"
             else
                 echo "ci-lock: '$name' is held — waiting up to ${wait_minutes} min."
                 describe_holder "$lease"
             fi
             announced=1
         elif [ $(( now - last_progress )) -ge 60 ]; then
-            echo "ci-lock:   still waiting for '$name' ($(( (now - start) / 60 )) min elapsed)"
+            echo "ci-lock:   still waiting for $(IFS=,; echo "${names[*]}") ($(( (now - start) / 60 )) min elapsed)"
             last_progress=$now
         fi
         sleep "$POLL_SECONDS"
@@ -291,7 +319,6 @@ write_slot_env() {
     echo "ci-lock: slot $slot → project $project, dev endpoint $(( 7049 + off ))"
     [ -n "${GITHUB_ENV:-}" ] || return 0
     {
-        echo "BC_CI_SLOT=$slot"
         echo "COMPOSE_PROJECT_NAME=$project"
         echo "SQL_PORT=$(( 11433 + off ))"
         echo "BC_DEV_PORT=$(( 7049 + off ))"
@@ -374,10 +401,8 @@ main() {
     chmod 1777 "$LOCK_DIR" 2>/dev/null || true
 
     case "$cmd" in
-        acquire) cmd_acquire "$name" "$@" ;;
-        acquire-slot)
-            case " $* " in *" --slots "*) ;; *) echo "ci-lock: acquire-slot needs --slots N" >&2; usage ;; esac
-            cmd_acquire "$name" "$@" ;;
+        acquire) cmd_acquire plain "$name" "$@" ;;
+        acquire-slot) cmd_acquire slot "$name" "$@" ;;
         release) cmd_release "$name" ;;
         status)  cmd_status  "$name" ;;
         *) echo "ci-lock: unknown command '$cmd'" >&2; usage ;;
