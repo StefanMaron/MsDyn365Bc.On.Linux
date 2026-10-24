@@ -179,6 +179,19 @@ on:
         required: false
         type: string
         default: ""
+      test_report:
+        description: >-
+          Write a test report to the job summary after the tests: a table of
+          the failed tests (test app, codeunit, test, line, expected and
+          actual value), one row per test app, and each failure's message and
+          AL call stack, plus an error annotation per failed test (up to 10,
+          GitHub's limit per step). Built from the JUnit files by
+          scripts/junit-report.py; it never fails the job. Set false if you
+          already publish the JUnit files with a reporter of your own (e.g.
+          dorny/test-reporter) and don't want the failures twice.
+        required: false
+        type: boolean
+        default: true
       bc_linux_ref:
         description: "Git ref of aldevtools/MsDyn365Bc.On.Linux to check out for scripts"
         required: false
@@ -551,6 +564,21 @@ jobs:
           path: build/junit-*.xml
           if-no-files-found: ignore
           retention-days: 14
+
+
+      # Which tests failed and why, on the run page and as annotations on the pull
+      # request, instead of somewhere in the job log. Reporting only: the test step
+      # decides whether the job passes. The script always exits 0; continue-on-error
+      # only guards against a missing python3.
+      - name: Test report
+        if: always() && inputs.test_report
+        continue-on-error: true
+        env:
+          REPORT_TITLE: "Tests (BC ${{ inputs.bc_version }})"
+        run: |
+          shopt -s nullglob
+          python3 bc-linux/scripts/junit-report.py --title "$REPORT_TITLE" \
+            --summary-file "$GITHUB_STEP_SUMMARY" build/junit-*.xml
 
       - name: Workflow timing summary + telemetry
         if: always()

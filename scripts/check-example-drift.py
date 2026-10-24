@@ -64,6 +64,9 @@ PAIRS = {
 # intentionally do less than the reusable workflow, not a place to silence
 # the check.
 EXEMPT = {
+    "scripts/junit-report.py":
+        "writes the GitHub job summary and annotations; the examples upload "
+        "the JUnit files for the consumer's own reporter",
     "scripts/run-tests-altool.py":
         "the altool runner is opt-in and BC 28+ only; the examples "
         "deliberately show the websocket runner, which works everywhere",

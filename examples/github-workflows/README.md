@@ -67,10 +67,15 @@ reproducible CI runs swap it for a release tag once one exists
 | `enable_code_analyzers_on_test_apps` | no | `false` | When `false` (default — matches AL-Go), test app compiles skip the analyzer flags entirely. Production apps still get them. |
 | `artifact_name_suffix` | no | `""` | When set, uploads the compiled production + test `.app` files as a workflow-run artifact named `bc-linux-build-<suffix>`, staged under `Apps/`/`TestApps/` subfolders. Blank (default) skips the upload entirely. Must be unique within the run if you call this workflow more than once (e.g. a matrix). |
 
+| `test_report` | no | `true` | Writes a test report to the job summary after the tests (failed tests with codeunit, line, expected and actual value; one row per test app; each failure's message and AL call stack) and an error annotation per failed test, up to 10. Built from the JUnit files by `scripts/junit-report.py`; never fails the job. Set `false` if you already publish the JUnit files with your own reporter. |
+
 ### Inputs (prebuilt)
 
 Same as above but with `app_files` / `test_app_files` (paths to `.app`
 files) instead of `app_dirs` / `test_app_dirs`, and no `al_tool_version`.
+
+The inlined templates below upload the JUnit files but write no test report;
+add a step running `scripts/junit-report.py` if you want one.
 
 ### Secrets (both flavours)
 

@@ -638,6 +638,13 @@ procedure. Pass cases are self-closing. Failures use `<failure
 message="...">` with the BC error message in the attribute and the full
 AL call stack in the body. Skipped tests use `<skipped/>`.
 
+`scripts/junit-report.py` turns those files into the job summary's test report
+and the per-failure annotations (input `test_report`, on by default). It parses
+the call stack after `AL Callstack:` (altool runner) and after `Call stack:`
+(websocket runner, frames indented); a new runner or a changed body format has
+to keep one of those headers, or extend `_STACK_HEADER` and add a fixture to
+`scripts/test-junit-report.py`.
+
 ### Things not to break
 
 - **The altool hub's empty-name result is a rollup, not a test.** BC's
